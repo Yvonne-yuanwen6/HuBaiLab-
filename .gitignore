@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# Abaqus outputs
+*.odb
+*.abq
+*.lck
+*.prt
+*.sim
+*.sta
+*.msg
+*.dat
+*.pac
+*.stt
+*.log
+
+# Generated outputs (keep folder structure via .gitkeep)
+output/**/*
+!output/**/.gitkeep
+
+# Large CAD meshes (regenerate locally)
+*.stl
+*.step
+*.stp
+*.x_t
+*.x_b
