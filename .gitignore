@@ -8,26 +8,31 @@ __pycache__/
 .vscode/
 .idea/
 
-# Abaqus outputs
-*.odb
-*.abq
+# output/ 只保留目录骨架（README + .gitkeep），实际算例数据本地生成或打包分发
+output/**/*
+!output/README.md
+!output/**/.gitkeep
+
+# Abaqus 求解过程中的临时文件
 *.lck
-*.prt
-*.sim
 *.sta
 *.msg
-*.dat
+*.prt
+*.sim
 *.pac
 *.stt
 *.log
+*.abq
 
-# Generated outputs (keep folder structure via .gitkeep)
-output/**/*
-!output/**/.gitkeep
-
-# Large CAD meshes (regenerate locally)
+# 大文件（不纳入 Git，请打包分享）
 *.stl
 *.step
 *.stp
 *.x_t
 *.x_b
+*.odb
+
+# Windows / 编辑器临时文件
+*~
+._*
+.DS_Store

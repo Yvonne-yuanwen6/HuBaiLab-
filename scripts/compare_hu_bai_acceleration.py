@@ -13,9 +13,14 @@ import re
 import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HU_BAI_EXPORT = os.path.join(_ROOT, "output", "export", "hu_bai")
-HU_BAI_JOBS = os.path.join(_ROOT, "output", "abaqus", "jobs", "hu_bai")
-HU_BAI_POST = os.path.join(_ROOT, "output", "abaqus", "post", "hu_bai")
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from src.paths import ABAQUS_JOBS, ABAQUS_POST, EXPORT_ROOT
+
+HU_BAI_EXPORT = str(EXPORT_ROOT)
+HU_BAI_JOBS = str(ABAQUS_JOBS)
+HU_BAI_POST = str(ABAQUS_POST)
 
 FULL_SLUG = "hu_bai_bcc_af2q0_L20_3x3x3_solid_cad_f"
 PILOT_SLUG = "hu_bai_bcc_af2q0_L20_3x3x3_solid_cad_p"

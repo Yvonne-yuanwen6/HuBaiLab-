@@ -33,7 +33,7 @@ $cases = @(
     @{ Q = 1.5; Variant = "sfbls_af2q1p5" }
 )
 
-$cadDir = Join-Path $Root "output\cad\solidworks\hu_bai"
+$cadDir = Join-Path $Root "output\cad"
 
 function Test-LayeredStepReady {
     param([string]$Variant)

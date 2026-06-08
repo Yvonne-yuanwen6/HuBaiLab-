@@ -6,7 +6,7 @@ fuse into one MANIFOLD_SOLID_BREP. Faster than per-strut or z-layer fuse.
 
   py -3 scripts/run_hu_bai_bcc_unitcell_array_step_fuse.py --cells 3
   py -3 scripts/run_hu_bai_bcc_unitcell_array_step_fuse.py --cells 4 --Q 0
-  py -3 scripts/validate_step_solidworks.py output/cad/solidworks/hu_bai/*_array.step
+  py -3 scripts/validate_step_solidworks.py output/cad/*_array.step
 """
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ if dups:
     print(f"  Deduped beams: {dups}", flush=True)
 
 slug = f"hu_bai_{gen.variant_name.lower()}_L{int(L)}_{n}x{n}x{n}"
-cad_dir = os.path.join(CAD_ROOT, "hu_bai")
+cad_dir = str(CAD_ROOT)
 os.makedirs(cad_dir, exist_ok=True)
 step_path = os.path.join(cad_dir, f"{slug}_solid_array.step")
 manifest_path = os.path.join(cad_dir, f"{slug}_array_sw_manifest.json")

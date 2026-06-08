@@ -94,7 +94,7 @@ powershell -File scripts/submit_hu_bai_bcc_solid_cad_compression.ps1 -Cells 3 -F
 
 ```powershell
 py -3 scripts/run_hu_bai_bcc_unitcell_array_step_fuse.py --cells 4 --Q 0
-py -3 scripts/validate_step_solidworks.py output/cad/solidworks/hu_bai/*_array.step
+py -3 scripts/validate_step_solidworks.py output/cad/*_array.step
 ```
 
 备选：`run_hu_bai_bcc_layered_step_fuse.py`（z 层分层，较慢）。勿用一次性 monolithic fuse（512+ primitive，超 gmsh 256 上限）。
@@ -115,4 +115,4 @@ Windows **GDI 句柄**用尽，常见于：同时打开多个 STEP、反复打�
 
 ---
 
-`output/cad/solidworks/hu_bai/verify_fuse_1.step` 为单胞解析 STEP，可在 Abaqus 中试导 STEP 验证流程；4×4×4 请用 `run_hu_bai_bcc_unitcell_array_step_fuse.py` 或 z 层脚本生成 STEP，或 B31 INP。
+`output/cad/` 下的单胞 STEP 可在 Abaqus 中试导验证流程；4×4×4 请用 `run_hu_bai_bcc_unitcell_array_step_fuse.py` 或 z 层脚本生成 STEP，或 B31 INP。

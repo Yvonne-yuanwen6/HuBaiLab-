@@ -5,7 +5,7 @@ Detects orphan pipe/cylinder construction geometry (many PRODUCT entries,
 few solids) that causes SolidWorks to open dozens of windows and crash.
 
   py -3 scripts/validate_step_solidworks.py path/to/model.step
-  py -3 scripts/validate_step_solidworks.py output/cad/solidworks/hu_bai/*.step
+  py -3 scripts/validate_step_solidworks.py output/cad/*.step
 """
 
 from __future__ import annotations

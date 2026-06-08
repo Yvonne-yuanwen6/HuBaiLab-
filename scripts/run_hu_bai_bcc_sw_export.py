@@ -33,7 +33,7 @@ from src.export.beam_utils import dedupe_beams
 from src.export.export_sw import export_lattice_stl_concat, export_lattice_xt
 from src.generator.hu_bai_bcc import HuBaiLatticeGenerator
 from src.mesh.solid_union import analyze_cylinder_overlaps, export_union_stl
-from src.paths import CAD_ROOT, ensure_output_dirs
+from src.paths import CAD_ROOT, EXPORT_ROOT, ensure_output_dirs
 
 ensure_output_dirs()
 
@@ -116,8 +116,8 @@ if beam_dups:
 variant = gen.variant_name.lower()
 slug = f"hu_bai_{variant}_L{int(L)}_{NX}x{NY}x{NZ}"
 
-cad_dir = os.path.join(CAD_ROOT, "hu_bai")
-export_dir = os.path.join(_ROOT, "output", "export", "hu_bai", slug)
+cad_dir = str(CAD_ROOT)
+export_dir = os.path.join(EXPORT_ROOT, slug)
 os.makedirs(cad_dir, exist_ok=True)
 os.makedirs(export_dir, exist_ok=True)
 

@@ -27,7 +27,11 @@ HuBaiLab/
 │   └── validation/                  # 穿透风险检查
 ├── scripts/                         # 运行入口（见下表）
 ├── docs/hu_bai_abaqus_cad_import.md # Abaqus / SW 导入详解
-├── output/                          # 运行结果（git 忽略，本地生成）
+├── output/                          # 运行结果（含示例算例，见 output/README.md）
+│   ├── cad/                         # 融合 STEP
+│   ├── export/{slug}/               # INP / manifest
+│   ├── jobs/{slug}/                 # Abaqus 作业
+│   └── post/{slug}/                 # 应力–应变曲线
 └── requirements.txt
 ```
 
@@ -50,10 +54,14 @@ HuBaiLab/
 | SolidWorks | STEP → X_T、手动 CAD 检查 |
 
 ```powershell
-cd D:\HuBaiLab
+git clone https://github.com/Yvonne-yuanwen6/HuBaiLab-.git
+cd HuBaiLab-
+
 py -3 -m venv .venv
 .\.venv\Scripts\pip install -r requirements.txt
 ```
+
+已有算例数据（STEP、ODB、曲线等）由组内打包分发，解压到 `output/` 对应子目录即可（见下方「算例数据分发」）。
 
 ## 快速开始
 
@@ -64,10 +72,10 @@ cd D:\HuBaiLab
 $env:PYTHONPATH = (Get-Location).Path
 
 py -3 scripts/run_hu_bai_bcc_unitcell_array_step_fuse.py --cells 4 --Q 0
-py -3 scripts/validate_step_solidworks.py output/cad/solidworks/hu_bai/*_array.step
+py -3 scripts/validate_step_solidworks.py output/cad/*_array.step
 ```
 
-输出示例：`output/cad/solidworks/hu_bai/hu_bai_bcc_af2q0_L20_4x4x4_solid_array.step`
+输出示例：`output/cad/hu_bai_bcc_af2q0_L20_4x4x4_solid_array.step`
 
 ### 2. Abaqus 实体压缩 + 应力–应变曲线
 
@@ -129,10 +137,133 @@ py -3 scripts/run_hu_bai_bcc_unitcell_array_step_fuse.py --cells 3 --Q 1.5   # S
 
 | 类型 | 路径 |
 |------|------|
-| 融合 STEP | `output/cad/solidworks/hu_bai/` |
-| INP / manifest | `output/export/hu_bai/{slug}/` |
-| Abaqus 作业 | `output/abaqus/jobs/hu_bai/{slug}/` |
-| 应力–应变曲线 | `output/abaqus/post/hu_bai/{slug}/` |
+| 融合 STEP | `output/cad/` |
+| INP / manifest | `output/export/{slug}/` |
+| Abaqus 作业 | `output/jobs/{slug}/` |
+| 应力–应变曲线 | `output/post/{slug}/` |
+| 线框预览 | `output/previews/` |
+| 当前算例索引 | `output/active_case.json` |
+
+## 命名规则
+
+所有文件名由 **几何变体 + 尺寸 + 阵列规模 + 流程后缀** 拼接。脚本会自动生成，手动引用时请与下表一致。
+
+### 1. 几何变体 `variant`（来自 `HuBaiLatticeGenerator.variant_name`）
+
+| 参数 | 含义 | 命名示例 |
+|------|------|----------|
+| `Q = 0` | 直杆 BCC | `BCC_AF2Q0` → 小写 `bcc_af2q0` |
+| `Q > 0` | 正弦屈曲 SFBLS | `SFBLS_AF2Q1P5`（Q=1.5 写作 `1p5`） |
+
+- `AF`：幅值 A_f [mm]，默认 `2` → `af2`
+- `Q`：周期因子；整数直接写（`Q0`），小数点改 `p`（`0.5` → `0p5`）
+
+### 2. CAD 融合 STEP（`output/cad/`）
+
+**单胞 OCC 阵列（推荐）**
+
+```
+hu_bai_{variant}_L{L}_{n}x{n}x{n}_solid_array.step
+hu_bai_{variant}_L{L}_{n}x{n}x{n}_array_sw_manifest.json
+```
+
+示例：`hu_bai_bcc_af2q0_L20_4x4x4_solid_array.step`
+
+**z 层分层融合（备选）**
+
+```
+hu_bai_{variant}_L{L}_{n}x{n}x{n}_solid_layered.step
+hu_bai_{variant}_L{L}_{n}x{n}x{n}_layered_sw_manifest.json
+hu_bai_{variant}_L{L}_{n}x{n}x{n}_solid_layered_layer{k}.step   # 可选中间层
+```
+
+**小块 monolithic fuse**
+
+```
+hu_bai_{variant}_L20_{n}x{n}x{n}_solid.step
+```
+
+| 字段 | 含义 |
+|------|------|
+| `L{L}` | 单胞边长 [mm]，论文默认 `L20` |
+| `{n}x{n}x{n}` | 阵列规模，如 `3x3x3`、`4x4x4` |
+| `_solid_array` | 单胞平移阵列后布尔融合 |
+| `_solid_layered` | 按 z 层分层融合 |
+
+### 3. Abaqus 实体压缩算例 slug（`export` / `jobs` / `post` 共用文件夹名）
+
+```
+hu_bai_{variant}_L{L}_{nx}x{ny}x{nz}_solid_cad_{stroke}[_{suffix}]
+```
+
+| 字段 | 含义 | 取值 |
+|------|------|------|
+| `stroke` | 压缩行程档位 | `f` = full（默认 70% 应变）；`p` = pilot（15% QA） |
+| `suffix` | 加速/对比标签 | `fast`、`fast70`、`fast80`、`paper`；或 `--case-suffix` 自定义 |
+
+示例：
+
+| slug | 说明 |
+|------|------|
+| `hu_bai_bcc_af2q0_L20_3x3x3_solid_cad_f_fast` | 3×3×3 BCC，满行程，fast 加速档 |
+| `hu_bai_bcc_af2q0_L20_3x3x3_solid_cad_f_fast80` | 同上，dt=8e-4 等 fast80 参数 |
+| `hu_bai_sfbls_af2q0p5_L20_3x3x3_solid_cad_f_fast80` | SFBLS Q=0.5 |
+| `hu_bai_bcc_af2q0_L20_4x4x4_solid_cad_f_fast` | 4×4×4 BCC |
+
+### 4. 每个 slug 目录内的文件
+
+**`output/export/{slug}/`**
+
+| 文件 | 说明 |
+|------|------|
+| `{slug}.inp` | Abaqus Explicit 压缩 INP |
+| `{slug}_meta.json` | 参考面积、高度、加载参数 |
+| `case_manifest.json` | 算例全路径索引（submit 脚本读取） |
+| `{slug}_nodes.csv` / `{slug}_beams.csv` | 线框节点/杆件（可选） |
+
+**`output/jobs/{slug}/`**
+
+| 文件 | 说明 |
+|------|------|
+| `{slug}.inp` | 提交用 INP 副本 |
+| `{slug}.odb` | 求解结果（Git LFS 跟踪） |
+
+**`output/post/{slug}/`**
+
+| 文件 | 说明 |
+|------|------|
+| `{slug}_stress_strain.csv` | 工程应力–应变曲线 |
+| `{slug}_stress_strain_raw.csv` | 原始采样点 |
+| `{slug}_stress_strain.png` | 曲线图 |
+| `{slug}_yield.json` | 屈服/极限点分析 |
+
+### 5. 线框预览（`output/previews/`）
+
+```
+{variant}_{nx}x{ny}x{nz}_seg{n}_iso.png
+```
+
+示例：`bcc_af2q0_1x1x1_seg16_iso.png`
+
+### 6. `active_case.json`
+
+`run_hu_bai_bcc_solid_cad_export.py` 每次导出后写入，记录最近一次算例的 `slug` 及各文件绝对路径。`submit_hu_bai_bcc_solid_cad_compression.ps1` 默认读取此文件；也可用 `-Slug` 指定 `output/export/{slug}/case_manifest.json`。
+
+### 7. 算例数据与 Git
+
+Git 仓库中**只保留 `output/` 目录骨架**（`output/README.md` + 各子目录 `.gitkeep`），不含 STEP、ODB、INP 等大文件。
+
+组员获取已有算例的方式：
+
+1. 克隆本仓库（得到代码 + 空 `output/` 结构）
+2. 向维护者索取 `output.zip`（或网盘链接），解压覆盖到项目根目录
+3. 或自行运行脚本生成（见「快速开始」）
+
+打包分享示例（维护者本地执行）：
+
+```powershell
+Compress-Archive -Path D:\HuBaiLab\output\* -DestinationPath HuBaiLab_output.zip
+```
 
 ## 更多说明
 

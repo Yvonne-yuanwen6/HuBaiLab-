@@ -40,7 +40,7 @@ from src.export.export_csv import export_beams, export_nodes
 from src.export.export_inp import export_inp
 from src.generator.hu_bai_bcc import HuBaiLatticeGenerator
 from src.mesh.solid_union import mesh_step_gmsh_tets
-from src.paths import CAD_ROOT, ensure_output_dirs
+from src.paths import ABAQUS_JOBS, ABAQUS_POST, CAD_ROOT, EXPORT_ROOT, ensure_output_dirs
 from src.postprocess.compression_curve import CompressionMeta, save_compression_meta
 from src.validation.penetration_risk import update_manifest_penetration_check
 
@@ -54,7 +54,7 @@ _parser.add_argument(
     "--cad",
     type=str,
     default="",
-    help="Fused STEP or X_T path (default: hu_bai/test_fuse_{N}x{N}x{N}_v3.step or *_solid.step)",
+    help="Fused STEP or X_T path (default: output/cad/*_solid_array.step or *_solid_layered.step)",
 )
 _parser.add_argument(
     "--mesh-size",
@@ -209,7 +209,7 @@ if _args.cad:
     if not os.path.isabs(cad_arg):
         cad_arg = os.path.join(_ROOT, cad_arg)
 else:
-    cad_dir = os.path.join(CAD_ROOT, "hu_bai")
+    cad_dir = str(CAD_ROOT)
     slug_cad = f"hu_bai_bcc_af2q0_L20_{NX}x{NY}x{NZ}"
     candidates = [
         os.path.join(cad_dir, f"{slug_cad}_solid_array.step"),
@@ -248,9 +248,9 @@ if beam_dups:
 variant = gen.variant_name.lower()
 _slug_base = f"hu_bai_{variant}_L{int(L)}_{NX}x{NY}x{NZ}_solid_cad_{STROKE_TAG}"
 slug = f"{_slug_base}_{CASE_SUFFIX}" if CASE_SUFFIX else _slug_base
-export_dir = os.path.join(_ROOT, "output", "export", "hu_bai", slug)
-job_dir = os.path.join(_ROOT, "output", "abaqus", "jobs", "hu_bai", slug)
-post_dir = os.path.join(_ROOT, "output", "abaqus", "post", "hu_bai", slug)
+export_dir = os.path.join(EXPORT_ROOT, slug)
+job_dir = os.path.join(ABAQUS_JOBS, slug)
+post_dir = os.path.join(ABAQUS_POST, slug)
 for d in (export_dir, job_dir, post_dir):
     os.makedirs(d, exist_ok=True)
 

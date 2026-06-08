@@ -24,7 +24,7 @@ Slug 格式（目录名 / INP 基名 / Abaqus job 名一致，≤38 字符）::
 - ``q`` / ``f``  快速 / 整段压缩（正向压，顶板下压）
 - ``qb`` / ``fb``  快速 / 整段自下而上（反向压）
 
-路径（``export`` / ``abaqus/jobs`` / ``abaqus/post`` 结构一致）::
+路径（``export`` / ``jobs`` / ``post`` 结构一致）::
 
     {top_down|bottom_up}/{straight|cosine}/{角度键}/{slug}/
 

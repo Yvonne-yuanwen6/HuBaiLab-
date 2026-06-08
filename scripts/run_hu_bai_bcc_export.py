@@ -32,7 +32,7 @@ from src.export.beam_utils import dedupe_beams
 from src.export.export_csv import export_beams, export_nodes
 from src.export.export_inp import export_inp, export_inp_b31
 from src.generator.hu_bai_bcc import HuBaiLatticeGenerator
-from src.paths import ensure_output_dirs
+from src.paths import ABAQUS_JOBS, ABAQUS_POST, EXPORT_ROOT, ensure_output_dirs
 from src.postprocess.compression_curve import CompressionMeta, save_compression_meta
 from src.validation.penetration_risk import update_manifest_penetration_check
 from src.visualization.plot_lattice import plot_lattice
@@ -152,9 +152,9 @@ variant = gen.variant_name.lower()
 cells_tag = f"{NX}x{NY}x{NZ}"
 _slug_base = f"hu_bai_{variant}_L{int(L)}_{cells_tag}_{STROKE[0]}"
 slug = f"{_slug_base}_{CASE_SUFFIX}" if CASE_SUFFIX else _slug_base
-export_dir = os.path.join(_ROOT, "output", "export", "hu_bai", slug)
-job_dir = os.path.join(_ROOT, "output", "abaqus", "jobs", "hu_bai", slug)
-post_dir = os.path.join(_ROOT, "output", "abaqus", "post", "hu_bai", slug)
+export_dir = os.path.join(EXPORT_ROOT, slug)
+job_dir = os.path.join(ABAQUS_JOBS, slug)
+post_dir = os.path.join(ABAQUS_POST, slug)
 for d in (export_dir, job_dir, post_dir):
     os.makedirs(d, exist_ok=True)
 

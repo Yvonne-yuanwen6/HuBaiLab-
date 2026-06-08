@@ -1,8 +1,4 @@
-"""Canonical output paths for LatticeLab (export / Abaqus jobs / post / CAD).
-
-Per-case paths are built by ``src.naming.case_paths_for_slug`` from a geometry slug.
-See ``output/README.md`` and ``output/active_case.json`` after export.
-"""
+"""Canonical output paths for HuBaiLab (Hu & Bai dedicated repo)."""
 
 from __future__ import annotations
 
@@ -13,15 +9,24 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_ROOT = PROJECT_ROOT / "output"
 ACTIVE_CASE_JSON = OUTPUT_ROOT / "active_case.json"
 
-# --- export / abaqus: per-case paths via src.naming (top_down|bottom_up/...) ---
 EXPORT_ROOT = OUTPUT_ROOT / "export"
-ABAQUS_ROOT = OUTPUT_ROOT / "abaqus"
-ABAQUS_JOBS = ABAQUS_ROOT / "jobs"
-ABAQUS_POST = ABAQUS_ROOT / "post"
-
-# --- CAD / 文档 ---
-CAD_ROOT = OUTPUT_ROOT / "cad" / "solidworks"
+ABAQUS_JOBS = OUTPUT_ROOT / "jobs"
+ABAQUS_POST = OUTPUT_ROOT / "post"
+CAD_ROOT = OUTPUT_ROOT / "cad"
+PREVIEWS_ROOT = OUTPUT_ROOT / "previews"
 REPORTS_ROOT = OUTPUT_ROOT / "reports"
+
+
+def export_dir_for_slug(slug: str) -> Path:
+    return EXPORT_ROOT / slug
+
+
+def job_dir_for_slug(slug: str) -> Path:
+    return ABAQUS_JOBS / slug
+
+
+def post_dir_for_slug(slug: str) -> Path:
+    return ABAQUS_POST / slug
 
 
 def ensure_output_dirs() -> None:
@@ -31,6 +36,7 @@ def ensure_output_dirs() -> None:
         ABAQUS_JOBS,
         ABAQUS_POST,
         CAD_ROOT,
+        PREVIEWS_ROOT,
         REPORTS_ROOT,
     ):
         p.mkdir(parents=True, exist_ok=True)

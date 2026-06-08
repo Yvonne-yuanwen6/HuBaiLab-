@@ -17,6 +17,7 @@ if _ROOT not in sys.path:
 
 from src.export.beam_utils import dedupe_beams
 from src.generator.hu_bai_bcc import HuBaiLatticeGenerator
+from src.paths import PREVIEWS_ROOT
 from src.visualization.plot_lattice import plot_lattice
 
 _parser = argparse.ArgumentParser(description="Hu & Bai SFBLS 3D wireframe preview")
@@ -33,7 +34,7 @@ AF = float(_args.Af)
 NX = NY = NZ = int(_args.cells)
 N_SEG = max(4, int(_args.n_segments))
 
-out_dir = os.path.join(_ROOT, "output", "export", "hu_bai", "previews")
+out_dir = str(PREVIEWS_ROOT)
 os.makedirs(out_dir, exist_ok=True)
 
 if _args.all_q or _args.Q is None:

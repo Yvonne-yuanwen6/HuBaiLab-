@@ -47,7 +47,7 @@ if dups:
     print(f"  Deduped beams: {dups}")
 
 slug = f"hu_bai_{gen.variant_name.lower()}_L20_{n}x{n}x{n}"
-cad_dir = os.path.join(CAD_ROOT, "hu_bai")
+cad_dir = str(CAD_ROOT)
 os.makedirs(cad_dir, exist_ok=True)
 step_path = os.path.join(cad_dir, f"{slug}_solid.step")
 

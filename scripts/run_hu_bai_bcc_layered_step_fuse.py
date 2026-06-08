@@ -6,7 +6,7 @@ tree-fused into one MANIFOLD_SOLID_BREP. Targets 4×4×4 where monolithic fuse f
 
   py -3 scripts/run_hu_bai_bcc_layered_step_fuse.py --cells 4
   py -3 scripts/run_hu_bai_bcc_layered_step_fuse.py --cells 4 --Q 0
-  py -3 scripts/validate_step_solidworks.py output/cad/solidworks/hu_bai/*_layered.step
+  py -3 scripts/validate_step_solidworks.py output/cad/*_layered.step
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ for iz in range(nz):
     layer_data.append((nodes, beams, polylines))
 
 slug = f"hu_bai_{gen.variant_name.lower()}_L{int(L)}_{n}x{n}x{n}"
-cad_dir = os.path.join(CAD_ROOT, "hu_bai")
+cad_dir = str(CAD_ROOT)
 os.makedirs(cad_dir, exist_ok=True)
 step_path = os.path.join(cad_dir, f"{slug}_solid_layered.step")
 manifest_path = os.path.join(cad_dir, f"{slug}_layered_sw_manifest.json")

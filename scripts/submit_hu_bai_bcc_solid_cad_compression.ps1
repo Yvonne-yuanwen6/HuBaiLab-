@@ -78,7 +78,7 @@ if (-not $SkipExport) {
 
 $manifestOverride = ''
 if ($Slug) {
-    $manifestOverride = Join-Path $Root "output\export\hu_bai\$Slug\case_manifest.json"
+    $manifestOverride = Join-Path $Root "output\export\$Slug\case_manifest.json"
 } elseif ($SkipExport -and -not $CaseSuffix -and $Profile -eq 'fast') {
     $CaseSuffix = 'fast'
 }
@@ -86,7 +86,7 @@ if ($SkipExport -and $CaseSuffix) {
     $strokeTag = if ($Stroke -eq 'pilot') { 'p' } else { 'f' }
     if ($Profile -eq 'fast') { $strokeTag = 'f' }
     $slugGuess = "hu_bai_bcc_af2q0_L20_${Cells}x${Cells}x${Cells}_solid_cad_${strokeTag}_$CaseSuffix"
-    $manifestOverride = Join-Path $Root "output\export\hu_bai\$slugGuess\case_manifest.json"
+    $manifestOverride = Join-Path $Root "output\export\$slugGuess\case_manifest.json"
 }
 $case = if ($manifestOverride -and (Test-Path $manifestOverride)) {
     Read-ActiveCaseManifest -Root $Root -ManifestPath $manifestOverride
