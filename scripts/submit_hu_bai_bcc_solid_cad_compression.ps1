@@ -21,7 +21,7 @@ param(
     [ValidateSet("", "fast", "paper", "pilot")]
     [string]$Profile = "",
     [string]$Slug = "",
-    [int]$MemoryMB = 8192,
+    [int]$MemoryMB = 6144,
     [int]$Cpus = 4
 )
 

@@ -558,6 +558,8 @@ def _fuse_occ_tree(dimtags: list[tuple[int, int]], *, progress_label: str | None
 
 # gmsh OCC batch-fuse fails silently above ~256 disjoint cylinders; tree-fuse fails on 4×4×4.
 OCC_FUSE_MAX_PARTS = 256
+# Single-call fuse([a], [b,c,d,...]) of many SFBLS pipe sweeps can OOM; use pairwise tree above this.
+OCC_FUSE_PAIRWISE_THRESHOLD = 16
 
 
 def _next_occ_volume_tag() -> int:
@@ -627,17 +629,111 @@ def _occ_dimtags_from_parts(
     return dimtags
 
 
-def _occ_fuse_dimtags(dimtags: list[tuple[int, int]]) -> list[tuple[int, int]]:
+def _occ_fuse_dimtags(
+    dimtags: list[tuple[int, int]],
+    *,
+    progress_label: str = "occ-fuse",
+) -> list[tuple[int, int]]:
     """Boolean-union OCC volumes; returns fused volume dimtags."""
     import gmsh
 
     if len(dimtags) <= 1:
         return list(dimtags)
     _configure_occ_for_fuse()
-    if len(dimtags) <= OCC_FUSE_MAX_PARTS:
-        fused, _ = gmsh.model.occ.fuse([dimtags[0]], dimtags[1:])
+    n = len(dimtags)
+    if n == 2:
+        fused, _ = gmsh.model.occ.fuse([dimtags[0]], [dimtags[1]])
+        gmsh.model.occ.synchronize()
+        return list(fused)
+    if n <= OCC_FUSE_MAX_PARTS:
+        print(
+            f"  {progress_label}: pairwise tree fuse of {n} volume(s)...",
+            flush=True,
+        )
+        fused = _fuse_occ_layer_volumes(dimtags, progress_label=progress_label)
     else:
         fused = _fuse_occ_all(dimtags)
+    gmsh.model.occ.synchronize()
+    return list(fused)
+
+
+def _occ_remove_all_volumes_except(keep: tuple[int, int]) -> None:
+    """Drop leftover OCC volumes after boolean fuse (gmsh keeps consumed tags)."""
+    import gmsh
+
+    for dim, t in list(gmsh.model.getEntities(3)):
+        if (dim, int(t)) != keep:
+            try:
+                gmsh.model.occ.remove([(int(dim), int(t))], recursive=True)
+            except Exception:
+                pass
+    gmsh.model.occ.synchronize()
+
+
+def _occ_remove_volumes_in_set(
+    tags: set[tuple[int, int]],
+    keep: tuple[int, int],
+) -> None:
+    """Remove 3D volumes in ``tags`` except ``keep``."""
+    import gmsh
+
+    for dim, t in list(gmsh.model.getEntities(3)):
+        tag = (int(dim), int(t))
+        if tag in tags and tag != keep:
+            try:
+                gmsh.model.occ.remove([tag], recursive=True)
+            except Exception:
+                pass
+    gmsh.model.occ.synchronize()
+
+
+def _occ_fuse_sequential(
+    dimtags: list[tuple[int, int]],
+    *,
+    progress_label: str = "occ-fuse",
+    restrict_cleanup: bool = False,
+) -> list[tuple[int, int]]:
+    """Fuse volumes one-at-a-time into the first (stable for complex SFBLS sweeps)."""
+    import gmsh
+
+    if len(dimtags) <= 1:
+        return list(dimtags)
+    acc = dimtags[0]
+    for idx, vol in enumerate(dimtags[1:], start=2):
+        print(
+            f"  {progress_label}: sequential fuse {idx}/{len(dimtags)}...",
+            flush=True,
+        )
+        prev_acc = acc
+        fused, _ = gmsh.model.occ.fuse([acc], [vol])
+        gmsh.model.occ.synchronize()
+        vols = [(3, int(t)) for dim, t in fused if dim == 3]
+        if not vols:
+            raise RuntimeError(f"{progress_label}: sequential fuse lost volumes")
+        acc = _occ_primary_volume(vols) if len(vols) > 1 else vols[0]
+        if restrict_cleanup:
+            _occ_remove_volumes_in_set({prev_acc, vol}, acc)
+    if not restrict_cleanup:
+        _occ_remove_all_volumes_except(acc)
+    return [acc]
+
+
+def _occ_fuse_batch_first_rest(
+    dimtags: list[tuple[int, int]],
+    *,
+    progress_label: str = "occ-fuse",
+) -> list[tuple[int, int]]:
+    """Fuse first volume with all others at once (intra-cell strut fragments)."""
+    import gmsh
+
+    if len(dimtags) <= 1:
+        return list(dimtags)
+    _configure_occ_for_fuse()
+    print(
+        f"  {progress_label}: batch fuse {len(dimtags)} volume(s)...",
+        flush=True,
+    )
+    fused, _ = gmsh.model.occ.fuse([dimtags[0]], dimtags[1:])
     gmsh.model.occ.synchronize()
     return list(fused)
 
@@ -647,18 +743,21 @@ def _fuse_occ_layer_volumes(
     *,
     progress_label: str = "inter-layer",
 ) -> list[tuple[int, int]]:
-    """Pairwise tree fuse of pre-merged layer solids; batch fallback on stall."""
+    """Pairwise tree fuse of pre-merged layer solids; sequential fallback on stall."""
     import gmsh
 
     current = list(dimtags)
     if len(current) <= 1:
         return current
-    if len(current) <= 8:
-        return _occ_fuse_dimtags(current)
 
     level = 0
     max_levels = max(32, len(current) * 2)
     while len(current) > 1:
+        if len(current) == 2:
+            fused, _ = gmsh.model.occ.fuse([current[0]], [current[1]])
+            gmsh.model.occ.synchronize()
+            return list(fused)
+
         nxt: list[tuple[int, int]] = []
         for i in range(0, len(current), 2):
             if i + 1 < len(current):
@@ -675,16 +774,21 @@ def _fuse_occ_layer_volumes(
         if len(nxt) >= len(current):
             print(
                 f"  {progress_label}: pairwise stall at {len(nxt)} volume(s), "
-                f"batch fuse...",
+                f"{'batch' if len(current) > 4 else 'sequential'} fuse...",
                 flush=True,
             )
-            return _occ_fuse_dimtags(current)
+            if len(current) > 4:
+                return _occ_fuse_batch_first_rest(current, progress_label=progress_label)
+            return _occ_fuse_sequential(current, progress_label=progress_label)
         if level >= max_levels:
             print(
-                f"  {progress_label}: max levels ({max_levels}), batch fuse...",
+                f"  {progress_label}: max levels ({max_levels}), "
+                f"{'batch' if len(current) > 4 else 'sequential'} fuse...",
                 flush=True,
             )
-            return _occ_fuse_dimtags(current)
+            if len(current) > 4:
+                return _occ_fuse_batch_first_rest(current, progress_label=progress_label)
+            return _occ_fuse_sequential(current, progress_label=progress_label)
         current = nxt
     return current
 
@@ -756,11 +860,11 @@ def _fuse_layer_step_files_sequential(
         gmsh.initialize()
         try:
             gmsh.option.setNumber("General.Terminal", 0)
-            _configure_occ_for_fuse()
             gmsh.model.add(f"slab_merge_{idx}")
             gmsh.model.occ.importShapes(acc)
             gmsh.model.occ.importShapes(paths[idx])
             gmsh.model.occ.synchronize()
+            _configure_occ_for_fuse()
 
             vols = _occ_list_volume_dimtags()
             if len(vols) != 2:
@@ -1002,7 +1106,7 @@ def export_lattice_step_occ(
                 flush=True,
             )
             if n_parts > 1:
-                _occ_fuse_dimtags(dimtags)
+                _occ_fuse_dimtags(dimtags, progress_label="intra-fuse")
                 n_vol = len(gmsh.model.getEntities(3))
                 if not n_vol:
                     raise RuntimeError(
@@ -1215,6 +1319,1263 @@ def export_lattice_step_occ_unitcell_array(
             "z": [zmin, zmax],
         },
         "method": "gmsh_occ_unitcell_array",
+    }
+
+
+def export_lattice_step_occ_row(
+    nodes: list,
+    beams: list,
+    path: str,
+    *,
+    nx: int,
+    iy: int,
+    iz: int,
+    block_nx: int,
+    block_ny: int,
+    block_nz: int,
+    cell_size: float,
+    polylines: list[dict] | None = None,
+    junction_spheres: bool = True,
+    polyline_sweep: str | None = None,
+) -> dict[str, int | float | bool | str | list]:
+    """
+    Fuse one x-row of unit cells in a single gmsh OCC session (no STEP round-trip).
+
+    ``iy`` / ``iz`` index the row within a ``block_nx×block_ny×block_nz`` lattice.
+    """
+    try:
+        import gmsh
+    except ImportError as exc:
+        raise ImportError(
+            "STEP/X_T export requires gmsh. Install: pip install gmsh"
+        ) from exc
+
+    from src.mesh.occ_pipe import prune_occ_for_step_export
+
+    nx_i = int(nx)
+    iy_i, iz_i = int(iy), int(iz)
+    bnx, bny, bnz = int(block_nx), int(block_ny), int(block_nz)
+    cell_l = float(cell_size)
+    if nx_i < 1:
+        raise ValueError(f"nx must be >= 1, got {nx_i}")
+    if not (0 <= iy_i < bny and 0 <= iz_i < bnz):
+        raise ValueError(f"iy={iy_i} or iz={iz_i} out of range for block {bnx}x{bny}x{bnz}")
+
+    use_junction = junction_spheres
+    if polyline_sweep is None:
+        polyline_sweep = "pipe" if polylines else "cylinder"
+    use_pipe = str(polyline_sweep).lower() == "pipe"
+
+    _, parts = _collect_solid_primitives(
+        nodes,
+        beams,
+        polylines=polylines,
+        junction_spheres=use_junction,
+        trim_for_junctions=False,
+        polyline_sweep=polyline_sweep,
+    )
+    if not parts:
+        raise ValueError("No solid primitives for unit cell.")
+
+    cell_offsets: list[tuple[float, float, float]] = []
+    for ix in range(nx_i):
+        cell_offsets.append(
+            (
+                _lattice_cell_center_mm(ix, bnx, cell_l),
+                _lattice_cell_center_mm(iy_i, bny, cell_l),
+                _lattice_cell_center_mm(iz_i, bnz, cell_l),
+            )
+        )
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add(os.path.splitext(os.path.basename(path))[0] or "lattice_row")
+
+        dimtags = _occ_dimtags_from_parts(parts)
+        if not dimtags:
+            raise ValueError("No OCC solids were created for unit cell.")
+
+        gmsh.model.occ.synchronize()
+        n_uc_parts = len(dimtags)
+        sweep_label = "pipe sweep" if use_pipe else "cylinder chain"
+        print(
+            f"  Unit cell fuse: {n_uc_parts} OCC solids "
+            f"({sweep_label}, junction spheres={'on' if use_junction else 'off'})...",
+            flush=True,
+        )
+        if n_uc_parts > 1:
+            _occ_fuse_dimtags(dimtags, progress_label="unitcell")
+        prune_occ_for_step_export()
+
+        seed_vols = _occ_list_volume_dimtags()
+        if len(seed_vols) != 1:
+            raise RuntimeError(
+                f"Unit cell fuse produced {len(seed_vols)} volume(s), expected 1."
+            )
+        seed_vol = seed_vols[0]
+        print("  Unit cell fuse complete.", flush=True)
+
+        cell_volumes: list[tuple[int, int]] = []
+        for dx, dy, dz in cell_offsets:
+            copied = list(gmsh.model.occ.copy([seed_vol]))
+            if abs(dx) > 1e-9 or abs(dy) > 1e-9 or abs(dz) > 1e-9:
+                gmsh.model.occ.translate(copied, float(dx), float(dy), float(dz))
+            gmsh.model.occ.synchronize()
+            cell_volumes.extend(copied)
+
+        gmsh.model.occ.remove([seed_vol], recursive=True)
+        gmsh.model.occ.synchronize()
+
+        print(
+            f"  Row fuse: {nx_i} cell(s) at iy={iy_i} iz={iz_i} "
+            f"(block {bnx}x{bny}x{bnz}, L={cell_l:g} mm)...",
+            flush=True,
+        )
+        if nx_i > 1:
+            print(f"  Inter-cell fuse: {len(cell_volumes)} volume(s)...", flush=True)
+            _occ_fuse_sequential(cell_volumes, progress_label="inter-cell")
+            prune_occ_for_step_export()
+
+        n_vol = len(gmsh.model.getEntities(3))
+        if not n_vol:
+            raise RuntimeError("Row fuse produced no volume; STEP would be empty.")
+        if n_vol != 1:
+            raise RuntimeError(
+                f"Row fuse produced {n_vol} separate solids (expected 1)."
+            )
+        print("  Row fuse complete.", flush=True)
+
+        step_report = _finalize_occ_step_write(path, fuse=True)
+        fused_volume_count = int(step_report.get("solid_count", 0))
+        xmin, ymin, zmin, xmax, ymax, zmax = _occ_imported_volume_bbox()
+    finally:
+        gmsh.finalize()
+
+    pipe_count = sum(1 for k, *_ in parts if k == "pipe")
+    return {
+        "step_path": path,
+        "solid_count": n_uc_parts,
+        "unitcell_primitive_count": n_uc_parts,
+        "cell_count": nx_i,
+        "pipe_count": pipe_count,
+        "polyline_sweep": polyline_sweep,
+        "fused": True,
+        "fused_volume_count": fused_volume_count,
+        "step_product_count": step_report.get("product_count"),
+        "step_solidworks_safe": step_report.get("solidworks_safe"),
+        "node_count": len(nodes),
+        "beam_count": len(beams),
+        "polyline_count": len(polylines or []),
+        "bbox_mm": {
+            "x": [xmin, xmax],
+            "y": [ymin, ymax],
+            "z": [zmin, zmax],
+        },
+        "row": {"iy": iy_i, "iz": iz_i, "nx": nx_i, "block": [bnx, bny, bnz]},
+        "method": "gmsh_occ_row_fuse",
+    }
+
+
+def export_lattice_step_occ_zslab(
+    nodes: list,
+    beams: list,
+    path: str,
+    *,
+    nx: int,
+    ny: int,
+    iz: int,
+    block_nx: int,
+    block_ny: int,
+    block_nz: int,
+    cell_size: float,
+    polylines: list[dict] | None = None,
+    junction_spheres: bool = True,
+    polyline_sweep: str | None = None,
+) -> dict[str, int | float | bool | str | list]:
+    """
+    Fuse one z-slab (nx×ny cells at fixed iz) in a single gmsh OCC session.
+
+    Hierarchical: fuse each x-row (≤4 cells), then fuse rows into one solid.
+    """
+    try:
+        import gmsh
+    except ImportError as exc:
+        raise ImportError(
+            "STEP/X_T export requires gmsh. Install: pip install gmsh"
+        ) from exc
+
+    from src.mesh.occ_pipe import prune_occ_for_step_export
+
+    nx_i, ny_i, iz_i = int(nx), int(ny), int(iz)
+    bnx, bny, bnz = int(block_nx), int(block_ny), int(block_nz)
+    cell_l = float(cell_size)
+    if nx_i < 1 or ny_i < 1:
+        raise ValueError(f"nx/ny must be >= 1, got {nx_i}x{ny_i}")
+    if not (0 <= iz_i < bnz):
+        raise ValueError(f"iz={iz_i} out of range for block {bnx}x{bny}x{bnz}")
+
+    use_junction = junction_spheres
+    if polyline_sweep is None:
+        polyline_sweep = "pipe" if polylines else "cylinder"
+    use_pipe = str(polyline_sweep).lower() == "pipe"
+
+    _, parts = _collect_solid_primitives(
+        nodes,
+        beams,
+        polylines=polylines,
+        junction_spheres=use_junction,
+        trim_for_junctions=False,
+        polyline_sweep=polyline_sweep,
+    )
+    if not parts:
+        raise ValueError("No solid primitives for unit cell.")
+
+    cell_offsets: list[tuple[float, float, float]] = []
+    for iy in range(ny_i):
+        for ix in range(nx_i):
+            cell_offsets.append(
+                (
+                    _lattice_cell_center_mm(ix, bnx, cell_l),
+                    _lattice_cell_center_mm(iy, bny, cell_l),
+                    _lattice_cell_center_mm(iz_i, bnz, cell_l),
+                )
+            )
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    n_cells = nx_i * ny_i
+
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add(os.path.splitext(os.path.basename(path))[0] or "lattice_zslab")
+
+        dimtags = _occ_dimtags_from_parts(parts)
+        if not dimtags:
+            raise ValueError("No OCC solids were created for unit cell.")
+
+        gmsh.model.occ.synchronize()
+        n_uc_parts = len(dimtags)
+        sweep_label = "pipe sweep" if use_pipe else "cylinder chain"
+        print(
+            f"  Unit cell fuse: {n_uc_parts} OCC solids "
+            f"({sweep_label}, junction spheres={'on' if use_junction else 'off'})...",
+            flush=True,
+        )
+        if n_uc_parts > 1:
+            _occ_fuse_dimtags(dimtags, progress_label="unitcell")
+        prune_occ_for_step_export()
+
+        seed_vols = _occ_list_volume_dimtags()
+        if len(seed_vols) != 1:
+            raise RuntimeError(
+                f"Unit cell fuse produced {len(seed_vols)} volume(s), expected 1."
+            )
+        seed_vol = seed_vols[0]
+        print("  Unit cell fuse complete.", flush=True)
+
+        cell_volumes: list[tuple[int, int]] = []
+        for dx, dy, dz in cell_offsets:
+            copied = list(gmsh.model.occ.copy([seed_vol]))
+            if abs(dx) > 1e-9 or abs(dy) > 1e-9 or abs(dz) > 1e-9:
+                gmsh.model.occ.translate(copied, float(dx), float(dy), float(dz))
+            gmsh.model.occ.synchronize()
+            cell_volumes.extend(copied)
+
+        gmsh.model.occ.remove([seed_vol], recursive=True)
+        gmsh.model.occ.synchronize()
+
+        print(
+            f"  Z-slab fuse: {n_cells} cell(s) ({nx_i}x{ny_i}) at iz={iz_i} "
+            f"(block {bnx}x{bny}x{bnz}, L={cell_l:g} mm)...",
+            flush=True,
+        )
+
+        slab_vol = _occ_fuse_nxny_cell_layer(
+            cell_volumes,
+            nx=nx_i,
+            ny=ny_i,
+            progress_label=f"zslab-iz{iz_i}",
+        )
+        _occ_remove_all_volumes_except(slab_vol)
+        prune_occ_for_step_export()
+
+        n_vol = len(gmsh.model.getEntities(3))
+        if not n_vol:
+            raise RuntimeError("Z-slab fuse produced no volume; STEP would be empty.")
+        if n_vol != 1:
+            raise RuntimeError(
+                f"Z-slab fuse produced {n_vol} separate solids (expected 1)."
+            )
+        print("  Z-slab fuse complete.", flush=True)
+
+        step_report = _finalize_occ_step_write(path, fuse=True)
+        fused_volume_count = int(step_report.get("solid_count", 0))
+        xmin, ymin, zmin, xmax, ymax, zmax = _occ_imported_volume_bbox()
+    finally:
+        gmsh.finalize()
+
+    pipe_count = sum(1 for k, *_ in parts if k == "pipe")
+    return {
+        "step_path": path,
+        "solid_count": n_uc_parts,
+        "unitcell_primitive_count": n_uc_parts,
+        "cell_count": n_cells,
+        "pipe_count": pipe_count,
+        "polyline_sweep": polyline_sweep,
+        "fused": True,
+        "fused_volume_count": fused_volume_count,
+        "step_product_count": step_report.get("product_count"),
+        "step_solidworks_safe": step_report.get("solidworks_safe"),
+        "node_count": len(nodes),
+        "beam_count": len(beams),
+        "polyline_count": len(polylines or []),
+        "bbox_mm": {
+            "x": [xmin, xmax],
+            "y": [ymin, ymax],
+            "z": [zmin, zmax],
+        },
+        "zslab": {
+            "iz": iz_i,
+            "nx": nx_i,
+            "ny": ny_i,
+            "block": [bnx, bny, bnz],
+        },
+        "method": "gmsh_occ_zslab_fuse",
+    }
+
+
+def _occ_fuse_nxny_cell_layer(
+    cell_volumes: list[tuple[int, int]],
+    *,
+    nx: int,
+    ny: int,
+    progress_label: str,
+) -> tuple[int, int]:
+    """Fuse nx×ny cells (row-major iy, ix) into one OCC volume."""
+    nx_i, ny_i = int(nx), int(ny)
+    if len(cell_volumes) != nx_i * ny_i:
+        raise ValueError(
+            f"{progress_label}: expected {nx_i * ny_i} cell(s), got {len(cell_volumes)}"
+        )
+
+    row_vols: list[tuple[int, int]] = []
+    for iy in range(ny_i):
+        row_cells = cell_volumes[iy * nx_i : (iy + 1) * nx_i]
+        if len(row_cells) > 1:
+            print(
+                f"  {progress_label} row iy={iy}: fuse {len(row_cells)} cell(s)...",
+                flush=True,
+            )
+            fused_row = _occ_fuse_sequential(
+                row_cells,
+                progress_label=f"{progress_label}-iy{iy}",
+                restrict_cleanup=True,
+            )
+            row_vols.append(fused_row[0])
+        else:
+            row_vols.append(row_cells[0])
+
+    if len(row_vols) > 1:
+        print(f"  {progress_label}: inter-row fuse {len(row_vols)} row(s)...", flush=True)
+        return _occ_fuse_sequential(
+            row_vols,
+            progress_label=f"{progress_label}-inter-row",
+            restrict_cleanup=True,
+        )[0]
+    return row_vols[0]
+
+
+def export_lattice_step_occ_block(
+    nodes: list,
+    beams: list,
+    path: str,
+    *,
+    nx: int,
+    ny: int,
+    nz: int,
+    cell_size: float,
+    polylines: list[dict] | None = None,
+    junction_spheres: bool = True,
+    polyline_sweep: str | None = None,
+) -> dict[str, int | float | bool | str | list]:
+    """
+    Fuse an nx×ny×nz cell block in one gmsh OCC session.
+
+    Hierarchical: row → z-slab → inter-slab → one solid (SFBLS-safe).
+    """
+    try:
+        import gmsh
+    except ImportError as exc:
+        raise ImportError(
+            "STEP/X_T export requires gmsh. Install: pip install gmsh"
+        ) from exc
+
+    from src.mesh.occ_pipe import prune_occ_for_step_export
+
+    nx_i, ny_i, nz_i = int(nx), int(ny), int(nz)
+    cell_l = float(cell_size)
+    if min(nx_i, ny_i, nz_i) < 1:
+        raise ValueError(f"nx/ny/nz must be >= 1, got {nx_i}x{ny_i}x{nz_i}")
+
+    use_junction = junction_spheres
+    if polyline_sweep is None:
+        polyline_sweep = "pipe" if polylines else "cylinder"
+    use_pipe = str(polyline_sweep).lower() == "pipe"
+
+    _, parts = _collect_solid_primitives(
+        nodes,
+        beams,
+        polylines=polylines,
+        junction_spheres=use_junction,
+        trim_for_junctions=False,
+        polyline_sweep=polyline_sweep,
+    )
+    if not parts:
+        raise ValueError("No solid primitives for unit cell.")
+
+    cell_offsets: list[tuple[float, float, float]] = []
+    for iz in range(nz_i):
+        for iy in range(ny_i):
+            for ix in range(nx_i):
+                cell_offsets.append(
+                    (
+                        _lattice_cell_center_mm(ix, nx_i, cell_l),
+                        _lattice_cell_center_mm(iy, ny_i, cell_l),
+                        _lattice_cell_center_mm(iz, nz_i, cell_l),
+                    )
+                )
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    n_cells = nx_i * ny_i * nz_i
+    slab_size = nx_i * ny_i
+
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add(os.path.splitext(os.path.basename(path))[0] or "lattice_block")
+
+        dimtags = _occ_dimtags_from_parts(parts)
+        if not dimtags:
+            raise ValueError("No OCC solids were created for unit cell.")
+
+        gmsh.model.occ.synchronize()
+        n_uc_parts = len(dimtags)
+        sweep_label = "pipe sweep" if use_pipe else "cylinder chain"
+        print(
+            f"  Unit cell fuse: {n_uc_parts} OCC solids "
+            f"({sweep_label}, junction spheres={'on' if use_junction else 'off'})...",
+            flush=True,
+        )
+        if n_uc_parts > 1:
+            _occ_fuse_dimtags(dimtags, progress_label="unitcell")
+        prune_occ_for_step_export()
+
+        seed_vols = _occ_list_volume_dimtags()
+        if len(seed_vols) != 1:
+            raise RuntimeError(
+                f"Unit cell fuse produced {len(seed_vols)} volume(s), expected 1."
+            )
+        seed_vol = seed_vols[0]
+        print("  Unit cell fuse complete.", flush=True)
+
+        cell_volumes: list[tuple[int, int]] = []
+        for dx, dy, dz in cell_offsets:
+            copied = list(gmsh.model.occ.copy([seed_vol]))
+            if abs(dx) > 1e-9 or abs(dy) > 1e-9 or abs(dz) > 1e-9:
+                gmsh.model.occ.translate(copied, float(dx), float(dy), float(dz))
+            gmsh.model.occ.synchronize()
+            cell_volumes.extend(copied)
+
+        gmsh.model.occ.remove([seed_vol], recursive=True)
+        gmsh.model.occ.synchronize()
+
+        print(
+            f"  Block fuse: {n_cells} cell(s) ({nx_i}x{ny_i}x{nz_i}, L={cell_l:g} mm)...",
+            flush=True,
+        )
+
+        slab_vols: list[tuple[int, int]] = []
+        for iz in range(nz_i):
+            slab_cells = cell_volumes[iz * slab_size : (iz + 1) * slab_size]
+            print(
+                f"  Z-slab iz={iz}: fuse {len(slab_cells)} cell(s)...",
+                flush=True,
+            )
+            slab_vol = _occ_fuse_nxny_cell_layer(
+                slab_cells,
+                nx=nx_i,
+                ny=ny_i,
+                progress_label=f"slab-iz{iz}",
+            )
+            slab_vols.append(slab_vol)
+
+        if len(slab_vols) > 1:
+            print(f"  Inter-slab fuse: {len(slab_vols)} slab(s)...", flush=True)
+            _occ_fuse_sequential(slab_vols, progress_label="inter-slab")
+        prune_occ_for_step_export()
+
+        n_vol = len(gmsh.model.getEntities(3))
+        if not n_vol:
+            raise RuntimeError("Block fuse produced no volume; STEP would be empty.")
+        if n_vol != 1:
+            raise RuntimeError(
+                f"Block fuse produced {n_vol} separate solids (expected 1)."
+            )
+        print("  Block fuse complete.", flush=True)
+
+        step_report = _finalize_occ_step_write(path, fuse=True)
+        fused_volume_count = int(step_report.get("solid_count", 0))
+        xmin, ymin, zmin, xmax, ymax, zmax = _occ_imported_volume_bbox()
+    finally:
+        gmsh.finalize()
+
+    pipe_count = sum(1 for k, *_ in parts if k == "pipe")
+    return {
+        "step_path": path,
+        "solid_count": n_uc_parts,
+        "unitcell_primitive_count": n_uc_parts,
+        "cell_count": n_cells,
+        "pipe_count": pipe_count,
+        "polyline_sweep": polyline_sweep,
+        "fused": True,
+        "fused_volume_count": fused_volume_count,
+        "step_product_count": step_report.get("product_count"),
+        "step_solidworks_safe": step_report.get("solidworks_safe"),
+        "node_count": len(nodes),
+        "beam_count": len(beams),
+        "polyline_count": len(polylines or []),
+        "bbox_mm": {
+            "x": [xmin, xmax],
+            "y": [ymin, ymax],
+            "z": [zmin, zmax],
+        },
+        "block": {"nx": nx_i, "ny": ny_i, "nz": nz_i},
+        "method": "gmsh_occ_block_fuse",
+    }
+
+
+def _write_translated_unitcell_step_copy(
+    seed_step: str,
+    out_path: str,
+    dx: float,
+    dy: float,
+    dz: float,
+) -> None:
+    """Import fused unit-cell STEP, translate, write one positioned cell solid."""
+    import gmsh
+
+    from src.mesh.occ_pipe import prune_occ_for_step_export
+
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add("unitcell_copy")
+        gmsh.model.occ.importShapes(os.path.abspath(seed_step))
+        gmsh.model.occ.synchronize()
+        _configure_occ_for_fuse()
+        vols = _occ_list_volume_dimtags()
+        if len(vols) != 1:
+            raise RuntimeError(
+                f"Unit-cell seed STEP must contain 1 volume, got {len(vols)}: {seed_step}"
+            )
+        if abs(dx) > 1e-9 or abs(dy) > 1e-9 or abs(dz) > 1e-9:
+            gmsh.model.occ.translate(vols, float(dx), float(dy), float(dz))
+            gmsh.model.occ.synchronize()
+        prune_occ_for_step_export()
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        gmsh.write(out_path)
+    finally:
+        gmsh.finalize()
+
+
+def _occ_unify_volumes_to_one(*, progress_label: str, max_attempts: int = 6) -> None:
+    """Fuse / fragment OCC volumes until one solid remains."""
+    import gmsh
+
+    from src.mesh.occ_pipe import prune_occ_for_step_export
+
+    vols = _occ_list_volume_dimtags()
+    if len(vols) <= 1:
+        return
+
+    prev_n = len(vols) + 1
+    for attempt in range(1, max_attempts + 1):
+        n = len(vols)
+        print(
+            f"  {progress_label}: unify {n} volume(s) (attempt {attempt})...",
+            flush=True,
+        )
+        if n == 2:
+            try:
+                gmsh.model.occ.fuse([vols[0]], [vols[1]])
+                gmsh.model.occ.synchronize()
+                prune_occ_for_step_export()
+                vols = _occ_list_volume_dimtags()
+                if len(vols) == 1:
+                    return
+            except Exception as exc:
+                print(f"  {progress_label}: pairwise fuse failed ({exc})", flush=True)
+
+        if n > 1 and n < prev_n:
+            prev_n = n
+        else:
+            try:
+                gmsh.model.occ.fragment(vols, vols)
+                gmsh.model.occ.synchronize()
+                prune_occ_for_step_export()
+                vols = _occ_list_volume_dimtags()
+                if len(vols) == 1:
+                    return
+            except Exception as exc:
+                print(f"  {progress_label}: fragment failed ({exc})", flush=True)
+
+        if len(vols) > 1:
+            _occ_fuse_dimtags(vols, progress_label=progress_label)
+            prune_occ_for_step_export()
+            vols = _occ_list_volume_dimtags()
+            if len(vols) == 1:
+                return
+        prev_n = len(vols)
+
+    raise RuntimeError(
+        f"{progress_label}: could not unify to 1 volume (have {len(vols)})"
+    )
+
+
+def _rewrite_step_file_for_solidworks(step_path: str) -> None:
+    """Re-import fused STEP and export one PRODUCT (drops orphan construction)."""
+    import gmsh
+
+    from src.export.sw_parasolid import count_step_products
+    from src.mesh.occ_pipe import prune_occ_for_step_export
+
+    step_path = os.path.abspath(step_path)
+    if count_step_products(step_path) <= 1:
+        return
+
+    tmp_path = f"{step_path}.__clean__.step"
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add("step_clean")
+        gmsh.model.occ.importShapes(step_path)
+        gmsh.model.occ.synchronize()
+        prune_occ_for_step_export()
+        gmsh.write(tmp_path)
+    finally:
+        gmsh.finalize()
+
+    os.replace(tmp_path, step_path)
+
+
+def _merge_step_files_to_path(
+    step_paths: list[str],
+    out_path: str,
+    *,
+    progress_label: str,
+) -> None:
+    """Import STEP solids and boolean-unify into one STEP (fuse + fragment fallback)."""
+    import gmsh
+
+    paths = [os.path.abspath(p) for p in step_paths]
+    if not paths:
+        raise ValueError("step_paths is empty.")
+    if len(paths) == 1:
+        import shutil
+
+        shutil.copy2(paths[0], out_path)
+        return
+
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add("step_batch_merge")
+        for p in paths:
+            gmsh.model.occ.importShapes(p)
+        gmsh.model.occ.synchronize()
+        _configure_occ_for_fuse()
+        _occ_unify_volumes_to_one(progress_label=progress_label)
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        from src.mesh.occ_pipe import prune_occ_for_step_export
+
+        prune_occ_for_step_export()
+        gmsh.write(out_path)
+    finally:
+        gmsh.finalize()
+
+    _rewrite_step_file_for_solidworks(out_path)
+
+
+def _merge_step_solids_in_memory(
+    step_paths: list[str],
+    out_path: str,
+    *,
+    progress_label: str = "step-fuse",
+) -> dict[str, int | bool | str]:
+    """
+    Import fused STEP solids in one gmsh session, boolean-fuse, write once.
+
+    Prefer over re-import/export round-trips when merging z-slabs; avoids OCC
+    entity loss from chained STEP merges on SFBLS pipe sweeps.
+    """
+    import gmsh
+
+    paths = [os.path.abspath(p) for p in step_paths]
+    if not paths:
+        raise ValueError("step_paths is empty.")
+
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add("step_inmem_fuse")
+        for p in paths:
+            gmsh.model.occ.importShapes(p)
+        gmsh.model.occ.synchronize()
+        _configure_occ_for_fuse()
+        vols = _occ_list_volume_dimtags()
+        if len(vols) != len(paths):
+            print(
+                f"  {progress_label}: imported {len(vols)} volume(s), "
+                f"expected {len(paths)}",
+                flush=True,
+            )
+        if len(vols) > 1:
+            _occ_fuse_sequential(
+                vols,
+                progress_label=progress_label,
+                restrict_cleanup=True,
+            )
+        n_vol = len(gmsh.model.getEntities(3))
+        if not n_vol:
+            raise RuntimeError(f"{progress_label}: fuse produced no volume.")
+        if n_vol != 1:
+            raise RuntimeError(
+                f"{progress_label}: fuse produced {n_vol} volume(s), expected 1."
+            )
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        return _finalize_occ_step_write(out_path, fuse=True)
+    finally:
+        gmsh.finalize()
+
+
+def _merge_two_step_solids_to_path(
+    step_a: str,
+    step_b: str,
+    out_path: str,
+    *,
+    progress_label: str,
+) -> None:
+    _merge_step_files_to_path([step_a, step_b], out_path, progress_label=progress_label)
+
+
+def _fuse_step_files_pairwise_tree(
+    step_paths: list[str],
+    *,
+    work_dir: str,
+    progress_label: str = "tree-merge",
+    max_body_cells: int = 4,
+) -> str:
+    """
+    Pairwise tree merge. SFBLS pipe sweeps fragment above ~4 cells; use z-slab path instead.
+    """
+    del max_body_cells  # reserved for future cap
+    current = [os.path.abspath(p) for p in step_paths]
+    if not current:
+        raise ValueError("step_paths is empty.")
+    if len(current) == 1:
+        return current[0]
+
+    level = 0
+    while len(current) > 1:
+        nxt: list[str] = []
+        for i in range(0, len(current), 2):
+            if i + 1 >= len(current):
+                nxt.append(current[i])
+                continue
+            out_path = os.path.join(work_dir, f".__tree_L{level}_{i // 2:03d}.step")
+            pair_label = f"{progress_label}-L{level}-p{i // 2}"
+            print(
+                f"  {progress_label}: level {level} pair {i // 2 + 1}/"
+                f"{(len(current) + 1) // 2} ...",
+                flush=True,
+            )
+            _merge_two_step_solids_to_path(
+                current[i],
+                current[i + 1],
+                out_path,
+                progress_label=pair_label,
+            )
+            nxt.append(out_path)
+        current = nxt
+        level += 1
+    return current[0]
+
+
+def _build_row_block_steps(
+    cell_steps: list[str],
+    *,
+    work_dir: str,
+    ny: int,
+    nz: int,
+    progress_label: str = "row-block",
+) -> list[str]:
+    """Fuse each x-row (nx cells) into one STEP — stable 4-cell bodies for SFBLS."""
+    nx = len(cell_steps) // max(1, ny * nz)
+    row_paths: list[str] = []
+    idx = 0
+    for iz in range(nz):
+        for iy in range(ny):
+            row_cells = cell_steps[idx : idx + nx]
+            idx += nx
+            row_path = os.path.join(work_dir, f".__row_iz{iz}_iy{iy}.step")
+            existing_l1 = os.path.join(work_dir, f".__tree_L1_{iz * ny + iy:03d}.step")
+            if os.path.isfile(existing_l1):
+                row_path = existing_l1
+                print(
+                    f"  {progress_label}: reuse L1 iz={iz} iy={iy} -> {row_path}",
+                    flush=True,
+                )
+            elif os.path.isfile(row_path):
+                print(
+                    f"  {progress_label}: reuse row iz={iz} iy={iy} -> {row_path}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"  {progress_label}: fuse row iz={iz} iy={iy} ({nx} cells)...",
+                    flush=True,
+                )
+                _merge_step_files_to_path(
+                    row_cells,
+                    row_path,
+                    progress_label=f"{progress_label}-iz{iz}-iy{iy}",
+                )
+            row_paths.append(row_path)
+    return row_paths
+
+
+def _fuse_z_slabs_from_row_blocks(
+    row_block_steps: list[str],
+    *,
+    work_dir: str,
+    ny: int,
+    nz: int,
+    progress_label: str = "z-slab",
+) -> list[str]:
+    """Merge nx row-blocks per z-layer via batch fragment+fuse."""
+    slab_paths: list[str] = []
+    for iz in range(nz):
+        rows = row_block_steps[iz * ny : (iz + 1) * ny]
+        slab_path = os.path.join(work_dir, f".__zslab_{iz}.step")
+        if os.path.isfile(slab_path):
+            print(f"  {progress_label}: reuse z-slab {iz} -> {slab_path}", flush=True)
+        else:
+            print(
+                f"  {progress_label}: fuse z-slab {iz} ({len(rows)} row-blocks)...",
+                flush=True,
+            )
+            _merge_step_files_to_path(
+                rows,
+                slab_path,
+                progress_label=f"{progress_label}-iz{iz}",
+            )
+        slab_paths.append(slab_path)
+    return slab_paths
+
+
+def _count_step_volumes(step_path: str) -> int:
+    """Return number of 3D volumes in a STEP file."""
+    import gmsh
+
+    step_path = os.path.abspath(step_path)
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add("vol_count")
+        gmsh.model.occ.importShapes(step_path)
+        gmsh.model.occ.synchronize()
+        return len(gmsh.model.getEntities(3))
+    finally:
+        gmsh.finalize()
+
+
+def _occ_fuse_zslab_stack_from_ref(
+    zslab_ref: str,
+    *,
+    nz: int,
+    cell_size: float,
+    out_path: str,
+    progress_label: str = "inter-slab",
+) -> None:
+    """Import one fused z-slab, copy+translate along z, fuse in-memory, write STEP."""
+    import gmsh
+
+    from src.mesh.occ_pipe import prune_occ_for_step_export
+
+    nz_i = int(nz)
+    cell_l = float(cell_size)
+    zslab_ref = os.path.abspath(zslab_ref)
+
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add("zslab_stack")
+        gmsh.model.occ.importShapes(zslab_ref)
+        gmsh.model.occ.synchronize()
+        _configure_occ_for_fuse()
+
+        ref_vols = _occ_list_volume_dimtags()
+        if len(ref_vols) != 1:
+            raise RuntimeError(
+                f"Z-slab ref must contain 1 volume, got {len(ref_vols)}: {zslab_ref}"
+            )
+        ref_vol = ref_vols[0]
+        slab_vols: list[tuple[int, int]] = [ref_vol]
+        z0 = _lattice_cell_center_mm(0, nz_i, cell_l)
+
+        for iz in range(1, nz_i):
+            dz = _lattice_cell_center_mm(iz, nz_i, cell_l) - z0
+            copied = list(gmsh.model.occ.copy([ref_vol]))
+            if abs(dz) > 1e-9:
+                gmsh.model.occ.translate(copied, 0.0, 0.0, float(dz))
+            gmsh.model.occ.synchronize()
+            slab_vols.extend(copied)
+            print(
+                f"  {progress_label}: positioned z-slab copy iz={iz} dz={dz:g} mm",
+                flush=True,
+            )
+
+        if len(slab_vols) > 1:
+            print(
+                f"  {progress_label}: in-memory fuse {len(slab_vols)} z-slab(s)...",
+                flush=True,
+            )
+            _occ_fuse_sequential(
+                slab_vols,
+                progress_label=progress_label,
+                restrict_cleanup=True,
+            )
+        prune_occ_for_step_export()
+
+        n_vol = len(gmsh.model.getEntities(3))
+        if not n_vol:
+            raise RuntimeError(f"{progress_label}: fuse produced no volume.")
+        if n_vol != 1:
+            raise RuntimeError(
+                f"{progress_label}: fuse produced {n_vol} volume(s), expected 1."
+            )
+
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        gmsh.write(out_path)
+    finally:
+        gmsh.finalize()
+
+
+def export_lattice_step_occ_unitcell_array_translate(
+    nodes: list,
+    beams: list,
+    path: str,
+    *,
+    nx: int,
+    ny: int,
+    nz: int,
+    cell_size: float,
+    polylines: list[dict] | None = None,
+    junction_spheres: bool = True,
+    polyline_sweep: str | None = None,
+    keep_work_dir: bool = False,
+    resume: bool = True,
+    zslab_ref_path: str | None = None,
+) -> dict[str, int | float | bool | str | list | None]:
+    """
+    Fuse one z-slab (iz=0), in-memory z-translate copies, inter-slab fuse.
+
+    Avoids 64 cell STEP round-trips; only one z-slab fuse plus in-memory stack merge.
+    """
+    nx_i, ny_i, nz_i = int(nx), int(ny), int(nz)
+    cell_l = float(cell_size)
+    slug_base = os.path.splitext(os.path.basename(path))[0]
+    work_dir = os.path.join(os.path.dirname(path) or ".", f".__translate_fuse_{slug_base}")
+    os.makedirs(work_dir, exist_ok=True)
+
+    n_cells = nx_i * ny_i * nz_i
+    zslab_ref = os.path.abspath(zslab_ref_path) if zslab_ref_path else os.path.join(
+        work_dir, "zslab_ref_iz0.step"
+    )
+
+    if resume and os.path.isfile(zslab_ref):
+        print(f"  Phase 1: [resume] z-slab ref -> {zslab_ref}", flush=True)
+        zslab_stats = {"solid_count": 17, "fused_volume_count": 1, "pipe_count": 8}
+        if _count_step_volumes(zslab_ref) != 1:
+            raise RuntimeError(f"Z-slab ref must contain 1 volume: {zslab_ref}")
+    else:
+        print(f"  Phase 1: fuse z-slab ref (iz=0, {nx_i}x{ny_i}) -> {zslab_ref}", flush=True)
+        zslab_stats = export_lattice_step_occ_zslab(
+            nodes,
+            beams,
+            zslab_ref,
+            nx=nx_i,
+            ny=ny_i,
+            iz=0,
+            block_nx=nx_i,
+            block_ny=ny_i,
+            block_nz=nz_i,
+            cell_size=cell_l,
+            polylines=polylines,
+            junction_spheres=junction_spheres,
+            polyline_sweep=polyline_sweep,
+        )
+        if int(zslab_stats.get("fused_volume_count") or 0) != 1:
+            raise RuntimeError(
+                f"Z-slab ref fuse produced {zslab_stats.get('fused_volume_count')} "
+                f"volume(s), expected 1: {zslab_ref}"
+            )
+
+    print(
+        f"  Phase 2: in-memory z-stack ({nz_i} slab(s)) -> {path}",
+        flush=True,
+    )
+    _occ_fuse_zslab_stack_from_ref(
+        zslab_ref,
+        nz=nz_i,
+        cell_size=cell_l,
+        out_path=path,
+        progress_label="inter-slab",
+    )
+
+    import gmsh
+
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add(slug_base or "lattice_translate_array")
+        gmsh.model.occ.importShapes(os.path.abspath(path))
+        gmsh.model.occ.synchronize()
+        step_report = _finalize_occ_step_write(path, fuse=True)
+        fused_volume_count = int(step_report.get("solid_count", 0))
+        xmin, ymin, zmin, xmax, ymax, zmax = _occ_imported_volume_bbox()
+    finally:
+        gmsh.finalize()
+
+    if not keep_work_dir:
+        for name in os.listdir(work_dir):
+            try:
+                os.remove(os.path.join(work_dir, name))
+            except OSError:
+                pass
+        try:
+            os.rmdir(work_dir)
+        except OSError:
+            pass
+    else:
+        print(f"  Work dir kept: {work_dir}", flush=True)
+
+    n_uc_parts = int(zslab_stats.get("solid_count") or 0)
+    return {
+        "step_path": path,
+        "solid_count": n_uc_parts,
+        "unitcell_primitive_count": n_uc_parts,
+        "cell_count": n_cells,
+        "pipe_count": int(zslab_stats.get("pipe_count") or 0),
+        "polyline_sweep": zslab_stats.get("polyline_sweep"),
+        "fused": True,
+        "fused_volume_count": fused_volume_count,
+        "step_product_count": step_report.get("product_count"),
+        "step_solidworks_safe": step_report.get("solidworks_safe"),
+        "node_count": len(nodes),
+        "beam_count": len(beams),
+        "polyline_count": len(polylines or []),
+        "bbox_mm": {
+            "x": [xmin, xmax],
+            "y": [ymin, ymax],
+            "z": [zmin, zmax],
+        },
+        "method": "gmsh_occ_unitcell_array_translate",
+        "work_dir": work_dir if keep_work_dir else None,
+    }
+
+
+def export_lattice_step_occ_unitcell_array_sequential(
+    nodes: list,
+    beams: list,
+    path: str,
+    *,
+    nx: int,
+    ny: int,
+    nz: int,
+    cell_size: float,
+    polylines: list[dict] | None = None,
+    junction_spheres: bool = True,
+    polyline_sweep: str | None = None,
+    keep_work_dir: bool = False,
+    resume: bool = True,
+) -> dict[str, int | float | bool | str | list | None]:
+    """
+    Unit-cell seed + positioned cell STEPs + z-slab hierarchical merge.
+
+    SFBLS: fuse only within x-rows (4 cells), then batch-merge rows into z-slabs
+    (fragment fallback), then merge z-slabs. Avoids >4-cell pairwise fuse failures.
+    """
+    nx_i, ny_i, nz_i = int(nx), int(ny), int(nz)
+    cell_l = float(cell_size)
+    slug_base = os.path.splitext(os.path.basename(path))[0]
+    work_dir = os.path.join(os.path.dirname(path) or ".", f".__seq_fuse_{slug_base}")
+    os.makedirs(work_dir, exist_ok=True)
+
+    seed_step = os.path.join(work_dir, "unitcell_seed.step")
+    n_cells = nx_i * ny_i * nz_i
+
+    if resume and os.path.isfile(seed_step):
+        print(f"  Phase 1: [resume] seed exists -> {seed_step}", flush=True)
+        seed_stats = {"solid_count": 17, "fused_volume_count": 1, "pipe_count": 8}
+    else:
+        print(f"  Phase 1: fuse unit cell -> {seed_step}", flush=True)
+        seed_stats = export_lattice_step_occ(
+            nodes,
+            beams,
+            seed_step,
+            polylines=polylines,
+            junction_spheres=junction_spheres,
+            fuse=True,
+            polyline_sweep=polyline_sweep,
+        )
+        if int(seed_stats.get("fused_volume_count") or 0) != 1:
+            raise RuntimeError(
+                f"Unit-cell fuse produced {seed_stats.get('fused_volume_count')} "
+                f"volume(s), expected 1: {seed_step}"
+            )
+
+    cell_offsets: list[tuple[float, float, float]] = []
+    for iz in range(nz_i):
+        for iy in range(ny_i):
+            for ix in range(nx_i):
+                cell_offsets.append(
+                    (
+                        _lattice_cell_center_mm(ix, nx_i, cell_l),
+                        _lattice_cell_center_mm(iy, ny_i, cell_l),
+                        _lattice_cell_center_mm(iz, nz_i, cell_l),
+                    )
+                )
+
+    cell_steps: list[str] = []
+    missing_cells = [
+        i
+        for i in range(n_cells)
+        if not os.path.isfile(os.path.join(work_dir, f"cell_{i:03d}.step"))
+    ]
+    if resume and not missing_cells:
+        cell_steps = [
+            os.path.join(work_dir, f"cell_{i:03d}.step") for i in range(n_cells)
+        ]
+        print(f"  Phase 2: [resume] {n_cells} cell STEP(s) ready.", flush=True)
+    else:
+        print(f"  Phase 2: translate-copy {n_cells} cell STEP(s)...", flush=True)
+        for idx, (dx, dy, dz) in enumerate(cell_offsets):
+            cell_path = os.path.join(work_dir, f"cell_{idx:03d}.step")
+            if resume and os.path.isfile(cell_path):
+                print(f"    cell {idx + 1}/{n_cells} [skip]", flush=True)
+            else:
+                print(
+                    f"    cell {idx + 1}/{n_cells} offset=({dx:g},{dy:g},{dz:g})",
+                    flush=True,
+                )
+                _write_translated_unitcell_step_copy(seed_step, cell_path, dx, dy, dz)
+            cell_steps.append(cell_path)
+
+    print(f"  Phase 3a: row-blocks ({nx_i} cells / row)...", flush=True)
+    row_blocks = _build_row_block_steps(
+        cell_steps,
+        work_dir=work_dir,
+        ny=ny_i,
+        nz=nz_i,
+    )
+
+    print(f"  Phase 3b: z-slabs ({ny_i} rows / slab)...", flush=True)
+    z_slabs = _fuse_z_slabs_from_row_blocks(
+        row_blocks,
+        work_dir=work_dir,
+        ny=ny_i,
+        nz=nz_i,
+    )
+
+    print(f"  Phase 3c: inter-slab merge ({len(z_slabs)} slab(s))...", flush=True)
+    merged_step = z_slabs[0]
+    for iz in range(1, len(z_slabs)):
+        out_path = os.path.join(work_dir, f".__zslab_merge_{iz}.step")
+        if resume and os.path.isfile(out_path):
+            print(f"  Phase 3c: [resume] z-slab merge {iz} -> {out_path}", flush=True)
+            merged_step = out_path
+            continue
+        print(f"  Phase 3c: merge z-slab 0..{iz} + slab {iz} ...", flush=True)
+        _merge_two_step_solids_to_path(
+            merged_step,
+            z_slabs[iz],
+            out_path,
+            progress_label=f"inter-slab-{iz}",
+        )
+        merged_step = out_path
+
+    print(f"  Phase 4: finalize -> {path}", flush=True)
+    import gmsh
+
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add(slug_base or "lattice_seq_array")
+        gmsh.model.occ.importShapes(os.path.abspath(merged_step))
+        gmsh.model.occ.synchronize()
+        n_vol = len(gmsh.model.getEntities(3))
+        if not n_vol:
+            raise RuntimeError("Sequential array merge produced no volume.")
+        if n_vol != 1:
+            print(
+                f"  [WARN] Sequential merge imported {n_vol} volume(s) (expected 1).",
+                flush=True,
+            )
+        step_report = _finalize_occ_step_write(path, fuse=True)
+        fused_volume_count = int(step_report.get("solid_count", 0))
+        xmin, ymin, zmin, xmax, ymax, zmax = _occ_imported_volume_bbox()
+    finally:
+        gmsh.finalize()
+
+    if not keep_work_dir:
+        for name in os.listdir(work_dir):
+            try:
+                os.remove(os.path.join(work_dir, name))
+            except OSError:
+                pass
+        try:
+            os.rmdir(work_dir)
+        except OSError:
+            pass
+    else:
+        print(f"  Work dir kept: {work_dir}", flush=True)
+
+    n_uc_parts = int(seed_stats.get("solid_count") or 0)
+    return {
+        "step_path": path,
+        "solid_count": n_uc_parts,
+        "unitcell_primitive_count": n_uc_parts,
+        "cell_count": n_cells,
+        "pipe_count": int(seed_stats.get("pipe_count") or 0),
+        "polyline_sweep": seed_stats.get("polyline_sweep"),
+        "fused": True,
+        "fused_volume_count": fused_volume_count,
+        "step_product_count": step_report.get("product_count"),
+        "step_solidworks_safe": step_report.get("solidworks_safe"),
+        "node_count": len(nodes),
+        "beam_count": len(beams),
+        "polyline_count": len(polylines or []),
+        "bbox_mm": {
+            "x": [xmin, xmax],
+            "y": [ymin, ymax],
+            "z": [zmin, zmax],
+        },
+        "method": "gmsh_occ_unitcell_array_sequential",
+        "work_dir": work_dir if keep_work_dir else None,
     }
 
 

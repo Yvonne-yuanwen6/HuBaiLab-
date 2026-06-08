@@ -51,6 +51,12 @@ _parser.add_argument("--Q", type=float, default=0.0, help="Period factor Q (0=BC
 _parser.add_argument("--Af", type=float, default=2.0, help="Sinusoidal amplitude A_f [mm]")
 _parser.add_argument("--cells", type=int, default=3, help="Cells per axis (paper 4; use 3 for test STEP)")
 _parser.add_argument(
+    "--nz",
+    type=int,
+    default=None,
+    help="Override nz (e.g. 1 for single z-slab pilot mesh); default = --cells",
+)
+_parser.add_argument(
     "--cad",
     type=str,
     default="",
@@ -143,7 +149,8 @@ L = 20.0
 ROD_D = 2.0
 AF = float(_args.Af)
 Q = float(_args.Q)
-NX = NY = NZ = int(_args.cells)
+NX = NY = int(_args.cells)
+NZ = int(_args.nz) if _args.nz is not None else int(_args.cells)
 if _args.mesh_size is not None:
     MESH_SIZE = float(_args.mesh_size)
 elif PROFILE == "fast":
