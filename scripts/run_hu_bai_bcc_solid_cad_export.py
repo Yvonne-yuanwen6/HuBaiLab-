@@ -31,6 +31,7 @@ from src.export.abaqus_compression import (
     HU_BAI_FRICTION,
     HU_BAI_LOAD_RATE_MM_MIN,
     HU_BAI_TARGET_ENGINEERING_STRAIN,
+    validate_explicit_restart_inp,
     hu_bai_compression_displacement,
     hu_bai_quasi_static_step_time,
 )
@@ -78,7 +79,7 @@ _parser.add_argument(
     "--profile",
     choices=("fast", "paper", "pilot"),
     default=None,
-    help="fast = ~2–4 h curve (45%% strain, 1.2 mm, 25 mm/min, dt=5e-4); paper = 70%%/0.6 mm; pilot = 15%% QA",
+    help="fast = 45%% strain, 1.2 mm, 10 mm/min; fast80 = --case-suffix fast80 --strain 0.8 (0.8 mm, 10 mm/min); paper/pilot = full QA",
 )
 _parser.add_argument(
     "--stroke",
@@ -141,9 +142,13 @@ PILOT_MESH_MM = 1.0
 FULL_MESH_MM = 0.6
 FAST_STRAIN = 0.45
 FAST_MESH_MM = 1.2
-FAST_LOAD_RATE_MM_MIN = 25.0
+FAST_LOAD_RATE_MM_MIN = 10.0
+FAST80_MESH_MM = 0.8
 FAST_EXPLICIT_DT = 5.0e-4
 FAST_HOLD_FRACTION = 0.02
+
+CASE_SUFFIX_RAW = _args.case_suffix.strip().replace(" ", "_")
+IS_FAST80 = CASE_SUFFIX_RAW == "fast80"
 
 L = 20.0
 ROD_D = 2.0
@@ -153,6 +158,8 @@ NX = NY = int(_args.cells)
 NZ = int(_args.nz) if _args.nz is not None else int(_args.cells)
 if _args.mesh_size is not None:
     MESH_SIZE = float(_args.mesh_size)
+elif IS_FAST80:
+    MESH_SIZE = FAST80_MESH_MM
 elif PROFILE == "fast":
     MESH_SIZE = FAST_MESH_MM
 elif STROKE == "pilot":
@@ -179,7 +186,7 @@ BLOCK_HEIGHT = NZ * L
 COMPRESSION_DISP = hu_bai_compression_displacement(NZ, L, target_strain=TARGET_STRAIN)
 if _args.load_rate_mm_min is not None:
     LOAD_RATE_MM_MIN = float(_args.load_rate_mm_min)
-elif PROFILE == "fast":
+elif IS_FAST80 or PROFILE == "fast":
     LOAD_RATE_MM_MIN = FAST_LOAD_RATE_MM_MIN
 else:
     LOAD_RATE_MM_MIN = HU_BAI_LOAD_RATE_MM_MIN
@@ -206,7 +213,7 @@ else:
     HOLD_FRACTION = 0.05
 EXPLICIT_MASS_SCALING = HU_BAI_EXPLICIT_MASS_SCALING
 STROKE_TAG = "p" if STROKE == "pilot" else "f"
-CASE_SUFFIX = _args.case_suffix.strip().replace(" ", "_")
+CASE_SUFFIX = CASE_SUFFIX_RAW
 if PROFILE == "fast" and not CASE_SUFFIX:
     CASE_SUFFIX = "fast"
 N_INC_EST = max(100, int(round(STEP_TIME / EXPLICIT_DT)))
@@ -351,6 +358,9 @@ stats = export_inp(
     pre_mesh=pre_mesh,
 )
 
+with open(paths["compression_inp"], encoding="utf-8", errors="replace") as _inp_f:
+    validate_explicit_restart_inp(_inp_f.read())
+
 meta = CompressionMeta.from_export_stats(
     nx=NX,
     ny=NY,
@@ -440,7 +450,7 @@ manifest = {
         "lattice_load_nodes": stats.get("lattice_load_nodes"),
         "lattice_self_contact": compression.lattice_self_contact,
         "explicit_restart_write": compression.explicit_restart_write,
-        "explicit_restart_write_interval": compression.resolved_restart_write_interval(),
+        "explicit_restart_number_interval": compression.resolved_restart_number_interval(),
     },
 }
 with open(paths["case_manifest"], "w", encoding="utf-8") as f:
@@ -475,5 +485,11 @@ print(
     f"({LOAD_RATE_MM_MIN:g} mm/min, {_rate_note}), μ={FRICTION}"
 )
 print(f"  Explicit: dt={EXPLICIT_DT:g} s, mass scaling ×{EXPLICIT_MASS_SCALING:g}, ~{N_INC_EST} increments")
+if compression.explicit_restart_write:
+    n_rst = compression.resolved_restart_number_interval()
+    print(
+        f"  Restart: overlay, number interval={n_rst} "
+        f"(~{n_rst + 1} time checkpoints; disk-safe, not increment stride)"
+    )
 print(f"  Job slug: {slug}")
 print("  >>> Submit: powershell -File scripts\\submit_hu_bai_bcc_solid_cad_compression.ps1")

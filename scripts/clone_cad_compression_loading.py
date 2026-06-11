@@ -131,7 +131,7 @@ def main() -> int:
     if args.load_rate_mm_min > 0:
         load_rate = float(args.load_rate_mm_min)
     elif fast80:
-        load_rate = 25.0
+        load_rate = 10.0
     else:
         load_rate = float(src["loading"]["load_rate_mm_min"])
     if args.explicit_dt > 0:

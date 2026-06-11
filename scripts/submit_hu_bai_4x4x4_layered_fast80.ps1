@@ -1,12 +1,12 @@
 # Wait for 4x4x4 layered STEP files, then export + submit fast80 (80% strain) sequentially.
-# Matches 3x3x3 Fig.3.3 SFBLS fast80: profile=fast, mesh=1.42 mm, strain=80%, dt=5e-4, 25 mm/min.
+# Matches Fig.3.3 SFBLS fast80: profile=fast, mesh=0.8 mm, strain=80%, dt=5e-4, 10 mm/min.
 param(
     [switch]$ForceRerun,
     [switch]$SkipWait,
     [int]$PollSeconds = 120,
     [int]$MemoryMB = 8192,
     [int]$Cpus = 4,
-    [double]$MeshSize = 1.42,
+    [double]$MeshSize = 0.8,
     [double]$Strain = 0.8
 )
 

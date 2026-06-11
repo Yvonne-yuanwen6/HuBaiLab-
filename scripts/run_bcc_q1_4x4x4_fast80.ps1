@@ -5,7 +5,7 @@ param(
     [switch]$ForceRerun,
     [int]$MemoryMB = 8192,
     [int]$Cpus = 4,
-    [double]$MeshSize = 1.42,
+    [double]$MeshSize = 0.8,
     [double]$Strain = 0.8
 )
 
@@ -118,15 +118,15 @@ function Ensure-BccFastExport {
         loading = @{
             compression_displacement_mm = 36.0
             target_engineering_strain = 0.45
-            step_time_s = 86.4
-            load_rate_mm_min = 25.0
+            step_time_s = 216.0
+            load_rate_mm_min = 10.0
             quasi_static_paper_rate = $false
             step_time_overridden = $false
             friction = 0.1
             explicit_dt = 0.0005
             amplitude_hold_fraction = 0.02
             explicit_mass_scaling = 50.0
-            explicit_n_increments_est = 172800
+            explicit_n_increments_est = 432000
             case_suffix = "fast"
             contact_mode = "pair"
             fixed_bottom_plate = $true
@@ -143,7 +143,26 @@ function Ensure-BccFastExport {
     [System.IO.File]::WriteAllText($fastManifest, $manifestJson, (New-Object System.Text.UTF8Encoding $false))
 }
 
+function Invoke-BccFast80ExportSubmit {
+    $cadCandidates = @(
+        (Join-Path $Root "output\cad\verified\hu_bai_bcc_af2q0_L20_4x4x4_solid_merged.STEP"),
+        (Join-Path $Root "output\cad\hu_bai_bcc_af2q0_L20_4x4x4_solid_array.step")
+    )
+    $cad = $cadCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $cad) {
+        Write-Host "[ERROR] Missing BCC 4x4x4 CAD STEP. Expected one of:" -ForegroundColor Red
+        $cadCandidates | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+        exit 1
+    }
+    Invoke-ExportSubmit `
+        -Label "BCC Q=0 fast80" `
+        -Q 0 `
+        -Slug "hu_bai_bcc_af2q0_L20_4x4x4_solid_cad_f_fast80" `
+        -Cad $cad
+}
+
 function Invoke-BccFast80CloneSubmit {
+    # Legacy: clone mesh from fast (1.2 mm). Prefer Invoke-BccFast80ExportSubmit for new defaults.
     Ensure-BccFastExport
     $ProjectPy = Get-ProjectPython
     $fastSlug = "hu_bai_bcc_af2q0_L20_4x4x4_solid_cad_f_fast"
@@ -241,7 +260,7 @@ function Invoke-ExportSubmit {
 Write-Host "=== 4x4x4 BCC fast80 -> Q1 fast80 pipeline ===" -ForegroundColor Yellow
 
 if (-not $SkipBcc) {
-    Invoke-BccFast80CloneSubmit
+    Invoke-BccFast80ExportSubmit
 }
 
 if (-not $SkipQ1) {

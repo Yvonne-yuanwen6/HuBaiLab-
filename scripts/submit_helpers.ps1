@@ -49,7 +49,6 @@ function Test-AbaqusRestartAvailable {
     $odb = Join-Path $JobDir ($JobName + '.odb')
     if (-not ((Test-Path $stt) -and (Test-Path $pac) -and (Test-Path $odb))) { return $false }
 
-    $hasRestartWrite = $false
     $inpCandidates = @(
         (Join-Path $JobDir ($JobName + '.inp'))
     )
@@ -62,13 +61,45 @@ function Test-AbaqusRestartAvailable {
     }
     foreach ($inpPath in ($inpCandidates | Select-Object -Unique)) {
         if (-not (Test-Path $inpPath)) { continue }
-        $inpText = Get-Content $inpPath -Raw -ErrorAction SilentlyContinue
-        if ($inpText -match '(?m)^\*Restart,\s*write') {
-            $hasRestartWrite = $true
-            break
+        if (Test-ExplicitRestartInpSafe -InpPath $inpPath) {
+            return $true
         }
     }
-    return $hasRestartWrite
+    return $false
+}
+
+function Test-ExplicitRestartInpSafe {
+    param(
+        [Parameter(Mandatory)][string]$InpPath
+    )
+    if (-not (Test-Path $InpPath)) { return $true }
+    $inpText = Get-Content $InpPath -Raw -ErrorAction SilentlyContinue
+    if (-not ($inpText -match '(?m)^\*Restart,\s*write')) { return $true }
+    if ($inpText -notmatch '(?m)^\*Restart,\s*write[^\r\n]*\boverlay\b') {
+        Write-Host "[ERROR] Unsafe *Restart in INP (missing OVERLAY): $InpPath" -ForegroundColor Red
+        return $false
+    }
+    if ($inpText -match '(?m)^\*Restart,\s*write[^\r\n]*number interval=(\d+)') {
+        $n = [int]$Matches[1]
+        if ($n -lt 1 -or $n -gt 50) {
+            Write-Host "[ERROR] Unsafe *Restart NUMBER INTERVAL=$n in INP (must be 1..50 time slices, not increment count): $InpPath" -ForegroundColor Red
+            return $false
+        }
+        return $true
+    }
+    Write-Host "[ERROR] Unsafe *Restart in INP (missing NUMBER INTERVAL): $InpPath" -ForegroundColor Red
+    return $false
+}
+
+function Assert-ExplicitRestartInpSafe {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$InpPath
+    )
+    if (-not (Test-ExplicitRestartInpSafe -InpPath $InpPath)) {
+        Write-Host "  Re-export INP after updating HuBaiLab (overlay + number interval=8)." -ForegroundColor Yellow
+        exit 1
+    }
 }
 
 function Confirm-SkipCompletedSolve {
@@ -439,6 +470,29 @@ function Prepare-AbaqusJobContinue {
         Write-Host "  Removing stale lock: $lck" -ForegroundColor Yellow
         Remove-Item $lck -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Add-ExplicitRestartReadToInp {
+    param(
+        [Parameter(Mandatory)][string]$InpPath
+    )
+    if (-not (Test-Path $InpPath)) {
+        throw "INP not found for restart read: $InpPath"
+    }
+    $text = Get-Content $InpPath -Raw -Encoding UTF8
+    if ($text -match '(?m)^\*Restart,\s*read\b') {
+        return
+    }
+    if ($text -notmatch '(?m)^\*Step,') {
+        throw "INP missing *Step block: $InpPath"
+    }
+    $updated = [regex]::Replace(
+        $text,
+        '(?m)^(\*Step,)',
+        "*Restart, read, step=1`r`n`$1",
+        1
+    )
+    Set-Content -Path $InpPath -Value $updated -NoNewline -Encoding UTF8
 }
 
 function Clear-AbaqusJobDirectory {

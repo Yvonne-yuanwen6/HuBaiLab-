@@ -7,7 +7,7 @@ param(
     [double]$MinFreeGB = 3.0,
     [int]$MemoryMB = 8192,
     [int]$Cpus = 4,
-    [double]$MeshSize = 1.42,
+    [double]$MeshSize = 0.8,
     [double]$Strain = 0.8,
     [int]$RamPollSec = 20
 )

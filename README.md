@@ -161,16 +161,24 @@ py -3 scripts/preview_hu_bai_sfbls.py --all-q --cells 1
 | 质量缩放 | ×50（`BELOW MIN, dt=…`） |
 | 板位 | `plate_margin=10 mm`，`plate_embed≈0.4–0.6 mm` |
 
-**fast80 加速档**（Fig. 3.3 对比用，非论文原参）：工程应变 **80%**，Explicit **dt = 5×10⁻⁴ s**，准静态加载 **25 mm/min**（SFBLS 细网格时可降至 15 mm/min），幅值 hold **2%** step_time，`--profile fast --case-suffix fast80 --strain 0.8`。
+**fast 加速档**（非论文原参）：工程应变 **45%**，gmsh **1.2 mm**，准静态加载 **10 mm/min**，Explicit **dt = 5×10⁻⁴ s**，幅值 hold **2%** step_time，`--profile fast`（4×4×4：36 mm / **216 s**）。
+
+**fast80 加速档**（Fig. 3.3 对比用）：工程应变 **80%**，gmsh **0.8 mm**，其余同 fast（**10 mm/min**，dt = 5×10⁻⁴），`--profile fast --case-suffix fast80 --strain 0.8`（4×4×4：64 mm / **384 s**，约 768 000 增量）。
 
 ### 端到端完成（STEP → 网格 → Abaqus → 应力–应变曲线）
 
 | slug | 几何 | STEP 模型 | 网格划分 | 仿真设置 | 结果 |
 |------|------|-----------|----------|----------|------|
-| `hu_bai_bcc_af2q0_L20_3x3x3_solid_cad_f_fast80` | BCC Q=0，3×3×3 | `output/cad/hu_bai_bcc_af2q0_L20_3x3x3_solid_array.step`（单胞 OCC 阵列 `_solid_array`） | 目标尺寸 **1.2 mm**；**25 602** 节点，**66 217** C3D4 | fast80：80% 应变，压缩 **48 mm / 115.2 s**，dt = 5×10⁻⁴，25 mm/min，~230 400 增量 | `.sta` 成功；曲线见 `output/post/{slug}/`（峰值应变 ≈ **77%**） |
-| `hu_bai_bcc_af2q0_L20_4x4x4_solid_cad_f_fast80` | BCC Q=0，4×4×4 | `output/cad/hu_bai_bcc_af2q0_L20_4x4x4_solid_array.step`（同上；fast80 自 fast 算例 **克隆网格** 仅改加载） | 目标尺寸 **1.2 mm**；**57 212** 节点，**147 895** C3D4 | fast80：80% 应变，压缩 **64 mm / 153.6 s**，dt = 5×10⁻⁴，25 mm/min，~307 200 增量 | `.sta` 成功；峰值应变 ≈ **78%** |
+| `hu_bai_bcc_af2q0_L20_3x3x3_solid_cad_f_fast80_lr25m12` | BCC Q=0，3×3×3 | `output/cad/hu_bai_bcc_af2q0_L20_3x3x3_solid_array.step`（单胞 OCC 阵列 `_solid_array`） | 目标尺寸 **1.2 mm**；**25 602** 节点，**66 217** C3D4 | fast80：80% 应变，压缩 **48 mm / 115.2 s**，dt = 5×10⁻⁴，**25 mm/min**，~230 400 增量 | `.sta` 成功（**已归档** `_lr25m12`） |
+| `hu_bai_bcc_af2q0_L20_4x4x4_solid_cad_f_fast80_lr25m12` | BCC Q=0，4×4×4 | `output/cad/hu_bai_bcc_af2q0_L20_4x4x4_solid_array.step` | 目标尺寸 **1.2 mm**；**57 212** 节点，**147 895** C3D4 | fast80：80% 应变，压缩 **64 mm / 153.6 s**，dt = 5×10⁻⁴，**25 mm/min**，~307 200 增量 | `.sta` 成功（**已归档** `_lr25m12`） |
 
-复现 BCC 4×4×4 fast80：
+旧参算例已重命名归档（释放 canonical slug `*_fast80`）。归档命令：
+
+```powershell
+powershell -File scripts/archive_bcc_fast80_legacy.ps1
+```
+
+复现 BCC 4×4×4 fast80（**新默认**：0.8 mm、10 mm/min、384 s）：
 
 ```powershell
 py -3 scripts/run_hu_bai_bcc_unitcell_array_step_fuse.py --cells 4 --Q 0
@@ -182,7 +190,8 @@ powershell -File scripts/run_bcc_q1_4x4x4_fast80.ps1 -SkipQ1   # 仅 BCC fast80
 | 变体 | STEP 路径 | 生成方式 | SW / gmsh 验收 |
 |------|-----------|----------|----------------|
 | SFBLS Q=0.5/1/1.5 单胞 | `output/cad/_unitcell_check/unitcell_sfbls_af2q{0p5,1,1p5}_fused.step` | `export_unitcell_seed_check.py --Q …`，**pipe-first** + 平行移动截面扫掠（`occ_pipe.py`） | 8 杆均匀圆柱截面，9 节点球，单实体 |
-| SFBLS Q=1.0，4×4×4 | `output/cad/verified/hu_bai_sfbls_af2q1_L20_4x4x4_solid_merged.STEP` | 新扫掠 z-slab → SW 合并 → `cad/verified/` | 已用于 fast80 网格导出 |
+| SFBLS Q=1.0，4×4×4 | `output/cad/verified/hu_bai_sfbls_af2q1_L20_4x4x4_solid_merged.STEP` | `run_sfbls_sw_stepwise_4x4x4_pipeline.ps1`：16 体 compound → SW → Z 复制 → 4 体 SW 合并 | 已用于 fast80 网格导出 |
+| **BCC Q=0，4×4×4**（进行中） | `output/cad/_stepwise_q0/` → `verified/…_solid_merged.STEP` | **同上 SW 步进** `-Q 0`；16 体已生成，待 SW 合并 | OCC 自动融合暂停，见 `docs/cad_fuse_routes.md` |
 
 > **manual/ 旧文件已清理**：此前 `output/cad/manual/` 下的 z-slab / merged STEP 为 Frenet 圆片堆叠（错误扫掠），已全部删除。请用修复后的扫掠重新生成：
 >
@@ -195,7 +204,7 @@ powershell -File scripts/run_bcc_q1_4x4x4_fast80.ps1 -SkipQ1   # 仅 BCC fast80
 
 | slug | STEP | 网格 | 仿真设置 | 状态 |
 |------|------|------|----------|------|
-| `hu_bai_sfbls_af2q0p5_L20_4x4x4_solid_cad_f_fast80` | `…/hu_bai_sfbls_af2q0p5_L20_4x4x4_solid_array.step` | **1.42 mm**；42 625 节点，103 786 C3D4 | fast80，153.6 s，25 mm/min | Abaqus 运行中 |
+| `hu_bai_sfbls_af2q0p5_L20_4x4x4_solid_cad_f_fast80` | `…/hu_bai_sfbls_af2q0p5_L20_4x4x4_solid_array.step` | **1.42 mm**（旧）；新默认 **0.8 mm** | fast80，256 s，15 mm/min | Abaqus 运行中 |
 | `hu_bai_sfbls_af2q1_L20_4x4x4_solid_cad_f_fast80` | `cad/verified/…_solid_merged.STEP` | **0.8 mm**；121 525 节点，329 767 C3D4 | fast80，256 s，**15 mm/min** | Abaqus 运行中（已有部分 ODB 采样） |
 
 Fig. 3.3 目标批量（3×3×3 SFBLS Q=0.5/1/1.5 fast80）见 `scripts/submit_hu_bai_fig33_sfbls_fast80.ps1`；4×4×4 SFBLS 流水线见 `scripts/run_hu_bai_sfbls_4x4x4_array_pipeline.ps1`。
@@ -208,7 +217,9 @@ Fig. 3.3 目标批量（3×3×3 SFBLS Q=0.5/1/1.5 fast80）见 `scripts/submit_h
 | `export_pair_fuse_check.py` | 2-cell 化合物（Y + X）；Q=1.0 勿用 STEP 种子 `--fuse`（SW 中为曲面实体） |
 | `export_line_from_unitcell_seed.py` | 由单胞种子平移生成 N-cell 线阵列 |
 | `export_zslab_layer_from_column.py` | 4×4 z 层化合物 / 行融合 |
-| `run_hu_bai_bcc_unitcell_array_step_fuse.py` | **推荐** 单胞 OCC 阵列融合 STEP |
+| `run_hu_bai_bcc_unitcell_array_step_fuse.py` | 单胞 OCC 阵列融合 STEP（legacy；BCC 推荐 `run_hu_bai_array_auto_fuse.py`） |
+| `run_hu_bai_array_auto_fuse.py` | BCC OCC 自动阵列融合（**暂停/门控禁用**；问题见 `docs/cad_fuse_routes.md`） |
+| `docs/cad_fuse_routes.md` | CAD 融合路线、BCC OCC 已知问题与 SW 步进说明 |
 | `run_hu_bai_bcc_layered_step_fuse.py` | z 层分层融合（4×4×4 备选，较慢） |
 | `run_hu_bai_sfbls_step_fuse.py` | 一次性 monolithic fuse（≤3×3×3） |
 | `run_hu_bai_bcc_sw_export.py` | STL / STEP / X_T 导出 |
@@ -217,7 +228,8 @@ Fig. 3.3 目标批量（3×3×3 SFBLS Q=0.5/1/1.5 fast80）见 `scripts/submit_h
 | `submit_hu_bai_bcc_solid_cad_compression.ps1` | 实体压缩一键：导出 → 求解 → 曲线 |
 | `submit_hu_bai_bcc_compression.ps1` | B31 压缩一键提交 |
 | `submit_hu_bai_4x4x4_layered_fast80.ps1` | 4×4×4 分层 STEP + fast80 批量 |
-| `run_hu_bai_sfbls_4x4x4_array_pipeline.ps1` | 4×4×4 SFBLS 阵列流水线 |
+| `run_hu_bai_sfbls_4x4x4_array_pipeline.ps1` | 4×4×4 SFBLS 阵列流水线（OCC 单胞阵列 fuse） |
+| `run_sfbls_sw_stepwise_4x4x4_pipeline.ps1` | **4×4×4 已验证 SW 步进路线**（BCC Q=0 / SFBLS；16 体→SW→Z 复制→4 体→SW→fast80） |
 | `validate_step_solidworks.py` | STEP 单实体校验（导入 SW 前） |
 | `sw_step_to_xt.py` | STEP → Parasolid X_T |
 | `extract_stress_strain_from_odb.py` | ODB → 应力–应变 CSV（需 `abaqus python`） |
@@ -308,7 +320,7 @@ hu_bai_{variant}_L{L}_{nx}x{ny}x{nz}_solid_cad_{stroke}[_{suffix}]
 | 字段 | 含义 | 取值 |
 |------|------|------|
 | `stroke` | 压缩行程档位 | `f` = full（默认 70% 应变）；`p` = pilot（15% QA） |
-| `suffix` | 加速/对比标签 | `fast`、`fast70`、`fast80`、`paper`；或 `--case-suffix` 自定义 |
+| `suffix` | 加速/对比标签 | `fast`、`fast70`、`fast80`、`paper`；或 `--case-suffix` 自定义；历史参可归档为 `_fast80_lr25m12` 等 |
 
 示例：
 

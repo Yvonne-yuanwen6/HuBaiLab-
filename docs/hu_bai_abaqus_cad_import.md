@@ -10,7 +10,7 @@ X_T 与 STEP 为同一 BREP。脚本对 **STEP 做 gmsh 体网格（C3D4）**，
 - 板 XY 比点阵大 `plate_margin=10 mm`
 
 ```powershell
-# 几小时内出曲线（推荐先试）：45% 应变、1.2 mm 网格、25 mm/min、dt=5e-4、板接触传力
+# 几小时内出曲线（推荐先试）：45% 应变、1.2 mm 网格、10 mm/min、dt=5e-4、板接触传力
 py -3 scripts/run_hu_bai_bcc_solid_cad_export.py --cells 3 --profile fast
 powershell -File scripts/submit_hu_bai_bcc_solid_cad_compression.ps1 -Cells 3 -Profile fast -ForceRerun
 

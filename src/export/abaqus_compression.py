@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Iterable, TextIO
 
 import numpy as np
+import re
 
 # Hu & Bai (2024) §2.4 — quasi-static compression (Fig. 2.6 / 3.3)
 HU_BAI_LOAD_RATE_MM_MIN = 5.0
@@ -13,8 +14,42 @@ HU_BAI_TARGET_ENGINEERING_STRAIN = 0.70
 HU_BAI_FRICTION = 0.1
 HU_BAI_EXPLICIT_DT = 1.0e-4
 HU_BAI_EXPLICIT_MASS_SCALING = 50.0
+# Explicit *Restart NUMBER INTERVAL = time-slice count in the step (NOT increment count).
+EXPLICIT_RESTART_MAX_NUMBER_INTERVAL = 50
+EXPLICIT_RESTART_DEFAULT_NUMBER_INTERVAL = 8
 # Fig.2.6 explicit validation only (not 5 mm/min strain rate)
 HU_BAI_FIG26_STEP_TIME_S = 0.64
+
+
+def validate_explicit_restart_inp(text: str) -> None:
+    """
+    Reject Explicit restart lines that can flood disk.
+
+    Abaqus/Explicit NUMBER INTERVAL is the count of equal time slices in the step
+    (n+1 restart states), not an increment stride. Must use OVERLAY to overwrite
+    prior restart state instead of retaining every write.
+    """
+    for line in text.splitlines():
+        if not re.match(r"^\*Restart,\s*write", line, re.I):
+            continue
+        if "overlay" not in line.lower():
+            raise ValueError(
+                "Unsafe *Restart in INP: missing OVERLAY. "
+                "Use: *Restart, write, overlay, number interval=8"
+            )
+        m = re.search(r"number\s+interval\s*=\s*(\d+)", line, re.I)
+        if not m:
+            raise ValueError(
+                "Unsafe *Restart in INP: missing NUMBER INTERVAL. "
+                "Use: *Restart, write, overlay, number interval=8"
+            )
+        n = int(m.group(1))
+        if n < 1 or n > EXPLICIT_RESTART_MAX_NUMBER_INTERVAL:
+            raise ValueError(
+                f"Unsafe *Restart NUMBER INTERVAL={n}. "
+                f"Must be 1..{EXPLICIT_RESTART_MAX_NUMBER_INTERVAL} (time-slice count, not increment count)."
+            )
+        return
 
 
 def hu_bai_quasi_static_step_time(
@@ -109,9 +144,9 @@ class CompressionSettings:
     explicit_mass_scaling_dt_only: bool = True
     # 顶面全部节点的 History（RF/U）会在 CAE 中产生数千条记录，默认关闭
     history_lattice_top_nodes: bool = False
-    # Explicit 断点续算：步内定期写 restart（需配合 submit -Continue）
+    # Explicit 断点续算：NUMBER INTERVAL = 步内等分时间间隔数（非增量数！），配合 overlay 避免磁盘暴涨
     explicit_restart_write: bool = True
-    explicit_restart_write_interval: int | None = None  # None → ~25 份/步
+    explicit_restart_number_interval: int | None = None  # None → 8 份（约每 12.5% 步长）
 
     @property
     def top_plane_z(self) -> float:
@@ -181,11 +216,11 @@ class CompressionSettings:
         dt = self.resolved_explicit_dt()
         return max(100, int(round(self.step_time / dt)))
 
-    def resolved_restart_write_interval(self) -> int:
-        if self.explicit_restart_write_interval is not None:
-            return max(1000, int(self.explicit_restart_write_interval))
-        n_inc = self.resolved_explicit_n_increments()
-        return max(10000, n_inc // 25)
+    def resolved_restart_number_interval(self) -> int:
+        """Abaqus/Explicit: NUMBER INTERVAL = equally spaced time slices in the step (not increment count)."""
+        if self.explicit_restart_number_interval is not None:
+            return max(1, min(EXPLICIT_RESTART_MAX_NUMBER_INTERVAL, int(self.explicit_restart_number_interval)))
+        return EXPLICIT_RESTART_DEFAULT_NUMBER_INTERVAL
 
     def is_bottom_up(self) -> bool:
         return self.loading_direction.lower() in ("bottom_up", "up", "from_bottom")
@@ -998,8 +1033,8 @@ RF, U
         )
     restart_block = ""
     if settings.analysis.lower() == "explicit" and settings.explicit_restart_write:
-        rinc = settings.resolved_restart_write_interval()
-        restart_block = f"*Restart, write, number interval={rinc}\n"
+        n_restart = settings.resolved_restart_number_interval()
+        restart_block = f"*Restart, write, overlay, number interval={n_restart}\n"
     direction = settings.loading_direction
     f.write(
         f"""{restart_block}** loading={direction} counter_plate={use_counter} fixed_bottom_plate={use_fixed_bottom} contact={mode} self_contact={settings.lattice_self_contact} amp={amp} dt={settings.resolved_explicit_dt():.6g}s n_inc={settings.resolved_explicit_n_increments()} lattice_load_faces={len(lattice_load_faces)} lattice_load_nodes={len(lattice_load_node_ids or [])} disp={disp:.9g}/{t_total:.9g}s

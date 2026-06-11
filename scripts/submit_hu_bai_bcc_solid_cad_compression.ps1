@@ -124,6 +124,7 @@ if (-not (Select-String -Path $InpJob -Pattern "\*Step|\*Dynamic|\*Contact" -Qui
     Write-Host "[ERROR] INP missing compression blocks. Re-export." -ForegroundColor Red
     exit 1
 }
+Assert-ExplicitRestartInpSafe -Root $Root -InpPath $InpSrc
 Write-Host "  Compression INP OK" -ForegroundColor Green
 
 $manifestPath = if ($manifestOverride -and (Test-Path $manifestOverride)) {
@@ -166,10 +167,11 @@ if (-not $skipSolve) {
             Write-Host "  The current partial ODB cannot be continued." -ForegroundColor Yellow
             exit 1
         }
-        Write-Host '[2/3] Continue: resume from restart checkpoint ...' -ForegroundColor Yellow
+        Write-Host '[2/3] Continue: recover from last checkpoint ...' -ForegroundColor Yellow
         Prepare-AbaqusJobContinue -JobDir $JobDir -JobName $JobName -Force
-        Write-Host "[2/3] Submit Abaqus restart (cwd: $JobDir) ..."
-        abaqus job=$JobName oldjob=$JobName restart cpus=$Cpus memory=$MemoryMB interactive
+        Write-Host "[2/3] Submit Abaqus recover (cwd: $JobDir, cpus=$Cpus) ..."
+        # Interrupted Explicit run: recover (not "restart", which maps to restartjoin on Abaqus 2025 Windows).
+        abaqus job=$JobName recover cpus=$Cpus memory=$MemoryMB interactive
     } else {
         Write-Host '[2/3] Re-solve: prepare job directory ...' -ForegroundColor Yellow
         Prepare-AbaqusJobRerun -JobDir $JobDir -JobName $JobName -Force:$ForceRerun
@@ -184,6 +186,10 @@ if (-not $skipSolve) {
     }
     if (-not (Test-Path $Odb)) {
         Write-Host "[ERROR] $Odb not found" -ForegroundColor Red
+        exit 1
+    }
+    if (-not (Test-AbaqusJobCompleted -StaPath $Sta -OdbPath $Odb)) {
+        Write-Host "[ERROR] Job did not complete successfully (see $Sta)." -ForegroundColor Red
         exit 1
     }
 }
