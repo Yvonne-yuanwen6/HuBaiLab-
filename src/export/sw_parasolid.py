@@ -184,6 +184,283 @@ def convert_stl_to_xt(
         pythoncom.CoUninitialize()
 
 
+def _parse_step_entities(text: str) -> dict[int, str]:
+    """Split STEP DATA section into entity id -> full entity text."""
+    entities: dict[int, str] = {}
+    if "DATA;" not in text:
+        return entities
+    data = text.split("DATA;", 1)[1]
+    if "ENDSEC;" in data:
+        data = data.split("ENDSEC;", 1)[0]
+
+    i = 0
+    n = len(data)
+    while i < n:
+        if data[i] != "#":
+            i += 1
+            continue
+        j = i + 1
+        while j < n and data[j].isdigit():
+            j += 1
+        if j == i + 1:
+            i += 1
+            continue
+        eid = int(data[i + 1 : j])
+        k = j
+        while k < n and data[k] != "=":
+            k += 1
+        if k >= n:
+            break
+        k += 1
+        depth = 0
+        start = i
+        while k < n:
+            ch = data[k]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == ";" and depth == 0:
+                entities[eid] = data[start : k + 1].strip()
+                i = k + 1
+                break
+            k += 1
+        else:
+            break
+    return entities
+
+
+def _step_entity_type(entity: str) -> str:
+    match = re.match(r"#\d+\s*=\s*(\w+)", entity)
+    return match.group(1) if match else ""
+
+
+def _step_entity_refs(entity: str) -> set[int]:
+    rhs = entity.split("=", 1)[1] if "=" in entity else entity
+    return {int(x) for x in re.findall(r"#(\d+)", rhs)}
+
+
+def heal_multibody_step_via_gmsh_roundtrip(step_path: str) -> None:
+    """
+    Re-import a multi-body STEP and export again so each solid carries baked
+    world coordinates (avoids SolidWorks mis-reading stripped assembly transforms).
+    """
+    step_path = os.path.abspath(step_path)
+    tmp_path = f"{step_path}.__heal__.step"
+    import gmsh
+
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add("step_heal")
+        gmsh.model.occ.importShapes(step_path)
+        gmsh.model.occ.synchronize()
+        gmsh.write(tmp_path)
+    finally:
+        gmsh.finalize()
+    os.replace(tmp_path, step_path)
+
+
+def finalize_compound_step_for_solidworks(
+    step_path: str,
+    *,
+    expected_bodies: int,
+    max_flatten_bodies: int = 8,
+) -> dict[str, int | bool | str]:
+    """
+    Gmsh roundtrip + optional flatten so SolidWorks opens positioned solids.
+
+    Heal roundtrip bakes world coordinates into each solid; then text-flatten
+    collapses sub-PRODUCTs so SolidWorks opens one part window (not N windows).
+    Flatten without heal first can mis-place bodies for large compounds.
+    """
+    step_path = os.path.abspath(step_path)
+    heal_multibody_step_via_gmsh_roundtrip(step_path)
+    n_products = count_step_products(step_path)
+    n_solids = count_step_solids(step_path)
+    if n_solids != expected_bodies:
+        raise RuntimeError(
+            f"Expected {expected_bodies} MANIFOLD_SOLID_BREP, got {n_solids}: {step_path}"
+        )
+    if n_products <= 1:
+        return {
+            "step_path": step_path,
+            "product_count": n_products,
+            "solid_count": n_solids,
+            "solidworks_safe": True,
+            "flattened": False,
+            "healed": True,
+        }
+    if int(max_flatten_bodies) > 0 and n_solids > int(max_flatten_bodies):
+        return {
+            "step_path": step_path,
+            "product_count": n_products,
+            "solid_count": n_solids,
+            "solidworks_safe": n_products <= n_solids,
+            "flattened": False,
+            "healed": True,
+            "flatten_skipped": True,
+        }
+    flat = flatten_step_assembly_to_single_product(step_path)
+    flat["healed"] = True
+    return flat
+
+
+def flatten_step_assembly_to_single_product(
+    step_path: str,
+    *,
+    out_path: str | None = None,
+) -> dict[str, int | bool | str]:
+    """
+    Collapse OCCT assembly-style STEP (N sub-PRODUCTs) into one PRODUCT with
+    N MANIFOLD_SOLID_BREP bodies so SolidWorks opens a single part window.
+    """
+    step_path = os.path.abspath(step_path)
+    out_path = os.path.abspath(out_path or step_path)
+    with open(step_path, "r", encoding="utf-8", errors="ignore") as fh:
+        text = fh.read()
+
+    n_products_before = len(re.findall(r"^#\d+ = PRODUCT\(", text, flags=re.MULTILINE))
+    solid_ids = [
+        int(x)
+        for x in re.findall(r"^#(\d+) = MANIFOLD_SOLID_BREP\(", text, flags=re.MULTILINE)
+    ]
+    if len(solid_ids) <= 1 and n_products_before <= 1:
+        return {
+            "step_path": out_path,
+            "product_count": n_products_before,
+            "solid_count": len(solid_ids),
+            "solidworks_safe": n_products_before <= len(solid_ids),
+            "flattened": False,
+        }
+
+    entities = _parse_step_entities(text)
+    if not entities:
+        raise RuntimeError(f"Could not parse STEP entities: {step_path}")
+
+    sdr_ids = sorted(
+        eid for eid, ent in entities.items() if _step_entity_type(ent) == "SHAPE_DEFINITION_REPRESENTATION"
+    )
+    if not sdr_ids:
+        raise RuntimeError(f"No SHAPE_DEFINITION_REPRESENTATION in {step_path}")
+    root_sdr = sdr_ids[0]
+    root_sdr_ent = entities[root_sdr]
+    root_shape_refs = list(_step_entity_refs(root_sdr_ent))
+    if len(root_shape_refs) != 2:
+        raise RuntimeError(f"Unexpected root SDR refs in {step_path}: {root_shape_refs}")
+    root_shape_id = max(root_shape_refs)
+
+    remove: set[int] = set()
+    assembly_types = {
+        "NEXT_ASSEMBLY_USAGE_OCCURRENCE",
+        "SHAPE_REPRESENTATION_RELATIONSHIP",
+        "SHAPE_REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION",
+        "REPRESENTATION_RELATIONSHIP",
+        "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION",
+        "ITEM_DEFINED_TRANSFORMATION",
+    }
+
+    for eid, ent in entities.items():
+        etype = _step_entity_type(ent)
+        if etype in assembly_types:
+            remove.add(eid)
+        elif etype == "PRODUCT_DEFINITION_SHAPE" and "Placement" in ent:
+            remove.add(eid)
+
+    for sdr in sdr_ids[1:]:
+        remove.add(sdr)
+        queue = [sdr]
+        seen: set[int] = set()
+        while queue:
+            cur = queue.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            ent = entities.get(cur)
+            if not ent:
+                continue
+            etype = _step_entity_type(ent)
+            if etype in {
+                "SHAPE_DEFINITION_REPRESENTATION",
+                "PRODUCT_DEFINITION_SHAPE",
+                "PRODUCT_DEFINITION",
+                "PRODUCT_DEFINITION_FORMATION",
+                "PRODUCT_DEFINITION_CONTEXT",
+                "PRODUCT",
+                "ADVANCED_BREP_SHAPE_REPRESENTATION",
+            }:
+                remove.add(cur)
+            for ref in _step_entity_refs(ent):
+                ref_ent = entities.get(ref)
+                if not ref_ent:
+                    continue
+                ref_type = _step_entity_type(ref_ent)
+                if ref_type in {
+                    "PRODUCT_DEFINITION_SHAPE",
+                    "PRODUCT_DEFINITION",
+                    "PRODUCT_DEFINITION_FORMATION",
+                    "PRODUCT_DEFINITION_CONTEXT",
+                    "PRODUCT",
+                    "ADVANCED_BREP_SHAPE_REPRESENTATION",
+                }:
+                    queue.append(ref)
+
+    root_product_id: int | None = None
+    for ref in _step_entity_refs(entities[root_sdr]):
+        ent = entities.get(ref)
+        if ent and _step_entity_type(ent) == "PRODUCT_DEFINITION":
+            for ref2 in _step_entity_refs(ent):
+                ent2 = entities.get(ref2)
+                if ent2 and _step_entity_type(ent2) == "PRODUCT_DEFINITION_FORMATION":
+                    prods = _step_entity_refs(ent2)
+                    if prods:
+                        root_product_id = min(prods)
+                        break
+
+    for eid, ent in entities.items():
+        if _step_entity_type(ent) != "PRODUCT_RELATED_PRODUCT_CATEGORY":
+            continue
+        refs = _step_entity_refs(ent)
+        if root_product_id is not None and root_product_id not in refs:
+            remove.add(eid)
+
+    root_shape_ent = entities[root_shape_id]
+    shape_match = re.search(r"\(\s*'[^']*'\s*,\s*\(([^)]*)\)\s*,\s*#(\d+)", root_shape_ent)
+    if not shape_match:
+        raise RuntimeError(f"Could not parse root shape representation in {step_path}")
+    inner_refs = [int(x) for x in re.findall(r"#(\d+)", shape_match.group(1))]
+    context_id = int(shape_match.group(2))
+    axis_id = inner_refs[0] if inner_refs else 11
+
+    solid_ref = ",".join(f"#{sid}" for sid in solid_ids)
+    entities[root_shape_id] = (
+        f"#{root_shape_id} = ADVANCED_BREP_SHAPE_REPRESENTATION('',(#{axis_id},{solid_ref}),#{context_id});"
+    )
+    remove.discard(root_shape_id)
+
+    header, data_tail = text.split("DATA;", 1)
+    _, footer = data_tail.split("ENDSEC;", 1)
+    kept = [entities[eid] for eid in sorted(entities) if eid not in remove]
+    new_text = f"{header}DATA;\n" + "\n".join(kept) + "\nENDSEC;" + footer
+
+    if out_path != step_path:
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(new_text)
+
+    n_products = count_step_products(out_path)
+    n_solids = count_step_solids(out_path)
+    sw_safe = n_products == 1 and n_solids == len(solid_ids)
+    return {
+        "step_path": out_path,
+        "product_count": n_products,
+        "solid_count": n_solids,
+        "solidworks_safe": sw_safe,
+        "flattened": True,
+        "products_before": n_products_before,
+    }
+
+
 def count_step_solids(step_path: str) -> int:
     """Count MANIFOLD_SOLID_BREP entries in a STEP file (text scan)."""
     step_path = os.path.abspath(step_path)
@@ -201,6 +478,41 @@ def count_step_products(step_path: str) -> int:
     step_path = os.path.abspath(step_path)
     with open(step_path, "r", encoding="utf-8", errors="ignore") as fh:
         return len(re.findall(r"^#\d+ = PRODUCT\(", fh.read(), flags=re.MULTILINE))
+
+
+def measure_step_occ_stats(step_path: str) -> dict[str, float | int]:
+    """Import STEP in gmsh OCC and return volume / face / bbox stats."""
+    import gmsh
+
+    step_path = os.path.abspath(step_path)
+    if not os.path.isfile(step_path):
+        raise FileNotFoundError(step_path)
+
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add("step_stats")
+        gmsh.model.occ.importShapes(step_path)
+        gmsh.model.occ.synchronize()
+        vols = gmsh.model.getEntities(3)
+        faces = gmsh.model.getEntities(2)
+        mass = 0.0
+        for dim, tag in vols:
+            mass += float(gmsh.model.occ.getMass(int(dim), int(tag)))
+        bb = gmsh.model.getBoundingBox(-1, -1)
+        return {
+            "volume_count": len(vols),
+            "face_count": len(faces),
+            "mass_mm3": mass,
+            "bbox_z_span_mm": float(bb[5] - bb[2]),
+            "bbox_mm": {
+                "x": [float(bb[0]), float(bb[3])],
+                "y": [float(bb[1]), float(bb[4])],
+                "z": [float(bb[2]), float(bb[5])],
+            },
+        }
+    finally:
+        gmsh.finalize()
 
 
 def analyze_step_for_solidworks(

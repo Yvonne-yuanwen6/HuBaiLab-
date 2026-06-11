@@ -135,6 +135,8 @@ manifest = {
     "step_product_count": stats.get("step_product_count"),
     "step_solidworks_safe": stats.get("step_solidworks_safe"),
     "bbox_mm": stats.get("bbox_mm"),
+    "step_brep_face_count": stats.get("step_brep_face_count"),
+    "step_mass_mm3": stats.get("step_mass_mm3"),
     "paper_params": {
         "cell_size_mm": L,
         "rod_diameter_mm": ROD_D,

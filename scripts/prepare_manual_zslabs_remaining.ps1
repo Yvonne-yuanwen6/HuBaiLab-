@@ -72,8 +72,12 @@ foreach ($case in $cases) {
     Write-Host "========== Q=$q ($variant) ==========" -ForegroundColor Yellow
     Invoke-Py @("scripts\prepare_manual_zslabs.py", "--Q", "$q")
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "[ERROR] Failed Q=$q" -ForegroundColor Red
-        exit $LASTEXITCODE
+        Write-Host "[WARN] Fused z-slab failed for Q=$q; trying multi-body fallback..." -ForegroundColor Yellow
+        Invoke-Py @("scripts\prepare_manual_zslabs_multibody.py", "--Q", "$q")
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[ERROR] Failed Q=$q (fused + multibody)" -ForegroundColor Red
+            exit $LASTEXITCODE
+        }
     }
 }
 

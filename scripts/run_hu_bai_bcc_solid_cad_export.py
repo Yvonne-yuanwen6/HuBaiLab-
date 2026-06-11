@@ -35,12 +35,12 @@ from src.export.abaqus_compression import (
     hu_bai_quasi_static_step_time,
 )
 from src.export.beam_utils import dedupe_beams
-from src.export.cad_solid_paths import resolve_step_and_xt
+from src.export.cad_solid_paths import resolve_step_and_xt, resolve_verified_solid_step
 from src.export.export_csv import export_beams, export_nodes
 from src.export.export_inp import export_inp
 from src.generator.hu_bai_bcc import HuBaiLatticeGenerator
 from src.mesh.solid_union import mesh_step_gmsh_tets
-from src.paths import ABAQUS_JOBS, ABAQUS_POST, CAD_ROOT, EXPORT_ROOT, ensure_output_dirs
+from src.paths import ABAQUS_JOBS, ABAQUS_POST, CAD_VERIFIED_ROOT, EXPORT_ROOT, ensure_output_dirs
 from src.postprocess.compression_curve import CompressionMeta, save_compression_meta
 from src.validation.penetration_risk import update_manifest_penetration_check
 
@@ -60,7 +60,7 @@ _parser.add_argument(
     "--cad",
     type=str,
     default="",
-    help="Fused STEP or X_T path (default: output/cad/*_solid_array.step or *_solid_layered.step)",
+    help="Verified STEP or X_T under output/cad/verified/ (default: auto-resolve by slug)",
 )
 _parser.add_argument(
     "--mesh-size",
@@ -211,34 +211,6 @@ if PROFILE == "fast" and not CASE_SUFFIX:
     CASE_SUFFIX = "fast"
 N_INC_EST = max(100, int(round(STEP_TIME / EXPLICIT_DT)))
 
-if _args.cad:
-    cad_arg = _args.cad
-    if not os.path.isabs(cad_arg):
-        cad_arg = os.path.join(_ROOT, cad_arg)
-else:
-    cad_dir = str(CAD_ROOT)
-    slug_cad = f"hu_bai_bcc_af2q0_L20_{NX}x{NY}x{NZ}"
-    candidates = [
-        os.path.join(cad_dir, f"{slug_cad}_solid_array.step"),
-        os.path.join(cad_dir, f"test_fuse_{NX}x_v3.step"),
-        os.path.join(cad_dir, f"{slug_cad}_solid_layered.step"),
-        os.path.join(cad_dir, f"{slug_cad}_solid.step"),
-        os.path.join(cad_dir, f"test_fuse_3x_v3.step"),
-    ]
-    cad_arg = next((p for p in candidates if os.path.isfile(p)), candidates[0])
-
-cad_ext = os.path.splitext(cad_arg)[1].lower()
-cad_is_stl = cad_ext == ".stl"
-if cad_is_stl:
-    step_path = cad_arg
-    xt_path = None
-    print(f"CAD STL (fused): {step_path}")
-else:
-    step_path, xt_path = resolve_step_and_xt(cad_arg)
-    print(f"CAD STEP: {step_path}")
-    if xt_path:
-        print(f"CAD X_T:  {xt_path}")
-
 gen = HuBaiLatticeGenerator(
     cell_size=L,
     rod_diameter=ROD_D,
@@ -251,6 +223,37 @@ nodes, beams, polylines = gen.get_data()
 beams, beam_dups = dedupe_beams(beams)
 if beam_dups:
     print(f"  Deduped beams: {len(beams)} unique ({beam_dups} removed)")
+
+cad_arg_raw = _args.cad.strip()
+if cad_arg_raw:
+    cad_arg = cad_arg_raw
+    if not os.path.isabs(cad_arg):
+        cad_arg = os.path.join(_ROOT, cad_arg)
+else:
+    cad_arg = None
+
+cad_ext = os.path.splitext(cad_arg or "")[1].lower()
+cad_is_stl = cad_ext == ".stl"
+if cad_is_stl:
+    if not cad_arg or not os.path.isfile(cad_arg):
+        raise FileNotFoundError(f"CAD STL not found: {cad_arg}")
+    step_path = cad_arg
+    xt_path = None
+    print(f"CAD STL (fused): {step_path}")
+else:
+    resolved_cad = resolve_verified_solid_step(
+        variant_name=gen.variant_name,
+        cell_size_mm=L,
+        nx=NX,
+        ny=NY,
+        nz=NZ,
+        cad_path=cad_arg,
+    )
+    step_path, xt_path = resolve_step_and_xt(resolved_cad)
+    print(f"CAD verified dir: {CAD_VERIFIED_ROOT}")
+    print(f"CAD STEP: {step_path}")
+    if xt_path:
+        print(f"CAD X_T:  {xt_path}")
 
 variant = gen.variant_name.lower()
 _slug_base = f"hu_bai_{variant}_L{int(L)}_{NX}x{NY}x{NZ}_solid_cad_{STROKE_TAG}"
@@ -387,6 +390,8 @@ manifest = {
     "cad_step": step_path if not cad_is_stl else None,
     "cad_stl": step_path if cad_is_stl else None,
     "cad_xt": xt_path,
+    "cad_verified_root": str(CAD_VERIFIED_ROOT),
+    "cad_source": "verified",
     "odb": os.path.join(job_dir, f"{slug}.odb"),
     "job_name": slug,
     "job_inp_name": f"{slug}.inp",
@@ -434,6 +439,8 @@ manifest = {
         "lattice_load_faces": stats.get("lattice_load_faces"),
         "lattice_load_nodes": stats.get("lattice_load_nodes"),
         "lattice_self_contact": compression.lattice_self_contact,
+        "explicit_restart_write": compression.explicit_restart_write,
+        "explicit_restart_write_interval": compression.resolved_restart_write_interval(),
     },
 }
 with open(paths["case_manifest"], "w", encoding="utf-8") as f:

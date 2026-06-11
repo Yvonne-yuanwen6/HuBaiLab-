@@ -65,6 +65,47 @@ py -3 -m venv .venv
 
 ## 快速开始
 
+### 0. 单胞融合 STEP（SolidWorks QA，阵列前必做）
+
+在生成 2-cell / 4×4×4 阵列之前，**必须先导出并目视确认单胞**。经 SolidWorks 验证的正确方式如下。
+
+```powershell
+cd D:\HuBaiLab
+$env:PYTHONPATH = (Get-Location).Path
+
+py -3 scripts/export_unitcell_seed_check.py --Q 1.0
+```
+
+输出：`output/cad/_unitcell_check/unitcell_sfbls_af2q1_fused.step`（及 `manifest.json`）
+
+**SolidWorks 验收标准**
+
+| 检查项 | 期望 |
+|--------|------|
+| 杆件数量 | **8 根**完整 SFBLS 杆（上下各 4 根，不可缺杆） |
+| 节点球 | 中心交汇处 **9 个**节点球已融合 |
+| 实体树 | **(1)** 个实体（`Solid Bodies` 计数为 1） |
+| 日志策略 | 控制台出现 `strategy=pipe-first`，**不是** `fuse-all` |
+
+**正确融合方式（已固化在 `export_unitcell_seed_check.py`）**
+
+- 调用 `export_lattice_step_occ(..., fuse=True, junction_spheres=True)`，**不传** `cell_size`。
+- 走 **pipe-first per-strut** 路径：8 根扫掠管 + 9 个节点球 → 逐杆合并 → 单实体 STEP。
+- STEP 体积约 **2 MB**（Q=1.0）；`vol=1`、`sw_safe=True`。
+
+**常见错误（会导致上下各缺 1 根杆）**
+
+若在单胞导出时传入 `cell_size=20.0`，会触发 `export_sw._occ_fuse_unitcell_solid_for_array()`：
+
+1. pipe-first 先成功融合出完整 8 杆几何；
+2. Q=1.0 的 X 方向周期邻胞布尔检测失败；
+3. 代码**丢弃**上述几何，回退到 **fuse-all**；
+4. fuse-all 在 SolidWorks 中常只剩 **6 根杆**（上下各缺 1 根），STEP 约 1.5 MB。
+
+因此：**单胞目视 QA 种子禁止传 `cell_size`**。`cell_size` 仅用于阵列流水线中的邻胞布尔兼容性检测，与单胞几何完整性是两套取舍，不可混用。
+
+单胞确认无误后，再按步进 QA 做 2-cell、Y 向 4-cell、4×4 层等（见 `scripts/export_pair_fuse_check.py` 等）。
+
 ### 1. 生成 4×4×4 融合 STEP（推荐）
 
 ```powershell
@@ -104,10 +145,69 @@ powershell -ExecutionPolicy Bypass -File scripts/submit_hu_bai_bcc_compression.p
 py -3 scripts/preview_hu_bai_sfbls.py --all-q --cells 1
 ```
 
+## 已验证成功案例
+
+以下记录来自本地 `output/`（Abaqus 完成以 `{slug}.sta` 含 `COMPLETED SUCCESSFULLY` 为准）。每个算例的完整参数见 `output/export/{slug}/case_manifest.json`。
+
+### 共用材料与接触（实体 C3D4 压缩）
+
+| 项 | 取值 |
+|----|------|
+| 材料 | TPU：E = 25 MPa，ν = 0.47，屈服 4.69 MPa，ρ = 1135 kg/m³ |
+| 单元 | gmsh 四面体 **C3D4**（`mesh.source = gmsh_step_volume`） |
+| 求解器 | Abaqus **Explicit**，固定增量步 |
+| 传力 | 顶/底 **刚体压板** + `contact_mode=pair`；点阵 **自接触** `ALL EXTERIOR` |
+| 摩擦 | μ = 0.1 |
+| 质量缩放 | ×50（`BELOW MIN, dt=…`） |
+| 板位 | `plate_margin=10 mm`，`plate_embed≈0.4–0.6 mm` |
+
+**fast80 加速档**（Fig. 3.3 对比用，非论文原参）：工程应变 **80%**，Explicit **dt = 5×10⁻⁴ s**，准静态加载 **25 mm/min**（SFBLS 细网格时可降至 15 mm/min），幅值 hold **2%** step_time，`--profile fast --case-suffix fast80 --strain 0.8`。
+
+### 端到端完成（STEP → 网格 → Abaqus → 应力–应变曲线）
+
+| slug | 几何 | STEP 模型 | 网格划分 | 仿真设置 | 结果 |
+|------|------|-----------|----------|----------|------|
+| `hu_bai_bcc_af2q0_L20_3x3x3_solid_cad_f_fast80` | BCC Q=0，3×3×3 | `output/cad/hu_bai_bcc_af2q0_L20_3x3x3_solid_array.step`（单胞 OCC 阵列 `_solid_array`） | 目标尺寸 **1.2 mm**；**25 602** 节点，**66 217** C3D4 | fast80：80% 应变，压缩 **48 mm / 115.2 s**，dt = 5×10⁻⁴，25 mm/min，~230 400 增量 | `.sta` 成功；曲线见 `output/post/{slug}/`（峰值应变 ≈ **77%**） |
+| `hu_bai_bcc_af2q0_L20_4x4x4_solid_cad_f_fast80` | BCC Q=0，4×4×4 | `output/cad/hu_bai_bcc_af2q0_L20_4x4x4_solid_array.step`（同上；fast80 自 fast 算例 **克隆网格** 仅改加载） | 目标尺寸 **1.2 mm**；**57 212** 节点，**147 895** C3D4 | fast80：80% 应变，压缩 **64 mm / 153.6 s**，dt = 5×10⁻⁴，25 mm/min，~307 200 增量 | `.sta` 成功；峰值应变 ≈ **78%** |
+
+复现 BCC 4×4×4 fast80：
+
+```powershell
+py -3 scripts/run_hu_bai_bcc_unitcell_array_step_fuse.py --cells 4 --Q 0
+powershell -File scripts/run_bcc_q1_4x4x4_fast80.ps1 -SkipQ1   # 仅 BCC fast80
+```
+
+### STEP 融合已验收（CAD 阶段成功，供网格/仿真使用）
+
+| 变体 | STEP 路径 | 生成方式 | SW / gmsh 验收 |
+|------|-----------|----------|----------------|
+| SFBLS Q=0.5/1/1.5 单胞 | `output/cad/_unitcell_check/unitcell_sfbls_af2q{0p5,1,1p5}_fused.step` | `export_unitcell_seed_check.py --Q …`，**pipe-first** + 平行移动截面扫掠（`occ_pipe.py`） | 8 杆均匀圆柱截面，9 节点球，单实体 |
+| SFBLS Q=1.0，4×4×4 | `output/cad/verified/hu_bai_sfbls_af2q1_L20_4x4x4_solid_merged.STEP` | 新扫掠 z-slab → SW 合并 → `cad/verified/` | 已用于 fast80 网格导出 |
+
+> **manual/ 旧文件已清理**：此前 `output/cad/manual/` 下的 z-slab / merged STEP 为 Frenet 圆片堆叠（错误扫掠），已全部删除。请用修复后的扫掠重新生成：
+>
+> ```powershell
+> py -3 scripts/prepare_manual_zslabs.py --Q 0.5   # 或 1.0 / 1.5
+> # SW 合并四层 → 另存 merged.step，再跑 solid_cad_export
+> ```
+
+### 网格已导出、仿真正在进行（尚未写入成功案例表）
+
+| slug | STEP | 网格 | 仿真设置 | 状态 |
+|------|------|------|----------|------|
+| `hu_bai_sfbls_af2q0p5_L20_4x4x4_solid_cad_f_fast80` | `…/hu_bai_sfbls_af2q0p5_L20_4x4x4_solid_array.step` | **1.42 mm**；42 625 节点，103 786 C3D4 | fast80，153.6 s，25 mm/min | Abaqus 运行中 |
+| `hu_bai_sfbls_af2q1_L20_4x4x4_solid_cad_f_fast80` | `cad/verified/…_solid_merged.STEP` | **0.8 mm**；121 525 节点，329 767 C3D4 | fast80，256 s，**15 mm/min** | Abaqus 运行中（已有部分 ODB 采样） |
+
+Fig. 3.3 目标批量（3×3×3 SFBLS Q=0.5/1/1.5 fast80）见 `scripts/submit_hu_bai_fig33_sfbls_fast80.ps1`；4×4×4 SFBLS 流水线见 `scripts/run_hu_bai_sfbls_4x4x4_array_pipeline.ps1`。
+
 ## 脚本索引
 
 | 脚本 | 用途 |
 |------|------|
+| `export_unitcell_seed_check.py` | **单胞融合 STEP**（SW 目视 QA；不传 `cell_size`，pipe-first） |
+| `export_pair_fuse_check.py` | 2-cell 化合物（Y + X）；Q=1.0 勿用 STEP 种子 `--fuse`（SW 中为曲面实体） |
+| `export_line_from_unitcell_seed.py` | 由单胞种子平移生成 N-cell 线阵列 |
+| `export_zslab_layer_from_column.py` | 4×4 z 层化合物 / 行融合 |
 | `run_hu_bai_bcc_unitcell_array_step_fuse.py` | **推荐** 单胞 OCC 阵列融合 STEP |
 | `run_hu_bai_bcc_layered_step_fuse.py` | z 层分层融合（4×4×4 备选，较慢） |
 | `run_hu_bai_sfbls_step_fuse.py` | 一次性 monolithic fuse（≤3×3×3） |
@@ -183,6 +283,15 @@ hu_bai_{variant}_L{L}_{n}x{n}x{n}_solid_layered_layer{k}.step   # 可选中间�
 hu_bai_{variant}_L20_{n}x{n}x{n}_solid.step
 ```
 
+**单胞 QA 种子（步进阵列前）**
+
+```
+output/cad/_unitcell_check/unitcell_{variant}_fused.step
+output/cad/_unitcell_check/manifest.json
+```
+
+示例：`unitcell_sfbls_af2q1_fused.step`（Q=1.0，pipe-first，8 杆完整）
+
 | 字段 | 含义 |
 |------|------|
 | `L{L}` | 单胞边长 [mm]，论文默认 `L20` |
@@ -206,7 +315,7 @@ hu_bai_{variant}_L{L}_{nx}x{ny}x{nz}_solid_cad_{stroke}[_{suffix}]
 | slug | 说明 |
 |------|------|
 | `hu_bai_bcc_af2q0_L20_3x3x3_solid_cad_f_fast` | 3×3×3 BCC，满行程，fast 加速档 |
-| `hu_bai_bcc_af2q0_L20_3x3x3_solid_cad_f_fast80` | 同上，dt=8e-4 等 fast80 参数 |
+| `hu_bai_bcc_af2q0_L20_3x3x3_solid_cad_f_fast80` | 同上，dt=5e-4、80% 应变等 fast80 参数 |
 | `hu_bai_sfbls_af2q0p5_L20_3x3x3_solid_cad_f_fast80` | SFBLS Q=0.5 |
 | `hu_bai_bcc_af2q0_L20_4x4x4_solid_cad_f_fast` | 4×4×4 BCC |
 

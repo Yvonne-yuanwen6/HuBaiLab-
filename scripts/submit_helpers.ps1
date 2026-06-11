@@ -25,6 +25,52 @@ function Test-AbaqusJobCompleted {
     return ($staText -match 'THE ANALYSIS HAS COMPLETED SUCCESSFULLY')
 }
 
+function Test-AbaqusJobIncomplete {
+    param(
+        [Parameter(Mandatory)][string]$StaPath,
+        [Parameter(Mandatory)][string]$OdbPath
+    )
+    if (-not ((Test-Path $StaPath) -and (Test-Path $OdbPath))) { return $false }
+    if (Test-AbaqusJobCompleted -StaPath $StaPath -OdbPath $OdbPath) { return $false }
+    $staText = Get-Content $StaPath -Raw -ErrorAction SilentlyContinue
+    if ($staText -match 'THE ANALYSIS HAS NOT BEEN COMPLETED') { return $true }
+    return ($staText -match 'SOLUTION PROGRESS')
+}
+
+function Test-AbaqusRestartAvailable {
+    param(
+        [Parameter(Mandatory)][string]$JobDir,
+        [Parameter(Mandatory)][string]$JobName,
+        [string]$ManifestPath = '',
+        [string]$ExportInpPath = ''
+    )
+    $stt = Join-Path $JobDir ($JobName + '.stt')
+    $pac = Join-Path $JobDir ($JobName + '.pac')
+    $odb = Join-Path $JobDir ($JobName + '.odb')
+    if (-not ((Test-Path $stt) -and (Test-Path $pac) -and (Test-Path $odb))) { return $false }
+
+    $hasRestartWrite = $false
+    $inpCandidates = @(
+        (Join-Path $JobDir ($JobName + '.inp'))
+    )
+    if ($ExportInpPath) { $inpCandidates += $ExportInpPath }
+    if ($ManifestPath -and (Test-Path $ManifestPath)) {
+        try {
+            $manifest = Get-Content $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($manifest.compression_inp) { $inpCandidates += [string]$manifest.compression_inp }
+        } catch { }
+    }
+    foreach ($inpPath in ($inpCandidates | Select-Object -Unique)) {
+        if (-not (Test-Path $inpPath)) { continue }
+        $inpText = Get-Content $inpPath -Raw -ErrorAction SilentlyContinue
+        if ($inpText -match '(?m)^\*Restart,\s*write') {
+            $hasRestartWrite = $true
+            break
+        }
+    }
+    return $hasRestartWrite
+}
+
 function Confirm-SkipCompletedSolve {
     param(
         [Parameter(Mandatory)][string]$JobName,
@@ -367,9 +413,86 @@ function Prepare-AbaqusJobRerun {
     Remove-AbaqusJobArtifacts -JobDir $JobDir -JobName $JobName
 }
 
+function Prepare-AbaqusJobContinue {
+    param(
+        [Parameter(Mandatory)][string]$JobDir,
+        [Parameter(Mandatory)][string]$JobName,
+        [switch]$Force
+    )
+    if ($Force) {
+        Write-Host "  Continue: stopping any Abaqus processes for $JobName ..." -ForegroundColor Yellow
+        Stop-AbaqusJobProcesses -JobName $JobName -JobDir $JobDir
+    }
+
+    $lck = Join-Path $JobDir ($JobName + '.lck')
+    $jobActive = (Test-Path $lck) -and (Test-AbaqusJobProcessRunning -JobName $JobName -JobDir $JobDir)
+
+    if ($jobActive) {
+        if ($Force) {
+            Stop-AbaqusJobProcesses -JobName $JobName -JobDir $JobDir
+        } else {
+            Write-Host "[ERROR] Job $JobName is still running ($lck)." -ForegroundColor Red
+            Write-Host "  Wait for completion, or re-run with -Force on -Continue." -ForegroundColor Yellow
+            exit 1
+        }
+    } elseif (Test-Path $lck) {
+        Write-Host "  Removing stale lock: $lck" -ForegroundColor Yellow
+        Remove-Item $lck -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Clear-AbaqusJobDirectory {
     param([Parameter(Mandatory)][string]$JobDir)
     if (-not (Test-Path $JobDir)) { return }
     Get-ChildItem -Path $JobDir -Force -ErrorAction SilentlyContinue |
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+function Get-VerifiedCadDir {
+    param([Parameter(Mandatory)][string]$Root)
+    return (Join-Path $Root "output\cad\verified")
+}
+
+function Get-VerifiedCadStep {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Variant,
+        [int]$Cells = 4,
+        [string[]]$ExtraNames = @()
+    )
+    $verifiedDir = Get-VerifiedCadDir -Root $Root
+    if (-not (Test-Path $verifiedDir)) {
+        throw "Missing verified CAD folder: $verifiedDir"
+    }
+    $base = "hu_bai_${Variant}_L20_${Cells}x${Cells}x${Cells}"
+    $names = @(
+        "${base}_solid_array.step",
+        "${base}_solid_array.STEP",
+        "${base}_solid_merged.step",
+        "${base}_solid_merged.STEP",
+        "${base}_solid_layered.step",
+        "${base}_solid.step"
+    ) + $ExtraNames
+    foreach ($name in $names) {
+        $path = Join-Path $verifiedDir $name
+        if (Test-Path $path) {
+            return (Resolve-Path $path).Path
+        }
+    }
+    $hint = Join-Path $verifiedDir "${base}_solid_array.step"
+    throw "No verified CAD STEP for $base under $verifiedDir. Expected e.g. $hint"
+}
+
+function Test-VerifiedCadStepReady {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Variant,
+        [int]$Cells = 4
+    )
+    try {
+        $null = Get-VerifiedCadStep -Root $Root -Variant $Variant -Cells $Cells
+        return $true
+    } catch {
+        return $false
+    }
 }

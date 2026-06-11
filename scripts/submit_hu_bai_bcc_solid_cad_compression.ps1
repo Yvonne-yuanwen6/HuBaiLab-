@@ -1,6 +1,7 @@
 # Hu & Bai 2024 — CAD solid (STEP/X_T) explicit compression + stress-strain curve
 param(
     [switch]$ForceRerun,
+    [switch]$Continue,
     [switch]$ForceSkip,
     [switch]$SkipExport,
     [switch]$SkipPenetrationCheck,
@@ -46,6 +47,11 @@ function Get-ProjectPython {
 
 Set-Location $Root
 Write-Host "=== Hu & Bai CAD solid compression (STEP mesh + plates) ===" -ForegroundColor Cyan
+
+if ($Continue -and $ForceRerun) {
+    Write-Host "[ERROR] Use -Continue OR -ForceRerun, not both." -ForegroundColor Red
+    exit 1
+}
 
 if (-not $SkipExport) {
     Write-Host "[1/3] Export CAD solid INP ..."
@@ -135,20 +141,41 @@ Invoke-PenetrationRiskCheck -Root $Root -ManifestPath $manifestPath -InpPath $In
 
 $skipSolve = Confirm-SkipCompletedSolve -JobName $JobName -JobDir $JobDir -OdbPath $Odb -StaPath $Sta `
     -InpJobPath $InpJob -ForceRerun:$ForceRerun -ForceSkip:$ForceSkip
+if ($Continue -and -not $ForceSkip) {
+    if (Test-AbaqusJobCompleted -StaPath $Sta -OdbPath $Odb) {
+        Write-Host "[Continue] Job already completed successfully; skipping solve." -ForegroundColor Cyan
+        $skipSolve = $true
+    } else {
+        $skipSolve = $false
+    }
+}
 if ($skipSolve -and (Test-Path $Lck)) {
     Remove-Item $Lck -Force -ErrorAction SilentlyContinue
 }
 
 if (-not $skipSolve) {
-    Write-Host '[2/3] Re-solve: prepare job directory ...' -ForegroundColor Yellow
-    Prepare-AbaqusJobRerun -JobDir $JobDir -JobName $JobName -Force:$ForceRerun
-    Write-Host "[2/3] Submit Abaqus (cwd: $JobDir) ..."
     Set-Location $JobDir
     if (-not (Get-Command abaqus -ErrorAction SilentlyContinue)) {
         Write-Host "[ERROR] abaqus not in PATH." -ForegroundColor Yellow
         exit 1
     }
-    abaqus job=$JobName input=$($case.job_inp_name) oldjob=delete cpus=$Cpus memory=$MemoryMB interactive
+    if ($Continue) {
+        if (-not (Test-AbaqusRestartAvailable -JobDir $JobDir -JobName $JobName -ManifestPath $manifestPath -ExportInpPath $InpSrc)) {
+            Write-Host "[ERROR] No Explicit restart checkpoint (*Restart, write in INP)." -ForegroundColor Red
+            Write-Host "  Re-export INP (new exports include restart), then -ForceRerun once." -ForegroundColor Yellow
+            Write-Host "  The current partial ODB cannot be continued." -ForegroundColor Yellow
+            exit 1
+        }
+        Write-Host '[2/3] Continue: resume from restart checkpoint ...' -ForegroundColor Yellow
+        Prepare-AbaqusJobContinue -JobDir $JobDir -JobName $JobName -Force
+        Write-Host "[2/3] Submit Abaqus restart (cwd: $JobDir) ..."
+        abaqus job=$JobName oldjob=$JobName restart cpus=$Cpus memory=$MemoryMB interactive
+    } else {
+        Write-Host '[2/3] Re-solve: prepare job directory ...' -ForegroundColor Yellow
+        Prepare-AbaqusJobRerun -JobDir $JobDir -JobName $JobName -Force:$ForceRerun
+        Write-Host "[2/3] Submit Abaqus (cwd: $JobDir) ..."
+        abaqus job=$JobName input=$($case.job_inp_name) oldjob=delete cpus=$Cpus memory=$MemoryMB interactive
+    }
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $Dat = Join-Path $JobDir ($JobName + ".dat")
     if ((Test-Path $Dat) -and ((Get-Content $Dat -Raw) -match '\*\*\*ERROR')) {

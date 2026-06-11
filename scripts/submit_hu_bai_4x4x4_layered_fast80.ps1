@@ -12,6 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = $PSScriptRoot
+. (Join-Path $ScriptDir "submit_helpers.ps1")
 $Root = (Resolve-Path (Join-Path $ScriptDir "..")).Path
 Set-Location $Root
 
@@ -90,13 +91,15 @@ $env:PYTHONPATH = $Root
 foreach ($case in $cases) {
     $variant = $case.Variant
     $q = $case.Q
-    $step = Join-Path $cadDir "hu_bai_${variant}_L20_4x4x4_solid_layered.step"
-    $slug = "hu_bai_${variant}_L20_4x4x4_solid_cad_f_fast80"
-
-    if (-not (Test-Path $step)) {
-        Write-Host "[ERROR] Missing STEP: $step" -ForegroundColor Red
+    try {
+        $step = Get-VerifiedCadStep -Root $Root -Variant $variant -Cells 4 -ExtraNames @(
+            "hu_bai_${variant}_L20_4x4x4_solid_layered.step"
+        )
+    } catch {
+        Write-Host "[ERROR] $($_.Exception.Message)" -ForegroundColor Red
         exit 1
     }
+    $slug = "hu_bai_${variant}_L20_4x4x4_solid_cad_f_fast80"
 
     Write-Host ""
     Write-Host "========== $slug (Q=$q) ==========" -ForegroundColor Cyan

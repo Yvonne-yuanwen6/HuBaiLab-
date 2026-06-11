@@ -13,6 +13,8 @@ EXPORT_ROOT = OUTPUT_ROOT / "export"
 ABAQUS_JOBS = OUTPUT_ROOT / "jobs"
 ABAQUS_POST = OUTPUT_ROOT / "post"
 CAD_ROOT = OUTPUT_ROOT / "cad"
+# Human-verified STEP files for Abaqus export (place confirmed solids here).
+CAD_VERIFIED_ROOT = CAD_ROOT / "verified"
 PREVIEWS_ROOT = OUTPUT_ROOT / "previews"
 REPORTS_ROOT = OUTPUT_ROOT / "reports"
 
@@ -36,6 +38,7 @@ def ensure_output_dirs() -> None:
         ABAQUS_JOBS,
         ABAQUS_POST,
         CAD_ROOT,
+        CAD_VERIFIED_ROOT,
         PREVIEWS_ROOT,
         REPORTS_ROOT,
     ):
