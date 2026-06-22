@@ -14,6 +14,28 @@ HU_BAI_TARGET_ENGINEERING_STRAIN = 0.70
 HU_BAI_FRICTION = 0.1
 HU_BAI_EXPLICIT_DT = 1.0e-4
 HU_BAI_EXPLICIT_MASS_SCALING = 50.0
+HU_BAI_AMPLITUDE_HOLD_FRACTION = 0.05
+# TPU matrix (§2.3.2 tensile / §2.4.1 simulation): E=25 MPa, nu=0.47, rho=1.135 g/cm³
+HU_BAI_E_MODULUS_MPA = 25.0
+HU_BAI_POISSON = 0.47
+HU_BAI_YIELD_MPA = 4.69
+HU_BAI_DENSITY_KG_M3 = 1135.0
+HU_BAI_MESH_MM = 0.6
+
+
+def hu_bai_neo_hooke_c10(e_mpa: float = HU_BAI_E_MODULUS_MPA, nu: float = HU_BAI_POISSON) -> float:
+    """Neo-Hooke C10 from small-strain modulus (soft TPU: E ≈ 6·C10 when nu ≈ 0.5)."""
+    _ = nu
+    return float(e_mpa) / 6.0
+
+
+def hu_bai_density_abq(kg_m3: float = HU_BAI_DENSITY_KG_M3) -> float:
+    """Abaqus mm–tonne–s density from kg/m³."""
+    return float(kg_m3) * 1.0e-12
+# Fig.3.3 fast80: 80% strain @ 1.2 mm; 5 mm/min quasi-static, dt=5e-4, hold 5%
+HU_BAI_FAST80_TARGET_STRAIN = 0.80
+HU_BAI_FAST80_MESH_MM = 1.2
+HU_BAI_FAST80_EXPLICIT_DT = 5.0e-4
 # Explicit *Restart NUMBER INTERVAL = time-slice count in the step (NOT increment count).
 EXPLICIT_RESTART_MAX_NUMBER_INTERVAL = 50
 EXPLICIT_RESTART_DEFAULT_NUMBER_INTERVAL = 8
@@ -132,8 +154,10 @@ class CompressionSettings:
     analysis: str = "explicit"
     step_name: str = "Compression"
     displacement_amplitude_name: str = "COMP-DISP"
-    # Explicit 固定时间增量 Δt（秒）；写入 *Dynamic, direct user control
+    # Explicit 时间增量 [s]：fixed 模式下为恒定 Δt；automatic 模式下为 Δt 上限
     explicit_dt: float = 0.0005
+    # fixed = *Dynamic, Explicit, direct user control；automatic = 按稳定步长自适应（可带上限）
+    explicit_dt_mode: str = "fixed"
     # 若 explicit_dt 为 None，则用 step_time / explicit_n_increments
     explicit_n_increments: int = 10000
     # 幅值曲线：前段保持 0 再线性加载（占总步长比例，减轻冲击）
@@ -147,6 +171,9 @@ class CompressionSettings:
     # Explicit 断点续算：NUMBER INTERVAL = 步内等分时间间隔数（非增量数！），配合 overlay 避免磁盘暴涨
     explicit_restart_write: bool = True
     explicit_restart_number_interval: int | None = None  # None → 8 份（约每 12.5% 步长）
+    # *Bulk Viscosity linear, quadratic — 略增可抑制自接触高频振荡
+    bulk_viscosity_linear: float = 0.12
+    bulk_viscosity_quadratic: float = 1.6
 
     @property
     def top_plane_z(self) -> float:
@@ -939,6 +966,7 @@ LATTICE_TOP_NODES,
     if settings.analysis.lower() == "explicit":
         dt = settings.resolved_explicit_dt()
         n_inc = settings.resolved_explicit_n_increments()
+        dt_mode = (settings.explicit_dt_mode or "fixed").lower()
         ms = settings.explicit_mass_scaling_factor
         mass_line = ""
         if settings.explicit_mass_scaling_dt_only:
@@ -948,12 +976,22 @@ LATTICE_TOP_NODES,
                 f"*Fixed Mass Scaling, elset=ALLSOLID, factor={ms:.12g}, "
                 f"type=BELOW MIN, dt={dt:.12g}\n"
             )
+        if dt_mode in ("automatic", "auto", "adaptive"):
+            # Abaqus 2022: 无 direct user control 时数据行仅写步长（前导逗号）；Δt 由稳定极限自动决定
+            dynamic_block = (
+                f"** Explicit automatic dt (stable limit; mass scaling dt={dt:.6g}s); step {t_total:.12g}s\n"
+                f"*Dynamic, Explicit\n"
+                f", {t_total:.12g}\n"
+            )
+        else:
+            dynamic_block = (
+                f"** Explicit fixed dt={dt:.6g}s (~{n_inc} increments); do not use \", 1.\" in CAE\n"
+                f"*Dynamic, Explicit, direct user control\n"
+                f"{dt:.12g}, {t_total:.12g}\n"
+            )
         f.write(
-            f"""** Explicit fixed dt={dt:.6g}s (~{n_inc} increments); do not use ", 1." in CAE
-*Dynamic, Explicit, direct user control
-{dt:.12g}, {t_total:.12g}
-{mass_line}*Bulk Viscosity
-0.12, 1.6
+            f"""{dynamic_block}{mass_line}*Bulk Viscosity
+{settings.bulk_viscosity_linear:.12g}, {settings.bulk_viscosity_quadratic:.12g}
 """
         )
     else:
@@ -1037,7 +1075,7 @@ RF, U
         restart_block = f"*Restart, write, overlay, number interval={n_restart}\n"
     direction = settings.loading_direction
     f.write(
-        f"""{restart_block}** loading={direction} counter_plate={use_counter} fixed_bottom_plate={use_fixed_bottom} contact={mode} self_contact={settings.lattice_self_contact} amp={amp} dt={settings.resolved_explicit_dt():.6g}s n_inc={settings.resolved_explicit_n_increments()} lattice_load_faces={len(lattice_load_faces)} lattice_load_nodes={len(lattice_load_node_ids or [])} disp={disp:.9g}/{t_total:.9g}s
+        f"""{restart_block}** loading={direction} counter_plate={use_counter} fixed_bottom_plate={use_fixed_bottom} contact={mode} self_contact={settings.lattice_self_contact} amp={amp} dt_mode={settings.explicit_dt_mode} dt={settings.resolved_explicit_dt():.6g}s n_inc_est={settings.resolved_explicit_n_increments()} lattice_load_faces={len(lattice_load_faces)} lattice_load_nodes={len(lattice_load_node_ids or [])} disp={disp:.9g}/{t_total:.9g}s
 *End Step
 """
     )

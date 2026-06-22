@@ -88,7 +88,8 @@ if ($skipSolve -and (Test-Path $Lck)) {
 
 if (-not $skipSolve) {
     Write-Host '[2/3] Re-solve: prepare job directory ...' -ForegroundColor Yellow
-    Prepare-AbaqusJobRerun -JobDir $JobDir -JobName $JobName -Force:$ForceRerun
+    Prepare-AbaqusJobRerun -JobDir $JobDir -JobName $JobName -Force:$ForceRerun `
+        -Root $Root -PostDir $PostDir -Slug $case.slug
     Write-Host "[2/3] Submit Abaqus (cwd: $JobDir) ..."
     Set-Location $JobDir
     if (-not (Get-Command abaqus -ErrorAction SilentlyContinue)) {
@@ -96,14 +97,28 @@ if (-not $skipSolve) {
         exit 1
     }
     abaqus job=$JobName input=$($case.job_inp_name) cpus=4 memory=4096 interactive
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($LASTEXITCODE -ne 0) {
+        Archive-FailedAbaqusJob -Root $Root -JobDir $JobDir -JobName $JobName `
+            -Slug $case.slug -PostDir $PostDir -StaPath $Sta -Reason 'abaqus_exit_error'
+        exit $LASTEXITCODE
+    }
     $Dat = Join-Path $JobDir ($JobName + ".dat")
     if ((Test-Path $Dat) -and ((Get-Content $Dat -Raw) -match '\*\*\*ERROR')) {
+        Archive-FailedAbaqusJob -Root $Root -JobDir $JobDir -JobName $JobName `
+            -Slug $case.slug -PostDir $PostDir -StaPath $Sta -Reason 'abaqus_dat_error'
         Write-Host "[ERROR] See $JobName.dat" -ForegroundColor Red
         exit 1
     }
     if (-not (Test-Path $Odb)) {
+        Archive-FailedAbaqusJob -Root $Root -JobDir $JobDir -JobName $JobName `
+            -Slug $case.slug -PostDir $PostDir -StaPath $Sta -Reason 'missing_odb'
         Write-Host "[ERROR] $Odb not found" -ForegroundColor Red
+        exit 1
+    }
+    if (-not (Test-AbaqusJobCompleted -StaPath $Sta -OdbPath $Odb)) {
+        Archive-FailedAbaqusJob -Root $Root -JobDir $JobDir -JobName $JobName `
+            -Slug $case.slug -PostDir $PostDir -StaPath $Sta
+        Write-Host "[ERROR] Job did not complete successfully (see $Sta)." -ForegroundColor Red
         exit 1
     }
 }
@@ -119,9 +134,9 @@ $Png = $case.stress_strain_png
 $YieldJson = $case.yield_json
 
 if (Get-Command abaqus -ErrorAction SilentlyContinue) {
-    abaqus python $extract --odb $Odb --meta $Meta --csv $Csv --raw-csv $Raw --force-mode plate_ref --yield-json $YieldJson
+    abaqus python $extract --odb $Odb --meta $Meta --csv $Csv --raw-csv $Raw --force-mode paper --curve-method paper --yield-json $YieldJson
     if ($LASTEXITCODE -ne 0) {
-        abaqus python $extract --odb $Odb --meta $Meta --csv $Csv --raw-csv $Raw --force-mode bottom_field --yield-json $YieldJson
+        abaqus python $extract --odb $Odb --meta $Meta --csv $Csv --raw-csv $Raw --force-mode fixed_bottom_ref --curve-method paper --yield-json $YieldJson
     }
     if (Test-Path $Csv) {
         $plotRc = Invoke-PlotStressStrain -Root $Root -Csv $Csv -Png $Png

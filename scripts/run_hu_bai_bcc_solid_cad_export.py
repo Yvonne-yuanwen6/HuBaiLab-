@@ -26,21 +26,32 @@ if _ROOT not in sys.path:
 
 from src.export.abaqus_compression import (
     CompressionSettings,
+    HU_BAI_AMPLITUDE_HOLD_FRACTION,
+    HU_BAI_DENSITY_KG_M3,
+    HU_BAI_E_MODULUS_MPA,
     HU_BAI_EXPLICIT_DT,
     HU_BAI_EXPLICIT_MASS_SCALING,
+    HU_BAI_FAST80_EXPLICIT_DT,
+    HU_BAI_FAST80_MESH_MM,
+    HU_BAI_FAST80_TARGET_STRAIN,
     HU_BAI_FRICTION,
     HU_BAI_LOAD_RATE_MM_MIN,
+    HU_BAI_MESH_MM,
+    HU_BAI_POISSON,
     HU_BAI_TARGET_ENGINEERING_STRAIN,
-    validate_explicit_restart_inp,
+    HU_BAI_YIELD_MPA,
     hu_bai_compression_displacement,
+    hu_bai_density_abq,
+    hu_bai_neo_hooke_c10,
     hu_bai_quasi_static_step_time,
+    validate_explicit_restart_inp,
 )
 from src.export.beam_utils import dedupe_beams
 from src.export.cad_solid_paths import resolve_step_and_xt, resolve_verified_solid_step
 from src.export.export_csv import export_beams, export_nodes
 from src.export.export_inp import export_inp
 from src.generator.hu_bai_bcc import HuBaiLatticeGenerator
-from src.mesh.solid_union import mesh_step_gmsh_tets
+from src.mesh.solid_union import mesh_step_gmsh_tets, mesh_step_voxel_c3d8r
 from src.paths import ABAQUS_JOBS, ABAQUS_POST, CAD_VERIFIED_ROOT, EXPORT_ROOT, ensure_output_dirs
 from src.postprocess.compression_curve import CompressionMeta, save_compression_meta
 from src.validation.penetration_risk import update_manifest_penetration_check
@@ -70,6 +81,29 @@ _parser.add_argument(
     help="Gmsh tet size [mm] (pilot default 1.0; full/paper 0.6)",
 )
 _parser.add_argument(
+    "--mesh-heal",
+    action="store_true",
+    help="Run gmsh occ.healShapes() on STEP before volume mesh",
+)
+_parser.add_argument(
+    "--mesh-algorithm",
+    type=int,
+    default=None,
+    help="Gmsh Mesh.Algorithm3D (1=Delaunay, 10=HXT; default 1)",
+)
+_parser.add_argument(
+    "--mesh-method",
+    choices=("tet", "voxel"),
+    default="tet",
+    help="tet = gmsh C3D4 volume mesh (paper); voxel = axis-aligned C3D8R brick fill",
+)
+_parser.add_argument(
+    "--voxel-pitch",
+    type=float,
+    default=0.5,
+    help="Voxel edge length [mm] when --mesh-method voxel (default 0.5)",
+)
+_parser.add_argument(
     "--strain",
     type=float,
     default=None,
@@ -79,7 +113,7 @@ _parser.add_argument(
     "--profile",
     choices=("fast", "paper", "pilot"),
     default=None,
-    help="fast = 45%% strain, 1.2 mm, 10 mm/min; fast80 = --case-suffix fast80 --strain 0.8 (0.8 mm, 10 mm/min); paper/pilot = full QA",
+    help="fast = 45%% strain, 1.2 mm, 10 mm/min, dt=5e-4; fast80 = --case-suffix fast80 (1.2 mm, 80%%, 5 mm/min, dt=5e-4); paper/pilot = full QA",
 )
 _parser.add_argument(
     "--stroke",
@@ -109,7 +143,13 @@ _parser.add_argument(
     "--explicit-dt",
     type=float,
     default=None,
-    help=f"Explicit fixed dt [s] (default {HU_BAI_EXPLICIT_DT:g})",
+    help=f"Explicit dt [s]: fixed mode = constant; automatic mode = max cap (default {HU_BAI_EXPLICIT_DT:g})",
+)
+_parser.add_argument(
+    "--explicit-dt-mode",
+    choices=("fixed", "automatic"),
+    default="fixed",
+    help="fixed = direct user control; automatic = stable increment with optional --explicit-dt cap",
 )
 _parser.add_argument(
     "--hold-fraction",
@@ -128,6 +168,30 @@ _parser.add_argument(
     action="store_true",
     help="Plate contact only (skip ALL EXTERIOR); lowers INP preprocessor memory for large SFBLS meshes",
 )
+_parser.add_argument(
+    "--restart-interval",
+    type=int,
+    default=None,
+    help="Explicit *Restart number interval (time slices in step; default 8)",
+)
+_parser.add_argument(
+    "--bulk-viscosity-linear",
+    type=float,
+    default=None,
+    help="*Bulk Viscosity linear coefficient (default 0.12)",
+)
+_parser.add_argument(
+    "--bulk-viscosity-quadratic",
+    type=float,
+    default=None,
+    help="*Bulk Viscosity quadratic coefficient (default 1.6)",
+)
+_parser.add_argument(
+    "--material-model",
+    choices=("paper", "hyperelastic", "elastic_plastic"),
+    default=None,
+    help="paper = Neo-Hooke TPU (§3.1); elastic_plastic = E+Plastic (§2.4.1); default: paper profile→hyperelastic, else elastic_plastic",
+)
 _args = _parser.parse_args()
 
 PROFILE = _args.profile
@@ -139,13 +203,13 @@ if PROFILE == "fast":
     STROKE = "full"
 PILOT_STRAIN = 0.15
 PILOT_MESH_MM = 1.0
-FULL_MESH_MM = 0.6
+FULL_MESH_MM = HU_BAI_MESH_MM
 FAST_STRAIN = 0.45
 FAST_MESH_MM = 1.2
 FAST_LOAD_RATE_MM_MIN = 10.0
-FAST80_MESH_MM = 0.8
 FAST_EXPLICIT_DT = 5.0e-4
 FAST_HOLD_FRACTION = 0.02
+# fast80 defaults: HU_BAI_FAST80_* in abaqus_compression
 
 CASE_SUFFIX_RAW = _args.case_suffix.strip().replace(" ", "_")
 IS_FAST80 = CASE_SUFFIX_RAW == "fast80"
@@ -159,7 +223,7 @@ NZ = int(_args.nz) if _args.nz is not None else int(_args.cells)
 if _args.mesh_size is not None:
     MESH_SIZE = float(_args.mesh_size)
 elif IS_FAST80:
-    MESH_SIZE = FAST80_MESH_MM
+    MESH_SIZE = HU_BAI_FAST80_MESH_MM
 elif PROFILE == "fast":
     MESH_SIZE = FAST_MESH_MM
 elif STROKE == "pilot":
@@ -167,14 +231,45 @@ elif STROKE == "pilot":
 else:
     MESH_SIZE = FULL_MESH_MM
 
-E_MODULUS = 25.0
-POISSON = 0.47
-YIELD_MPA = 4.69
-DENSITY_KG_M3 = 1135.0
-DENSITY_ABQ = DENSITY_KG_M3 * 1.0e-12
+MESH_METHOD = str(_args.mesh_method).lower()
 
-if _args.strain is not None:
+E_MODULUS = HU_BAI_E_MODULUS_MPA
+POISSON = HU_BAI_POISSON
+YIELD_MPA = HU_BAI_YIELD_MPA
+DENSITY_KG_M3 = HU_BAI_DENSITY_KG_M3
+DENSITY_ABQ = hu_bai_density_abq(DENSITY_KG_M3)
+TPU_C10 = hu_bai_neo_hooke_c10(E_MODULUS, POISSON)
+
+if PROFILE == "paper":
+    if _args.load_rate_mm_min is not None and abs(float(_args.load_rate_mm_min) - HU_BAI_LOAD_RATE_MM_MIN) > 1e-9:
+        print(
+            f"  [paper] ignoring --load-rate-mm-min {_args.load_rate_mm_min}; "
+            f"using {HU_BAI_LOAD_RATE_MM_MIN:g} mm/min (§2.4)",
+            flush=True,
+        )
+    if _args.strain is not None and abs(float(_args.strain) - HU_BAI_TARGET_ENGINEERING_STRAIN) > 1e-9:
+        print(
+            f"  [paper] ignoring --strain {_args.strain}; "
+            f"using {HU_BAI_TARGET_ENGINEERING_STRAIN:.0%} (§2.4)",
+            flush=True,
+        )
+    if _args.explicit_dt_mode in ("automatic", "auto", "adaptive"):
+        print("  [paper] forcing explicit_dt_mode=fixed (quasi-static KE/IE < 5%)", flush=True)
+    if MESH_METHOD == "voxel":
+        print("  [WARN] paper profile expects C3D4 tet mesh 0.6 mm; use --mesh-method tet", flush=True)
+
+MATERIAL_KIND = _args.material_model
+if MATERIAL_KIND is None:
+    MATERIAL_KIND = "paper" if PROFILE == "paper" else "elastic_plastic"
+USE_HYPERELASTIC = MATERIAL_KIND in ("paper", "hyperelastic")
+INP_MATERIAL_MODEL = "hyperelastic" if USE_HYPERELASTIC else "elastic"
+
+if PROFILE == "paper":
+    TARGET_STRAIN = HU_BAI_TARGET_ENGINEERING_STRAIN
+elif _args.strain is not None:
     TARGET_STRAIN = float(_args.strain)
+elif IS_FAST80:
+    TARGET_STRAIN = HU_BAI_FAST80_TARGET_STRAIN
 elif PROFILE == "fast":
     TARGET_STRAIN = FAST_STRAIN
 elif STROKE == "pilot":
@@ -184,9 +279,13 @@ else:
 
 BLOCK_HEIGHT = NZ * L
 COMPRESSION_DISP = hu_bai_compression_displacement(NZ, L, target_strain=TARGET_STRAIN)
-if _args.load_rate_mm_min is not None:
+if PROFILE == "paper":
+    LOAD_RATE_MM_MIN = HU_BAI_LOAD_RATE_MM_MIN
+elif _args.load_rate_mm_min is not None:
     LOAD_RATE_MM_MIN = float(_args.load_rate_mm_min)
-elif IS_FAST80 or PROFILE == "fast":
+elif IS_FAST80:
+    LOAD_RATE_MM_MIN = HU_BAI_LOAD_RATE_MM_MIN
+elif PROFILE == "fast":
     LOAD_RATE_MM_MIN = FAST_LOAD_RATE_MM_MIN
 else:
     LOAD_RATE_MM_MIN = HU_BAI_LOAD_RATE_MM_MIN
@@ -201,21 +300,40 @@ else:
 FRICTION = HU_BAI_FRICTION
 if _args.explicit_dt is not None:
     EXPLICIT_DT = float(_args.explicit_dt)
+elif IS_FAST80:
+    EXPLICIT_DT = HU_BAI_FAST80_EXPLICIT_DT
 elif PROFILE == "fast":
     EXPLICIT_DT = FAST_EXPLICIT_DT
 else:
     EXPLICIT_DT = HU_BAI_EXPLICIT_DT
 if _args.hold_fraction is not None:
     HOLD_FRACTION = float(_args.hold_fraction)
+elif IS_FAST80:
+    HOLD_FRACTION = HU_BAI_AMPLITUDE_HOLD_FRACTION
 elif PROFILE == "fast":
     HOLD_FRACTION = FAST_HOLD_FRACTION
 else:
-    HOLD_FRACTION = 0.05
+    HOLD_FRACTION = HU_BAI_AMPLITUDE_HOLD_FRACTION
 EXPLICIT_MASS_SCALING = HU_BAI_EXPLICIT_MASS_SCALING
+RESTART_INTERVAL = _args.restart_interval
+BULK_VISCOSITY_LINEAR = (
+    float(_args.bulk_viscosity_linear) if _args.bulk_viscosity_linear is not None else 0.12
+)
+BULK_VISCOSITY_QUADRATIC = (
+    float(_args.bulk_viscosity_quadratic) if _args.bulk_viscosity_quadratic is not None else 1.6
+)
+EXPLICIT_DT_MODE = str(_args.explicit_dt_mode)
+if PROFILE == "paper" and EXPLICIT_DT_MODE in ("automatic", "auto", "adaptive"):
+    EXPLICIT_DT_MODE = "fixed"
 STROKE_TAG = "p" if STROKE == "pilot" else "f"
+VOXEL_PITCH = float(_args.voxel_pitch)
 CASE_SUFFIX = CASE_SUFFIX_RAW
-if PROFILE == "fast" and not CASE_SUFFIX:
-    CASE_SUFFIX = "fast"
+if not CASE_SUFFIX:
+    if MESH_METHOD == "voxel":
+        CASE_SUFFIX = "voxel"
+    elif PROFILE == "fast":
+        CASE_SUFFIX = "fast"
+SOLID_ELEMENT = "C3D8R" if MESH_METHOD == "voxel" else "C3D4"
 N_INC_EST = max(100, int(round(STEP_TIME / EXPLICIT_DT)))
 
 gen = HuBaiLatticeGenerator(
@@ -299,6 +417,7 @@ compression = CompressionSettings(
     plate_thickness=0.5,
     analysis="explicit",
     explicit_dt=EXPLICIT_DT,
+    explicit_dt_mode=EXPLICIT_DT_MODE,
     explicit_mass_scaling_factor=EXPLICIT_MASS_SCALING,
     explicit_mass_scaling_dt_only=False,
     amplitude_hold_fraction=HOLD_FRACTION,
@@ -313,6 +432,9 @@ compression = CompressionSettings(
     top_face_normal_z_min=TOP_FACE_NORMAL_Z_MIN,
     bottom_surface_z_band=BOTTOM_SURFACE_Z_BAND,
     bottom_face_normal_z_max=BOTTOM_FACE_NORMAL_Z_MAX,
+    explicit_restart_number_interval=RESTART_INTERVAL,
+    bulk_viscosity_linear=BULK_VISCOSITY_LINEAR,
+    bulk_viscosity_quadratic=BULK_VISCOSITY_QUADRATIC,
 )
 
 paths = {
@@ -326,7 +448,23 @@ paths = {
 export_nodes(nodes, paths["nodes_csv"])
 export_beams(beams, paths["beams_csv"])
 
-if cad_is_stl:
+if MESH_METHOD == "voxel":
+    if cad_is_stl:
+        import trimesh
+
+        from src.mesh.solid_union import mesh_union_voxel_c3d8r
+
+        print(f"  Voxel mesh fused STL @ pitch={VOXEL_PITCH} mm (C3D8R)...", flush=True)
+        union_mesh = trimesh.load(step_path)
+        mesh_nodes, mesh_elements = mesh_union_voxel_c3d8r(union_mesh, pitch=VOXEL_PITCH)
+        elsets = {"solid": [int(e[0]) for e in mesh_elements]}
+    else:
+        print(f"  Voxel mesh STEP @ pitch={VOXEL_PITCH} mm (C3D8R)...", flush=True)
+        mesh_nodes, mesh_elements, elsets = mesh_step_voxel_c3d8r(
+            step_path,
+            pitch=VOXEL_PITCH,
+        )
+elif cad_is_stl:
     import trimesh
 
     from src.mesh.solid_union import mesh_union_gmsh_tets
@@ -337,7 +475,13 @@ if cad_is_stl:
     elsets = {"solid": [int(e[0]) for e in mesh_elements]}
 else:
     print(f"  Meshing STEP @ {MESH_SIZE} mm (paper C3D4)...", flush=True)
-    mesh_nodes, mesh_elements, elsets = mesh_step_gmsh_tets(step_path, mesh_size=MESH_SIZE)
+    mesh_algo = int(_args.mesh_algorithm) if _args.mesh_algorithm is not None else 1
+    mesh_nodes, mesh_elements, elsets = mesh_step_gmsh_tets(
+        step_path,
+        mesh_size=MESH_SIZE,
+        algorithm=mesh_algo,
+        heal_shapes=bool(_args.mesh_heal),
+    )
 pre_mesh = (mesh_nodes, mesh_elements, elsets)
 
 stats = export_inp(
@@ -345,12 +489,13 @@ stats = export_inp(
     beams,
     paths["compression_inp"],
     polylines=polylines,
-    element_type="C3D4",
-    material_model="elastic",
+    element_type=SOLID_ELEMENT,
+    material_model=INP_MATERIAL_MODEL,
     material_name="TPU",
+    c10=TPU_C10,
     elastic_e=E_MODULUS,
     elastic_nu=POISSON,
-    plastic_yield=YIELD_MPA,
+    plastic_yield=None if USE_HYPERELASTIC else YIELD_MPA,
     density=DENSITY_ABQ,
     compression=compression,
     geom_tag=geom_tag,
@@ -381,6 +526,9 @@ meta = CompressionMeta.from_export_stats(
 )
 meta.reference_area_mm2 = NX * L * NY * L
 meta.reference_height_mm = NZ * L
+meta.plate_fixed_ref_node_id = int(
+    stats.get("fixed_plate_ref_node_id", stats.get("plate_fixed_ref_node_id", 0)) or 0
+)
 save_compression_meta(meta, paths["meta_json"])
 
 manifest = {
@@ -390,7 +538,11 @@ manifest = {
     "stroke_tag": STROKE_TAG,
     "structure": gen.variant_name,
     "reference": "Hu & Bai 2024 — CAD solid (STEP/X_T) explicit compression",
-    "figure_target": "Fig. 3.3 compressive stress-strain (solid C3D4 mesh)",
+    "figure_target": (
+        "Fig. 3.3 compressive stress-strain (solid C3D4 mesh)"
+        if MESH_METHOD == "tet"
+        else "Voxel C3D8R solid mesh (print-oriented)"
+    ),
     "export_dir": export_dir,
     "job_dir": job_dir,
     "post_dir": post_dir,
@@ -415,15 +567,24 @@ manifest = {
         "block_cells": [NX, NY, NZ],
     },
     "material": {
+        "model": MATERIAL_KIND,
+        "inp_model": INP_MATERIAL_MODEL,
         "E_MPa": E_MODULUS,
         "nu": POISSON,
         "yield_MPa": YIELD_MPA,
+        "neo_hooke_C10_MPa": TPU_C10 if USE_HYPERELASTIC else None,
         "density_kg_m3": DENSITY_KG_M3,
     },
     "mesh": {
-        "element": "C3D4",
-        "source": "gmsh_stl_volume" if cad_is_stl else "gmsh_step_volume",
-        "mesh_size_mm": MESH_SIZE,
+        "element": SOLID_ELEMENT,
+        "method": MESH_METHOD,
+        "source": (
+            "union_voxel"
+            if MESH_METHOD == "voxel"
+            else ("gmsh_stl_volume" if cad_is_stl else "gmsh_step_volume")
+        ),
+        "mesh_size_mm": VOXEL_PITCH if MESH_METHOD == "voxel" else MESH_SIZE,
+        "voxel_pitch_mm": VOXEL_PITCH if MESH_METHOD == "voxel" else None,
         "node_count": stats.get("node_count"),
         "element_count": stats.get("element_count"),
     },
@@ -436,6 +597,7 @@ manifest = {
         "step_time_overridden": _args.step_time is not None,
         "friction": FRICTION,
         "explicit_dt": EXPLICIT_DT,
+        "explicit_dt_mode": EXPLICIT_DT_MODE,
         "amplitude_hold_fraction": HOLD_FRACTION,
         "explicit_mass_scaling": EXPLICIT_MASS_SCALING,
         "explicit_n_increments_est": N_INC_EST,
@@ -469,7 +631,8 @@ update_manifest_penetration_check(
 
 print()
 print(f"Hu & Bai CAD solid compression INP (profile={PROFILE}, stroke={STROKE}):", paths["compression_inp"])
-print(f"  Mesh: {stats['node_count']} nodes, {stats['element_count']} C3D4 @ {MESH_SIZE} mm")
+_mesh_label = f"{SOLID_ELEMENT} @ {VOXEL_PITCH} mm pitch" if MESH_METHOD == "voxel" else f"C3D4 @ {MESH_SIZE} mm"
+print(f"  Mesh: {stats['node_count']} nodes, {stats['element_count']} {_mesh_label}")
 n_load_faces = int(stats.get("lattice_load_faces") or stats.get("lattice_top_faces") or 0)
 print(f"  LATTICE_TOP contact faces: {n_load_faces} (z_band={TOP_SURFACE_Z_BAND} mm, normal_z>={TOP_FACE_NORMAL_Z_MIN})")
 if n_load_faces < 3000:
@@ -484,7 +647,29 @@ print(
     f"  Loading: {COMPRESSION_DISP:.1f} mm / {STEP_TIME:.1f} s "
     f"({LOAD_RATE_MM_MIN:g} mm/min, {_rate_note}), μ={FRICTION}"
 )
-print(f"  Explicit: dt={EXPLICIT_DT:g} s, mass scaling ×{EXPLICIT_MASS_SCALING:g}, ~{N_INC_EST} increments")
+_mat_note = (
+    f"Neo-Hooke C10={TPU_C10:.4g} MPa (E~{E_MODULUS:g} MPa)"
+    if USE_HYPERELASTIC
+    else f"elastic E={E_MODULUS:g} MPa + plastic yield={YIELD_MPA:g} MPa"
+)
+print(f"  Material ({MATERIAL_KIND}): {_mat_note}, rho={DENSITY_KG_M3:g} kg/m^3, nu={POISSON}")
+print(
+    f"  Explicit: dt_mode={EXPLICIT_DT_MODE}, dt={EXPLICIT_DT:g} s, "
+    f"mass scaling ×{EXPLICIT_MASS_SCALING:g}, ~{N_INC_EST} increments"
+)
+print(
+    f"  Bulk viscosity: {BULK_VISCOSITY_LINEAR:g}, {BULK_VISCOSITY_QUADRATIC:g}; "
+    f"restart slices: {compression.resolved_restart_number_interval()}"
+)
+_elem_n = max(int(stats.get("element_count", 0) or 0), 1)
+# Empirical SFBLS Q=1 4×4×4 ~1.2 mm mesh, 8 cpus, dt=5e-4: ~0.01 s/increment (2026-06 runs).
+_wall_sec_per_inc_ref = 0.01
+_elem_ref = 144_000
+_wall_h_8cpu = N_INC_EST * _wall_sec_per_inc_ref * (_elem_n / _elem_ref) / 3600.0
+print(
+    f"  Wall-clock estimate: ~{_wall_h_8cpu:.0f} h @ 8 cpus full step "
+    f"(scales with increments x elements; SFBLS self-contact)"
+)
 if compression.explicit_restart_write:
     n_rst = compression.resolved_restart_number_interval()
     print(

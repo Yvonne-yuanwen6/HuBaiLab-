@@ -10,8 +10,11 @@ X_T 与 STEP 为同一 BREP。脚本对 **STEP 做 gmsh 体网格（C3D4）**，
 - 板 XY 比点阵大 `plate_margin=10 mm`
 
 ```powershell
-# 几小时内出曲线（推荐先试）：45% 应变、1.2 mm 网格、10 mm/min、dt=5e-4、板接触传力
+# fast 加速档：45% 应变、1.2 mm、10 mm/min、dt=5e-4
 py -3 scripts/run_hu_bai_bcc_solid_cad_export.py --cells 3 --profile fast
+
+# fast80（Fig.3.3）：80% 应变、0.8 mm、论文 5 mm/min、dt=1e-4
+py -3 scripts/run_hu_bai_bcc_solid_cad_export.py --cells 4 --case-suffix fast80
 powershell -File scripts/submit_hu_bai_bcc_solid_cad_compression.ps1 -Cells 3 -Profile fast -ForceRerun
 
 # 论文满行程（0.6 mm、70%、5 mm/min，数天级）
@@ -100,6 +103,35 @@ py -3 scripts/validate_step_solidworks.py output/cad/*_array.step
 备选：`run_hu_bai_bcc_layered_step_fuse.py`（z 层分层，较慢）。勿用一次性 monolithic fuse（512+ primitive，超 gmsh 256 上限）。
 
 Abaqus 中可：**工具 → 几何编辑 → 修复** 或导入时提高缝合容差；划分网格时用 **四面体 (C3D4/C3D10)**，避免对含碎面的模型用 medial-axis 六面体。
+
+### Abaqus/CAE 内置六面体（C3D8R）与仓库自动体素网格的区别
+
+| 路径 | 谁划分网格 | 单元 | 本仓库状态 |
+|------|-----------|------|------------|
+| **CAE 内置** | Abaqus Mesh 模块对 **Part 实体** 扫掠/映射/Hex-dominated | C3D8R 等 | **未接入** 压缩 INP 流水线；需 Part 有可扫掠的 `cells` |
+| **体素 C3D8R**（`--mesh-method voxel`） | LatticeLab 体素填充 → 写入 INP | C3D8R | **已跑通** 四模型 80%（`voxel1mm80_25mmin_noself`） |
+| **Gmsh 四面体**（默认 `tet` / fast80） | Gmsh 读 STEP | C3D4 | 论文主路径 |
+
+**说明：** 体素路线生成的也是 Abaqus **C3D8R 六面体单元**，只是网格在导出 INP 前由 Python 完成，不是在 CAE 里点「划分网格」。
+
+### CAE 内置六面体试点（BCC STEP）
+
+脚本（需 CAE 许可证）：
+
+```powershell
+powershell -File scripts/run_abaqus_cae_hex_mesh_pilot.ps1 -SeedMm 1.2
+```
+
+当前在本机实测：`mdb.openStep` 对 `verified/*_solid_merged.step` **未生成可划分的 Part**（`Parts: []`），因此 CAE 无法继续 `generateMesh`。常见原因：OCC 融合 STEP 的实体类型/碎面与 Abaqus 批处理导入不兼容，需在 CAE 里 **File → Import → Part → STEP** 并做几何修复，或另存为 Abaqus 支持的 ACIS/Parasolid 版本后再导入。
+
+曲杆 SFBLS 即便导入成功，**全网六面体** 通常仍需大量 **Partition + 扫掠/结构化**；复杂单实体往往只能 Hex-dominated（混有四面体）或退回四面体。项目文档见上文「避免 medial-axis 六面体」。
+
+**推荐顺序：**
+
+1. 若目标是 **打印对齐的均匀六面体砖块**：继续用已完成的 **体素 C3D8R**（老师路线）。
+2. 若必须 **CAE 里亲手划六面体**：先在 CAE 交互导入 BCC STEP，划分成功后 **File → Export → Input File**，再把网格并入压缩边界条件（需额外开发 INP 合并）。
+3. 若目标是 **论文复现**：用 **Gmsh C3D4 fast80**，不是 CAE 六面体。
+
 
 ### SolidWorks 报「窗口资源极低 / 不能再打开任何窗口」
 

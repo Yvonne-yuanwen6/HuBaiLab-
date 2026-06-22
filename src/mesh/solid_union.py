@@ -390,6 +390,7 @@ def mesh_step_gmsh_tets(
     *,
     mesh_size: float = 0.6,
     algorithm: int = 1,
+    heal_shapes: bool = False,
     progress: bool = True,
 ) -> tuple[
     list[tuple[int, float, float, float]],
@@ -412,11 +413,19 @@ def mesh_step_gmsh_tets(
         if not gmsh.model.getEntities(3):
             raise RuntimeError(f"gmsh: no 3D volumes in STEP {step_path}")
 
+        if heal_shapes:
+            gmsh.model.occ.healShapes()
+            gmsh.model.occ.synchronize()
+
         gmsh.option.setNumber("Mesh.CharacteristicLengthMin", float(mesh_size) * 0.5)
         gmsh.option.setNumber("Mesh.CharacteristicLengthMax", float(mesh_size))
         gmsh.option.setNumber("Mesh.Algorithm3D", int(algorithm))
         if progress:
-            print(f"  Gmsh STEP volume mesh (target {mesh_size} mm)...", flush=True)
+            heal_tag = ", heal" if heal_shapes else ""
+            print(
+                f"  Gmsh STEP volume mesh (target {mesh_size} mm, algo={algorithm}{heal_tag})...",
+                flush=True,
+            )
         gmsh.model.mesh.generate(3)
 
         mesh_nodes, mesh_elements = _gmsh_extract_linear_tets()
@@ -429,6 +438,81 @@ def mesh_step_gmsh_tets(
         return mesh_nodes, mesh_elements, elsets
     finally:
         gmsh.finalize()
+
+
+def step_to_trimesh_surface(
+    step_path: str,
+    *,
+    mesh_size: float = 0.4,
+    progress: bool = True,
+) -> object:
+    """Tessellate a single-body STEP to a watertight trimesh surface (for voxel fill)."""
+    import gmsh
+    import trimesh
+
+    if not os.path.isfile(step_path):
+        raise FileNotFoundError(step_path)
+
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add("cad_surf")
+        gmsh.model.occ.importShapes(os.path.abspath(step_path))
+        gmsh.model.occ.synchronize()
+
+        if not gmsh.model.getEntities(3):
+            raise RuntimeError(f"gmsh: no 3D volumes in STEP {step_path}")
+
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", float(mesh_size) * 0.5)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", float(mesh_size))
+        if progress:
+            print(
+                f"  Gmsh STEP surface tessellation ({mesh_size} mm) for voxel shell...",
+                flush=True,
+            )
+        gmsh.model.mesh.generate(2)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stl_path = os.path.join(tmp, "shell.stl")
+            gmsh.write(stl_path)
+            loaded = trimesh.load(stl_path)
+
+        if isinstance(loaded, trimesh.Scene):
+            loaded = loaded.dump(concatenate=True)
+        if not isinstance(loaded, trimesh.Trimesh):
+            raise RuntimeError(f"Expected trimesh.Trimesh from STEP shell, got {type(loaded)}")
+        if not loaded.is_watertight:
+            loaded.fill_holes()
+        if not loaded.is_watertight:
+            raise RuntimeError(
+                f"STEP surface mesh is not watertight ({step_path}); "
+                "try smaller surface mesh_size or heal the CAD."
+            )
+        return loaded
+    finally:
+        gmsh.finalize()
+
+
+def mesh_step_voxel_c3d8r(
+    step_path: str,
+    *,
+    pitch: float = 0.5,
+    surface_mesh_size: float | None = None,
+    progress: bool = True,
+) -> tuple[
+    list[tuple[int, float, float, float]],
+    list[tuple[int, int, int, int, int, int, int, int, int]],
+    dict[str, list[int]],
+]:
+    """Voxel-fill a STEP solid into merged C3D8R hex elements (stair-step surface)."""
+    pitch = float(pitch)
+    surf = float(surface_mesh_size) if surface_mesh_size is not None else max(pitch * 0.5, 0.2)
+    if progress:
+        print(f"  Voxel fill @ pitch={pitch} mm (surface tessellation {surf} mm)...", flush=True)
+    shell = step_to_trimesh_surface(step_path, mesh_size=surf, progress=progress)
+    mesh_nodes, mesh_elements = mesh_union_voxel_c3d8r(shell, pitch=pitch)
+    elsets = {"solid": [int(e[0]) for e in mesh_elements]}
+    return mesh_nodes, mesh_elements, elsets
 
 
 def mesh_union_gmsh_tets(

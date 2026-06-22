@@ -25,6 +25,7 @@ class CompressionMeta:
     mesh_z_min: float = 0.0
     mesh_z_max: float = 0.0
     plate_ref_node_id: int = 0
+    plate_fixed_ref_node_id: int = 0
     amplitude_hold_fraction: float = 0.3
     loading_direction: str = "top_down"
     case_slug: str = ""
@@ -60,8 +61,8 @@ class CompressionMeta:
     ) -> CompressionMeta:
         mesh_z_max = float(stats.get("mesh_z_max", nz * cell_size))
         mesh_z_min = float(stats.get("mesh_z_min", 0.0))
-        ref_h = max(mesh_z_max - mesh_z_min, 1e-9)
-        ref_a = max(nx * cell_size * ny * cell_size, 1e-9)
+        ref_h = nominal_block_height_mm(nz, cell_size)
+        ref_a = nominal_block_area_mm2(nx, ny, cell_size)
         return cls(
             nx=nx,
             ny=ny,
@@ -76,6 +77,10 @@ class CompressionMeta:
             mesh_z_min=mesh_z_min,
             mesh_z_max=mesh_z_max,
             plate_ref_node_id=int(stats.get("plate_ref_node_id", 0) or 0),
+            plate_fixed_ref_node_id=int(
+                stats.get("plate_fixed_ref_node_id", stats.get("fixed_plate_ref_node_id", 0))
+                or 0
+            ),
             amplitude_hold_fraction=float(amplitude_hold_fraction),
             case_slug=str(case_slug),
             geometry_tag=str(geometry_tag),
@@ -107,6 +112,32 @@ def load_compression_meta(path: str) -> CompressionMeta:
     known = {f.name for f in CompressionMeta.__dataclass_fields__.values()}  # type: ignore[attr-defined]
     filtered = {k: v for k, v in data.items() if k in known}
     return CompressionMeta(**filtered)
+
+
+def nominal_block_area_mm2(nx: int, ny: int, cell_size: float) -> float:
+    """Hu & Bai (2024) §2.2 / §2.4 — footprint area nx·L × ny·L."""
+    return max(float(nx) * float(cell_size) * float(ny) * float(cell_size), 1e-9)
+
+
+def nominal_block_height_mm(nz: int, cell_size: float) -> float:
+    """Hu & Bai (2024) §2.2 Eq.(2.12) block height nz·L (not mesh bbox)."""
+    return max(float(nz) * float(cell_size), 1e-9)
+
+
+def paper_reference_geometry(meta: CompressionMeta) -> tuple[float, float]:
+    """
+    Nominal 4×4×4 block references used in the thesis stress–strain curves.
+
+    σ = |F| / (nx·L·ny·L),  ε = |S| / (nz·L)
+    with F from the loading rigid plate reaction and S the plate stroke.
+    """
+    area = meta.reference_area_mm2
+    height = meta.reference_height_mm
+    if area <= 0.0:
+        area = nominal_block_area_mm2(meta.nx, meta.ny, meta.cell_size)
+    if height <= 0.0:
+        height = nominal_block_height_mm(meta.nz, meta.cell_size)
+    return area, height
 
 
 def trim_amplitude_hold(
@@ -183,11 +214,12 @@ def postprocess_history(
     *,
     trim_hold: bool = True,
     drop_spike: bool = True,
+    method: str = "paper",
 ) -> tuple[list[float], list[float], list[float]]:
     t, u, r = list(times), list(u3_mm), list(rf3_n)
     if trim_hold:
         t, u, r = trim_amplitude_hold(t, u, r, meta)
-    if drop_spike:
+    if drop_spike and method.lower() != "paper":
         t, u, r = filter_load_spikes(t, u, r)
     return t, u, r
 
@@ -198,13 +230,17 @@ def build_curve_records(
     rf3_n: Sequence[float],
     meta: CompressionMeta,
     *,
-    force_source: str = "plate_ref",
+    force_source: str = "paper_top_plate",
+    method: str = "paper",
 ) -> list[dict[str, float]]:
     """
     Build engineering stress-strain (compression positive).
 
-    stress = |RF3| / reference_area_mm2  (N/mm2 = MPa)
-    strain = |U3 - U3_0| / reference_height_mm
+    Paper (Hu & Bai 2024 §2.4.1–2.4.2, Fig. 3.3):
+      F = top rigid-plate reaction (PLATE_REF RF3, same as MTS load cell)
+      S = top plate stroke (PLATE_REF U3 − U3_0)
+      σ = |F| / (nx·L·ny·L)   [MPa]
+      ε = |S| / (nz·L)
     """
     if not times:
         return []
@@ -212,8 +248,11 @@ def build_curve_records(
         raise ValueError("times, u3_mm, rf3_n must have the same length")
 
     u0 = float(u3_mm[0])
-    area = max(meta.reference_area_mm2, 1e-9)
-    height = max(meta.reference_height_mm, 1e-9)
+    if method.lower() == "paper":
+        area, height = paper_reference_geometry(meta)
+    else:
+        area = max(meta.reference_area_mm2, 1e-9)
+        height = max(meta.reference_height_mm, 1e-9)
 
     rows: list[dict[str, float]] = []
     for t, u3, rf3 in zip(times, u3_mm, rf3_n):

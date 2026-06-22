@@ -71,7 +71,7 @@ Write-Host "=== Q=0.5 fast80 export + submit ===" -ForegroundColor Cyan
 Write-Host "  CAD: $cad"
 Write-Host "  slug: $slug"
 
-Write-Host "[1/2] Export INP (fast80, mesh=0.8 mm, strain=80%) ..."
+Write-Host "[1/2] Export INP (fast80 defaults: 1.2 mm, 80% strain, 5 mm/min, dt=5e-4) ..."
 $exportArgs = @(
     "scripts\run_hu_bai_bcc_solid_cad_export.py",
     "--cells", "4",

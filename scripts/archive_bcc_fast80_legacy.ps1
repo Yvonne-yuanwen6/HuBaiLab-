@@ -1,5 +1,5 @@
 # Archive BCC fast/fast80 runs that used 25 mm/min + 1.2 mm mesh before 2026-06 re-run.
-# Frees canonical slugs (*_fast80, 4x4x4 *_fast) for new defaults (10 mm/min, 0.8 mm mesh).
+# Frees canonical slugs (*_fast80, 4x4x4 *_fast) for paper-aligned fast80 defaults (5 mm/min, dt=1e-4).
 param(
     [switch]$WhatIf,
     [switch]$SkipFastBase

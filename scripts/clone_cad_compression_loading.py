@@ -21,7 +21,13 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from src.export.abaqus_compression import hu_bai_compression_displacement, hu_bai_quasi_static_step_time
+from src.export.abaqus_compression import (
+    HU_BAI_AMPLITUDE_HOLD_FRACTION,
+    HU_BAI_EXPLICIT_DT,
+    HU_BAI_LOAD_RATE_MM_MIN,
+    hu_bai_compression_displacement,
+    hu_bai_quasi_static_step_time,
+)
 from src.naming import load_case_manifest
 from src.paths import ABAQUS_JOBS, ABAQUS_POST, EXPORT_ROOT
 from src.postprocess.compression_curve import CompressionMeta, load_compression_meta, save_compression_meta
@@ -131,19 +137,19 @@ def main() -> int:
     if args.load_rate_mm_min > 0:
         load_rate = float(args.load_rate_mm_min)
     elif fast80:
-        load_rate = 10.0
+        load_rate = HU_BAI_LOAD_RATE_MM_MIN
     else:
         load_rate = float(src["loading"]["load_rate_mm_min"])
     if args.explicit_dt > 0:
         explicit_dt = float(args.explicit_dt)
     elif fast80:
-        explicit_dt = 5.0e-4
+        explicit_dt = HU_BAI_EXPLICIT_DT
     else:
         explicit_dt = float(src["loading"]["explicit_dt"])
     if args.hold_fraction >= 0:
         hold_fraction = float(args.hold_fraction)
     elif fast80:
-        hold_fraction = 0.02
+        hold_fraction = HU_BAI_AMPLITUDE_HOLD_FRACTION
     else:
         hold_fraction = float(src["loading"]["amplitude_hold_fraction"])
 

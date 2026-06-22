@@ -11,6 +11,11 @@ output/
 ├── export/{slug}/            # INP、CSV、case_manifest、meta
 ├── jobs/{slug}/              # Abaqus 作业目录（INP 副本、ODB）
 ├── post/{slug}/              # 应力–应变曲线 CSV / PNG / yield
+├── failed/{slug}/{timestamp}/ # 崩溃/未完成归档（jobs/ + post/ + failure_manifest.json）
+│   ├── jobs/                 # 该次 run 的 ODB、.sta 等（move，与 run 一一对应）
+│   ├── compression_meta.json # 归档时快照的 export meta
+│   ├── post/                 # 从 jobs/*.odb 当场 extract（不再拷贝共享 post/）
+│   └── failure_manifest.json
 └── previews/                 # 线框预览 PNG（preview 脚本）
 ```
 

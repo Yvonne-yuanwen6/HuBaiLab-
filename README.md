@@ -163,7 +163,7 @@ py -3 scripts/preview_hu_bai_sfbls.py --all-q --cells 1
 
 **fast 加速档**（非论文原参）：工程应变 **45%**，gmsh **1.2 mm**，准静态加载 **10 mm/min**，Explicit **dt = 5×10⁻⁴ s**，幅值 hold **2%** step_time，`--profile fast`（4×4×4：36 mm / **216 s**）。
 
-**fast80 加速档**（Fig. 3.3 对比用）：工程应变 **80%**，gmsh **0.8 mm**，其余同 fast（**10 mm/min**，dt = 5×10⁻⁴），`--profile fast --case-suffix fast80 --strain 0.8`（4×4×4：64 mm / **384 s**，约 768 000 增量）。
+**fast80 档**（Fig. 3.3 对比用）：工程应变 **80%**，gmsh **0.8 mm**，加载与论文一致（**5 mm/min**，dt = **1×10⁻⁴ s**，hold **5%**），`--case-suffix fast80`（4×4×4：64 mm / **768 s**，约 **7.68×10⁶** 增量；8 核墙钟约 **25–40 h** 量级，视网格单元数与是否早停）。
 
 ### 端到端完成（STEP → 网格 → Abaqus → 应力–应变曲线）
 
@@ -178,7 +178,7 @@ py -3 scripts/preview_hu_bai_sfbls.py --all-q --cells 1
 powershell -File scripts/archive_bcc_fast80_legacy.ps1
 ```
 
-复现 BCC 4×4×4 fast80（**新默认**：0.8 mm、10 mm/min、384 s）：
+复现 BCC 4×4×4 fast80（**默认**：0.8 mm、5 mm/min、768 s、dt=1e-4）：
 
 ```powershell
 py -3 scripts/run_hu_bai_bcc_unitcell_array_step_fuse.py --cells 4 --Q 0

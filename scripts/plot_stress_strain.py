@@ -59,6 +59,7 @@ def plot_curve(
     show: bool,
     annotate_yield: bool = False,
     yield_props: dict[str, float] | None = None,
+    paper_style: bool = False,
 ) -> None:
     import matplotlib
 
@@ -94,9 +95,9 @@ def plot_curve(
             ax.plot(ue, us, "k^", markersize=7, label=f"Ultimate {us:.4f} MPa")
         ax.legend(loc="best", fontsize=8)
 
-    ax.set_xlabel("Engineering strain")
-    ax.set_ylabel("Engineering stress (MPa)")
-    ax.set_title("Lattice structure — stress-strain curve")
+    ax.set_xlabel("应变" if paper_style else "Engineering strain")
+    ax.set_ylabel("应力 (MPa)" if paper_style else "Engineering stress (MPa)")
+    ax.set_title("点阵结构压缩应力-应变曲线" if paper_style else "Lattice structure — stress-strain curve")
     ax.grid(True, alpha=0.35)
     fig.tight_layout()
 
@@ -130,7 +131,16 @@ def main() -> int:
         default="",
         help="Only used with --annotate-yield",
     )
-    parser.add_argument("--no-show", action="store_true")
+    parser.add_argument(
+        "--paper-style",
+        action="store_true",
+        help="Axis labels matching Hu & Bai thesis Fig. 3.3 (应变 / 应力 MPa)",
+    )
+    parser.add_argument(
+        "--no-show",
+        action="store_true",
+        help="Save PNG only; do not open an interactive window",
+    )
     args = parser.parse_args()
 
     if not os.path.isfile(args.csv):
@@ -165,6 +175,7 @@ def main() -> int:
         show=not args.no_show,
         annotate_yield=args.annotate_yield,
         yield_props=props,
+        paper_style=args.paper_style,
     )
     return 0
 

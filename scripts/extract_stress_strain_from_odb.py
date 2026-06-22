@@ -207,11 +207,39 @@ def _sum_nset_rf3_history(step, labels: set[int]) -> tuple[list[float], list[flo
     return times, rf_sum, len(series)
 
 
-def _extract_plate_ref(step, odb, ref_node_id: int):
+def _resolve_fixed_ref_node_id(meta, root: str) -> int:
+    ref_id = int(getattr(meta, "plate_fixed_ref_node_id", 0) or 0)
+    if ref_id > 0:
+        return ref_id
+    active = _default_paths_from_active_case()
+    inp_path = active.get("compression_inp", "")
+    if inp_path and os.path.isfile(inp_path):
+        with open(inp_path, encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+        for i, line in enumerate(lines):
+            if line.strip().upper().startswith("*NSET") and "PLATE_FIXED_REF" in line.upper():
+                for j in range(i + 1, min(i + 4, len(lines))):
+                    row = lines[j].strip()
+                    if not row or row.startswith("*"):
+                        break
+                    first = row.split(",")[0].strip()
+                    if first.isdigit():
+                        return int(first)
+    return 0
+
+
+def _extract_plate_ref(step, odb, ref_node_id: int, *, source: str = "paper_top_plate"):
     region, name = _find_history_region(step, odb, ref_node_id, "PLATE_REF")
     times, u3 = _history_series(region, "U3")
     _, rf3 = _history_series(region, "RF3")
-    return times, u3, rf3, name, "plate_ref"
+    return times, u3, rf3, name, source
+
+
+def _extract_fixed_bottom_ref(step, odb, ref_node_id: int):
+    region, name = _find_history_region(step, odb, ref_node_id, "PLATE_FIXED_REF")
+    times, u3 = _history_series(region, "U3")
+    _, rf3 = _history_series(region, "RF3")
+    return times, u3, rf3, name, "paper_bottom_plate"
 
 
 def _extract_top_sum(step, odb):
@@ -231,7 +259,7 @@ def _extract_top_sum(step, odb):
     except (AttributeError, IndexError):
         ref_id = 0
     if ref_id:
-        _, u3, _, u_name, _ = _extract_plate_ref(step, odb, ref_id)
+        times, u3, _, u_name, _ = _extract_plate_ref(step, odb, ref_id, source="top_sum_u3")
     else:
         u_name = "PLATE_REF U3 (missing)"
         u3 = [0.0] * len(times)
@@ -319,7 +347,8 @@ def extract_from_odb(
     meta_path: str,
     csv_path: str,
     *,
-    force_mode: str = "plate_ref",
+    force_mode: str = "paper",
+    curve_method: str = "paper",
     step_name: str | None = None,
     root: str | None = None,
     trim_hold: bool = True,
@@ -331,6 +360,7 @@ def extract_from_odb(
     step_name = step_name or meta.step_name
     root = root or _ROOT
     ref_node_id = _resolve_ref_node_id(meta, root)
+    fixed_ref_node_id = _resolve_fixed_ref_node_id(meta, root)
 
     odb = openOdb(path=odb_path, readOnly=True)
     try:
@@ -340,8 +370,22 @@ def extract_from_odb(
         step = odb.steps[step_name]
 
         mode = force_mode.lower()
-        if mode == "plate_ref":
-            times, u3, rf3, region_name, source = _extract_plate_ref(step, odb, ref_node_id)
+        if mode in ("paper", "plate_ref", "top_plate"):
+            times, u3, rf3, region_name, source = _extract_plate_ref(
+                step, odb, ref_node_id, source="paper_top_plate"
+            )
+        elif mode in ("fixed_bottom_ref", "bottom_plate", "paper_bottom"):
+            if fixed_ref_node_id <= 0:
+                raise ValueError("plate_fixed_ref_node_id missing in meta/INP")
+            top_times, top_u3, _, _, _ = _extract_plate_ref(
+                step, odb, ref_node_id, source="paper_top_plate"
+            )
+            times, _, rf3, region_name, source = _extract_fixed_bottom_ref(
+                step, odb, fixed_ref_node_id
+            )
+            u3 = top_u3
+            if len(u3) != len(times):
+                raise ValueError("Top U3 and bottom RF3 history lengths differ")
         elif mode == "top_sum":
             times, u3, rf3, region_name, source = _extract_top_sum(step, odb)
         elif mode == "bottom_field":
@@ -350,9 +394,9 @@ def extract_from_odb(
                     step, odb, ref_node_id, meta
                 )
             except Exception as exc:
-                print(f"[WARN] bottom_field failed ({exc}); fallback to plate_ref.")
+                print(f"[WARN] bottom_field failed ({exc}); fallback to paper top plate.")
                 times, u3, rf3, region_name, source = _extract_plate_ref(
-                    step, odb, ref_node_id
+                    step, odb, ref_node_id, source="paper_top_plate"
                 )
         else:
             raise ValueError(f"Unknown force_mode: {force_mode}")
@@ -360,13 +404,21 @@ def extract_from_odb(
         odb.close()
 
     if raw_csv_path:
-        raw_rows = build_curve_records(times, u3, rf3, meta, force_source=f"{source}_raw")
+        raw_rows = build_curve_records(
+            times, u3, rf3, meta, force_source=f"{source}_raw", method=curve_method
+        )
         write_curve_csv(raw_rows, raw_csv_path)
 
     t2, u2, r2 = postprocess_history(
-        times, u3, rf3, meta, trim_hold=trim_hold, drop_spike=drop_spike
+        times,
+        u3,
+        rf3,
+        meta,
+        trim_hold=trim_hold,
+        drop_spike=drop_spike,
+        method=curve_method,
     )
-    rows = build_curve_records(t2, u2, r2, meta, force_source=source)
+    rows = build_curve_records(t2, u2, r2, meta, force_source=source, method=curve_method)
     write_curve_csv(rows, csv_path)
 
     print(f"Force mode: {source}")
@@ -374,7 +426,9 @@ def extract_from_odb(
     print(f"PLATE_REF node id: {ref_node_id}")
     if trim_hold:
         print(f"Trimmed hold: t < {meta.hold_end_time():.4g} s")
-    if drop_spike:
+    if drop_spike and curve_method.lower() == "paper":
+        print("Paper method: kept load-onset points (no RF spike filter)")
+    elif drop_spike:
         print("Removed load-start RF spikes (large RF at near-zero displacement)")
     print(f"Points: {len(times)} raw -> {len(rows)} processed")
     print(f"CSV: {csv_path}")
@@ -410,9 +464,23 @@ def main() -> int:
     parser.add_argument("--step", default=None)
     parser.add_argument(
         "--force-mode",
-        choices=("plate_ref", "top_sum", "bottom_field"),
-        default="plate_ref",
-        help="bottom_field: sum bottom RF (full INP); plate_ref; top_sum",
+        choices=(
+            "paper",
+            "plate_ref",
+            "top_plate",
+            "fixed_bottom_ref",
+            "bottom_plate",
+            "top_sum",
+            "bottom_field",
+        ),
+        default="paper",
+        help="paper: top PLATE_REF RF3 + U3 (Hu & Bai Fig.3.3); fixed_bottom_ref: bottom reaction",
+    )
+    parser.add_argument(
+        "--curve-method",
+        choices=("paper", "legacy"),
+        default="paper",
+        help="paper: sigma=F/(nx*L*ny*L), eps=S/(nz*L), no RF spike filter",
     )
     parser.add_argument(
         "--yield-json",
@@ -453,6 +521,7 @@ def main() -> int:
             args.meta,
             args.csv,
             force_mode=args.force_mode,
+            curve_method=args.curve_method,
             step_name=args.step,
             trim_hold=not args.no_trim_hold,
             drop_spike=not args.no_drop_spike,

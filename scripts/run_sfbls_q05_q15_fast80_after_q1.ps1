@@ -1,13 +1,19 @@
-# Wait for SFBLS Q=1.0 4x4x4 fast80 (4 cpu, 10 mm/min), then:
-#   - Q1 success -> Q05 (6 cpu), Q15 (4 cpu), BCC (4 cpu) @ 10 mm/min unchanged
-#   - Q1 failure -> re-run Q1 @ 8 mm/min, then Q05/Q15/BCC all @ 8 mm/min
+# Wait for SFBLS Q=1.0 4x4x4 fast80, then BCC -> Q05 -> Q15 (serial).
+#   - Q1 success @ LoadRateMmMin -> downstream same rate
+#   - Q1 failure -> retry Q1 @ FallbackLoadRateMmMin, downstream uses fallback rate
+# Default: 8 cpu, 5 mm/min (8 mm/min failed ~62% strain on Q=1.0).
+# Low-memory resume uses ReducedCpus (6) via resume_fast80_queue_after_low_memory.ps1.
 param(
     [string]$WaitSlug = "hu_bai_sfbls_af2q1_L20_4x4x4_solid_cad_f_fast80",
     [int]$PollSeconds = 60,
     [int]$MemoryMB = 8192,
+    [int]$Cpus = 8,
+    [int]$ReducedCpus = 6,
+    [int]$ReducedMemoryMB = 6144,
     [switch]$ForceRerun,
-    [double]$LoadRateMmMin = 10,
-    [double]$FallbackLoadRateMmMin = 8
+    [switch]$StartMemoryWatch,
+    [double]$LoadRateMmMin = 5,
+    [double]$FallbackLoadRateMmMin = 5
 )
 
 $ErrorActionPreference = "Stop"
@@ -91,15 +97,13 @@ function Invoke-Fast80Case {
     Write-Host "========== $Label : $slug (cpus=$CaseCpus, $RateMmMin mm/min) ==========" -ForegroundColor Cyan
     Write-Host "  CAD: $cad"
 
-    Write-Host "[1/2] Export INP (fast80, mesh=0.8 mm, strain=80%, $RateMmMin mm/min) ..."
+    Write-Host "[1/2] Export INP (fast80, mesh=1.2 mm, strain=80%, $RateMmMin mm/min, dt=5e-4) ..."
     $exportArgs = @(
         "scripts\run_hu_bai_bcc_solid_cad_export.py",
         "--cells", "4",
         "--Q", "$Q",
         "--profile", "fast",
         "--case-suffix", "fast80",
-        "--strain", "0.8",
-        "--mesh-size", "0.8",
         "--load-rate-mm-min", "$RateMmMin",
         "--cad", $cad
     )
@@ -127,7 +131,49 @@ function Invoke-Fast80Case {
     }
 }
 
+function Start-JobMemoryWatch {
+    param(
+        [Parameter(Mandatory)][string]$Slug,
+        [int]$WatchResumeCpus = 0
+    )
+    $resumeCpus = if ($WatchResumeCpus -gt 0) { $WatchResumeCpus } else { $ReducedCpus }
+    $resumeMem = if ($Cpus -le $ReducedCpus) { $ReducedMemoryMB } else { $MemoryMB }
+    $autoResume = ($Cpus -gt $ReducedCpus)
+    $jobDir = Join-Path $Root "output\jobs\$Slug"
+    $watchScript = Join-Path $ScriptDir "watch_abaqus_solve_memory.ps1"
+    Write-Host "  Memory watch: pause if free RAM < 1.5GB; resume queue at ${resumeCpus} cpus if triggered" -ForegroundColor DarkCyan
+    $watchArgs = @(
+        '-NoProfile', '-File', $watchScript,
+        '-JobName', $Slug,
+        '-JobDir', $jobDir,
+        '-Slug', $Slug,
+        '-MinFreeGB', '1.5',
+        '-WarnFreeGB', '2.5',
+        '-IntervalSec', '30',
+        '-ResumeCpus', "$resumeCpus",
+        '-ResumeMemoryMB', "$resumeMem",
+        '-LoadRateMmMin', "$LoadRateMmMin"
+    )
+    if ($autoResume) { $watchArgs += '-AutoResumeOnLowMemory' }
+    Start-Process powershell -ArgumentList $watchArgs -WindowStyle Hidden
+}
+
 $rateForRest = $LoadRateMmMin
+$jobDirWait = Join-Path $Root "output\jobs\$WaitSlug"
+$lckWait = Join-Path $jobDirWait "$WaitSlug.lck"
+$initialOutcome = Get-JobOutcome -Slug $WaitSlug
+$jobActive = (Test-Path $lckWait) -or (Test-AbaqusJobProcessRunning -JobName $WaitSlug -JobDir $jobDirWait)
+if ($initialOutcome -ne 'success' -and -not $jobActive) {
+    Write-Host ""
+    Write-Host "Q=1.0 not running/completed -> start fresh ($LoadRateMmMin mm/min, cpus=$Cpus)" -ForegroundColor Cyan
+    if ($StartMemoryWatch -or $Cpus -gt $ReducedCpus) {
+        Start-JobMemoryWatch -Slug $WaitSlug
+    }
+    Invoke-Fast80Case -Label "SFBLS Q=1.0" -Q 1.0 -Variant "sfbls_af2q1" -CaseCpus $Cpus `
+        -RateMmMin $LoadRateMmMin
+} elseif ($jobActive -and ($StartMemoryWatch -or $Cpus -gt $ReducedCpus)) {
+    Start-JobMemoryWatch -Slug $WaitSlug
+}
 try {
     Wait-JobOutcome -Slug $WaitSlug -Want "success" | Out-Null
     Write-Host ""
@@ -136,7 +182,7 @@ try {
     Write-Host ""
     Write-Host "Q=1.0 failed at $LoadRateMmMin mm/min -> retry Q1 and queue at $FallbackLoadRateMmMin mm/min" -ForegroundColor Red
     $rateForRest = $FallbackLoadRateMmMin
-    Invoke-Fast80Case -Label "SFBLS Q=1.0 retry" -Q 1.0 -Variant "sfbls_af2q1" -CaseCpus 4 `
+    Invoke-Fast80Case -Label "SFBLS Q=1.0 retry" -Q 1.0 -Variant "sfbls_af2q1" -CaseCpus $Cpus `
         -RateMmMin $FallbackLoadRateMmMin
     Wait-JobOutcome -Slug $WaitSlug -Want "success" | Out-Null
     Write-Host ""
@@ -145,31 +191,35 @@ try {
 
 $cases = @(
     @{
+        Label = "BCC Q=0"
+        Q = 0
+        Variant = "bcc_af2q0"
+        Cpus = $Cpus
+        CadExtraNames = @(
+            "hu_bai_bcc_af2q0_L20_4x4x4_solid_array.step",
+            "hu_bai_bcc_af2q0_L20_4x4x4_solid_array.STEP"
+        )
+    },
+    @{
         Label = "SFBLS Q=0.5"
         Q = 0.5
         Variant = "sfbls_af2q0p5"
-        Cpus = 6
+        Cpus = $Cpus
         CadExtraNames = @()
     },
     @{
         Label = "SFBLS Q=1.5"
         Q = 1.5
         Variant = "sfbls_af2q1p5"
-        Cpus = 4
+        Cpus = $Cpus
         CadExtraNames = @()
-    },
-    @{
-        Label = "BCC Q=0"
-        Q = 0
-        Variant = "bcc_af2q0"
-        Cpus = 4
-        CadExtraNames = @(
-            "hu_bai_bcc_af2q0_L20_4x4x4_solid_array.step",
-            "hu_bai_bcc_af2q0_L20_4x4x4_solid_array.STEP"
-        )
     }
 )
 foreach ($case in $cases) {
+    $caseSlug = "hu_bai_$($case.Variant)_L20_4x4x4_solid_cad_f_fast80"
+    if ($Cpus -gt $ReducedCpus) {
+        Start-JobMemoryWatch -Slug $caseSlug
+    }
     Invoke-Fast80Case -Label $case.Label -Q $case.Q -Variant $case.Variant `
         -CaseCpus $case.Cpus -RateMmMin $rateForRest -CadExtraNames $case.CadExtraNames
 }

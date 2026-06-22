@@ -37,6 +37,273 @@ function Test-AbaqusJobIncomplete {
     return ($staText -match 'SOLUTION PROGRESS')
 }
 
+function Get-AbaqusStaFailureSummary {
+    param(
+        [string]$StaPath = ''
+    )
+    if (-not $StaPath -or -not (Test-Path $StaPath)) { return 'incomplete' }
+    $staText = Get-Content $StaPath -Raw -ErrorAction SilentlyContinue
+    if (-not $staText) { return 'incomplete' }
+    if ($staText -match 'deformation speed/wave speed') { return 'deformation_speed' }
+    if ($staText -match 'THE ANALYSIS HAS NOT BEEN COMPLETED') { return 'not_completed' }
+    if ($staText -match '\*\*\*ERROR') { return 'abaqus_error' }
+    if ($staText -match 'SOLUTION PROGRESS') { return 'incomplete' }
+    return 'unknown'
+}
+
+function Test-AbaqusJobWorthArchiving {
+    param(
+        [Parameter(Mandatory)][string]$JobDir,
+        [Parameter(Mandatory)][string]$JobName,
+        [string]$StaPath = '',
+        [string]$OdbPath = ''
+    )
+    if (-not (Test-Path $JobDir)) { return $false }
+    $sta = if ($StaPath) { $StaPath } else { Join-Path $JobDir ($JobName + '.sta') }
+    $odb = if ($OdbPath) { $OdbPath } else { Join-Path $JobDir ($JobName + '.odb') }
+    if (Test-AbaqusJobCompleted -StaPath $sta -OdbPath $odb) { return $false }
+    if (Test-Path $odb) { return $true }
+    if (Test-AbaqusJobIncomplete -StaPath $sta -OdbPath $odb) { return $true }
+    $matches = @(Get-ChildItem -Path $JobDir -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "$JobName*" -or $_.Name -like "${JobName}_cont*" })
+    return ($matches.Count -gt 0)
+}
+
+function Resolve-ArchiveCompressionMeta {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [string]$Slug = '',
+        [string]$MetaPath = ''
+    )
+    if ($MetaPath -and (Test-Path $MetaPath)) { return (Resolve-Path $MetaPath).Path }
+    if (-not $Slug) { return $null }
+    $direct = Join-Path $Root "output\export\$Slug\${Slug}_meta.json"
+    if (Test-Path $direct) { return (Resolve-Path $direct).Path }
+    $exportDir = Join-Path $Root "output\export\$Slug"
+    if (Test-Path $exportDir) {
+        $found = Get-ChildItem -Path $exportDir -Filter '*_meta.json' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($found) { return $found.FullName }
+    }
+    return $null
+}
+
+function Invoke-ArchiveStressStrainPost {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$OdbPath,
+        [Parameter(Mandatory)][string]$MetaPath,
+        [Parameter(Mandatory)][string]$DestPost,
+        [Parameter(Mandatory)][string]$JobName
+    )
+    $extract = Join-Path $Root 'scripts\extract_stress_strain_from_odb.py'
+    if (-not (Test-Path $extract)) {
+        return [PSCustomObject]@{ Ok = $false; Reason = 'extract_script_missing' }
+    }
+    if (-not (Get-Command abaqus -ErrorAction SilentlyContinue)) {
+        return [PSCustomObject]@{ Ok = $false; Reason = 'abaqus_not_in_path' }
+    }
+    New-Item -ItemType Directory -Force -Path $DestPost | Out-Null
+    $csv = Join-Path $DestPost ($JobName + '_stress_strain.csv')
+    $raw = Join-Path $DestPost ($JobName + '_stress_strain_raw.csv')
+    $yield = Join-Path $DestPost ($JobName + '_yield.json')
+    $png = Join-Path $DestPost ($JobName + '_stress_strain.png')
+
+    $extractArgs = @(
+        $extract, '--odb', $OdbPath, '--meta', $MetaPath, '--csv', $csv,
+        '--raw-csv', $raw, '--force-mode', 'paper', '--curve-method', 'paper', '--yield-json', $yield, '--no-raw'
+    )
+    $null = & abaqus python @extractArgs 2>&1
+    $code = $LASTEXITCODE
+    if ($null -eq $code) { $code = 0 }
+    if ($code -ne 0) {
+        $extractArgs = @(
+            $extract, '--odb', $OdbPath, '--meta', $MetaPath, '--csv', $csv,
+            '--raw-csv', $raw, '--force-mode', 'fixed_bottom_ref', '--curve-method', 'paper', '--yield-json', $yield, '--no-raw'
+        )
+        $null = & abaqus python @extractArgs 2>&1
+        $code = $LASTEXITCODE
+        if ($null -eq $code) { $code = 0 }
+    }
+    if ($code -ne 0 -or -not (Test-Path $csv)) {
+        return [PSCustomObject]@{ Ok = $false; Reason = "extract_exit_$code"; Csv = $csv }
+    }
+    $null = Invoke-PlotStressStrain -Root $Root -Csv $csv -Png $png
+    return [PSCustomObject]@{
+        Ok = $true
+        Reason = 'extracted_from_odb'
+        Csv = $csv
+        Png = $png
+        YieldJson = $yield
+    }
+}
+
+function Archive-FailedAbaqusJob {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$JobDir,
+        [Parameter(Mandatory)][string]$JobName,
+        [string]$Slug = '',
+        [string]$PostDir = '',
+        [string]$MetaPath = '',
+        [string]$Reason = '',
+        [string]$StaPath = ''
+    )
+    if (-not (Test-AbaqusJobWorthArchiving -JobDir $JobDir -JobName $JobName -StaPath $StaPath)) {
+        return $null
+    }
+
+    if (-not $Slug) { $Slug = $JobName }
+    $sta = if ($StaPath) { $StaPath } else { Join-Path $JobDir ($JobName + '.sta') }
+    $reasonTag = if ($Reason) { $Reason } else { Get-AbaqusStaFailureSummary -StaPath $sta }
+    $safeReason = ($reasonTag -replace '[^\w\-.]+', '_').Trim('_')
+    if ($safeReason.Length -gt 48) { $safeReason = $safeReason.Substring(0, 48) }
+    $archiveId = (Get-Date -Format 'yyyyMMdd_HHmmss') + '_' + $safeReason
+
+    $destRoot = Join-Path $Root "output\failed\$Slug\$archiveId"
+    $destJobs = Join-Path $destRoot 'jobs'
+    if (Test-Path $destRoot) {
+        throw "Archive target already exists: $destRoot"
+    }
+    New-Item -ItemType Directory -Force -Path $destJobs | Out-Null
+
+    $staTail = @()
+    if (Test-Path $sta) {
+        $staTail = @(Get-Content $sta -Tail 8 -ErrorAction SilentlyContinue)
+    }
+
+    $moved = @()
+    Get-ChildItem -Path $JobDir -Force -ErrorAction SilentlyContinue |
+        Where-Object {
+            ($_.Name -like "$JobName*" -or $_.Name -like "${JobName}_cont*") -and
+            ($_.Extension -ne '.inp')
+        } |
+        ForEach-Object {
+            Move-Item -LiteralPath $_.FullName -Destination $destJobs -Force
+            $moved += $_.Name
+        }
+
+    $destPost = Join-Path $destRoot 'post'
+    $metaResolved = Resolve-ArchiveCompressionMeta -Root $Root -Slug $Slug -MetaPath $MetaPath
+    $metaSnapshot = Join-Path $destRoot 'compression_meta.json'
+    if ($metaResolved) {
+        Copy-Item -LiteralPath $metaResolved -Destination $metaSnapshot -Force
+    }
+
+    $archivedOdb = Join-Path $destJobs ($JobName + '.odb')
+    $postExtract = [ordered]@{
+        status = 'skipped'
+        reason = 'no_odb'
+        csv = $null
+        png = $null
+    }
+    if (Test-Path $archivedOdb) {
+        if (-not (Test-Path $metaSnapshot)) {
+            $postExtract.reason = 'meta_not_found'
+        } else {
+            $extractResult = Invoke-ArchiveStressStrainPost -Root $Root -OdbPath $archivedOdb `
+                -MetaPath $metaSnapshot -DestPost $destPost -JobName $JobName
+            if ($extractResult.Ok) {
+                $postExtract.status = 'extracted_from_odb'
+                $postExtract.reason = $extractResult.Reason
+                $postExtract.csv = $extractResult.Csv
+                $postExtract.png = $extractResult.Png
+            } else {
+                $postExtract.status = 'extract_failed'
+                $postExtract.reason = $extractResult.Reason
+            }
+        }
+    }
+
+    $manifest = [ordered]@{
+        slug = $Slug
+        job_name = $JobName
+        archived_at = (Get-Date).ToString('o')
+        reason = $reasonTag
+        source_job_dir = $JobDir
+        compression_meta = $(if (Test-Path $metaSnapshot) { $metaSnapshot } else { $null })
+        post_extract = $postExtract
+        moved_job_files = $moved
+        sta_tail = $staTail
+    }
+    $manifestPath = Join-Path $destRoot 'failure_manifest.json'
+    $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path $manifestPath -Encoding UTF8
+
+    Write-Host "  Archived failed run -> output\failed\$Slug\$archiveId" -ForegroundColor Cyan
+    Write-Host "    jobs: $($moved.Count) file(s), manifest: failure_manifest.json" -ForegroundColor DarkCyan
+    if ($postExtract.status -eq 'extracted_from_odb') {
+        Write-Host "    post: extracted from archived ODB -> $destPost" -ForegroundColor DarkCyan
+    } elseif ($postExtract.status -eq 'extract_failed') {
+        Write-Host "    post: extract failed ($($postExtract.reason)); see jobs/*.odb" -ForegroundColor Yellow
+    } else {
+        Write-Host "    post: skipped ($($postExtract.reason))" -ForegroundColor DarkYellow
+    }
+    return $destRoot
+}
+
+function Repair-FailedArchivePost {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$ArchiveRoot,
+        [string]$MetaPath = ''
+    )
+    if (-not (Test-Path $ArchiveRoot)) {
+        throw "Archive not found: $ArchiveRoot"
+    }
+    $manifestPath = Join-Path $ArchiveRoot 'failure_manifest.json'
+    $slug = ''
+    $jobName = ''
+    if (Test-Path $manifestPath) {
+        try {
+            $manifest = Get-Content $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $slug = [string]$manifest.slug
+            $jobName = [string]$manifest.job_name
+        } catch { }
+    }
+    $jobsDir = Join-Path $ArchiveRoot 'jobs'
+    if (-not $jobName) {
+        $odbGuess = Get-ChildItem -Path $jobsDir -Filter '*.odb' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($odbGuess) { $jobName = [System.IO.Path]::GetFileNameWithoutExtension($odbGuess.Name) }
+    }
+    if (-not $jobName) { throw "Cannot determine job name under $ArchiveRoot" }
+    if (-not $slug) { $slug = $jobName }
+
+    $odb = Join-Path $jobsDir ($jobName + '.odb')
+    if (-not (Test-Path $odb)) { throw "No ODB in archive: $odb" }
+
+    $metaSnapshot = Join-Path $ArchiveRoot 'compression_meta.json'
+    $metaUse = $MetaPath
+    if (-not $metaUse -and (Test-Path $metaSnapshot)) { $metaUse = $metaSnapshot }
+    if (-not $metaUse) {
+        $metaUse = Resolve-ArchiveCompressionMeta -Root $Root -Slug $slug -MetaPath $MetaPath
+    }
+    if (-not $metaUse) { throw "No compression meta for slug $slug" }
+    if (-not (Test-Path $metaSnapshot)) {
+        Copy-Item -LiteralPath $metaUse -Destination $metaSnapshot -Force
+    }
+
+    $destPost = Join-Path $ArchiveRoot 'post'
+    $result = Invoke-ArchiveStressStrainPost -Root $Root -OdbPath $odb -MetaPath $metaUse `
+        -DestPost $destPost -JobName $jobName
+    if (-not $result.Ok) { throw "Extract failed: $($result.Reason)" }
+
+    if (Test-Path $manifestPath) {
+        try {
+            $manifestObj = Get-Content $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $manifestObj | Add-Member -NotePropertyName compression_meta -NotePropertyValue $metaSnapshot -Force
+            $manifestObj | Add-Member -NotePropertyName post_extract -NotePropertyValue ([ordered]@{
+                status = 'extracted_from_odb'
+                reason = 'repair_script'
+                repaired_at = (Get-Date).ToString('o')
+                csv = $result.Csv
+                png = $result.Png
+            }) -Force
+            $manifestObj | ConvertTo-Json -Depth 8 | Set-Content -Path $manifestPath -Encoding UTF8
+        } catch { }
+    }
+    return $result
+}
+
 function Test-AbaqusRestartAvailable {
     param(
         [Parameter(Mandatory)][string]$JobDir,
@@ -258,14 +525,18 @@ function Invoke-PlotStressStrain {
         return 1
     }
     $plotScript = Join-Path $Root "scripts\plot_stress_strain.py"
-    $allArgs = @($cmd.Prefix + @($plotScript, "--csv", $Csv, "--png", $Png, "--no-show"))
+    $allArgs = @($cmd.Prefix + @($plotScript, "--csv", $Csv, "--png", $Png, "--paper-style", "--no-show"))
 
     # Do NOT pipe stdout into another cmdlet; that breaks $LASTEXITCODE on Windows PowerShell.
     # Assign to $null so Python "Saved: ..." lines do not pollute the function return value.
-    $null = & $cmd.Exe @allArgs 2>&1
+    $plotOut = & $cmd.Exe @allArgs 2>&1
     $code = $LASTEXITCODE
     if ($null -eq $code) { $code = 0 }
 
+    if ($code -ne 0 -and (Test-Path $Png)) {
+        Write-Host "[WARN] plot_stress_strain.py exit code $code but PNG exists: $Png" -ForegroundColor Yellow
+        return 0
+    }
     if ($code -ne 0) {
         Write-Host "[ERROR] plot_stress_strain.py exit code $code" -ForegroundColor Red
         return [int]$code
@@ -391,6 +662,7 @@ function Remove-AbaqusJobArtifacts {
     )
     $paths = @()
     foreach ($ext in $exts) {
+        if ($ext -eq 'inp') { continue }
         $p = Join-Path $JobDir ($JobName + '.' + $ext)
         if (Test-Path $p) { $paths += $p }
     }
@@ -419,6 +691,10 @@ function Prepare-AbaqusJobRerun {
     param(
         [Parameter(Mandatory)][string]$JobDir,
         [Parameter(Mandatory)][string]$JobName,
+        [string]$Root = '',
+        [string]$PostDir = '',
+        [string]$MetaPath = '',
+        [string]$Slug = '',
         [switch]$Force
     )
     if ($Force) {
@@ -440,6 +716,12 @@ function Prepare-AbaqusJobRerun {
     } elseif (Test-Path $lck) {
         Write-Host "  Removing stale lock: $lck" -ForegroundColor Yellow
         Remove-Item $lck -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($Root) {
+        $archiveReason = if ($Force) { 'force_rerun' } else { 'rerun' }
+        Archive-FailedAbaqusJob -Root $Root -JobDir $JobDir -JobName $JobName `
+            -Slug $Slug -PostDir $PostDir -MetaPath $MetaPath -Reason $archiveReason
     }
     Remove-AbaqusJobArtifacts -JobDir $JobDir -JobName $JobName
 }

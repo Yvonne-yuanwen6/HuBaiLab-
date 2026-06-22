@@ -5,8 +5,9 @@ param(
     [switch]$ForceRerun,
     [int]$MemoryMB = 8192,
     [int]$Cpus = 4,
-    [double]$MeshSize = 0.8,
-    [double]$Strain = 0.8
+    [double]$MeshSize = 1.2,
+    [double]$Strain = 0.8,
+    [double]$ExplicitDt = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -231,6 +232,7 @@ function Invoke-ExportSubmit {
         "--mesh-size", "$MeshSize",
         "--cad", $Cad
     )
+    if ($ExplicitDt -gt 0) { $exportArgs += @("--explicit-dt", "$ExplicitDt") }
     if ($ProjectPy -eq "py") {
         & py -3 @exportArgs
     } else {

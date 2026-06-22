@@ -118,9 +118,8 @@ if (-not (Test-Path $InpSrc)) {
 }
 
 New-Item -ItemType Directory -Force -Path $JobDir, $PostDir | Out-Null
-Copy-Item -Path $InpSrc -Destination $InpJob -Force
 
-if (-not (Select-String -Path $InpJob -Pattern "\*Step|\*Dynamic|\*Contact" -Quiet)) {
+if (-not (Select-String -Path $InpSrc -Pattern "\*Step|\*Dynamic|\*Contact" -Quiet)) {
     Write-Host "[ERROR] INP missing compression blocks. Re-export." -ForegroundColor Red
     exit 1
 }
@@ -137,7 +136,7 @@ $manifestPath = if ($manifestOverride -and (Test-Path $manifestOverride)) {
 if (-not (Test-Path $manifestPath)) {
     $manifestPath = Join-Path $Root "output\active_case.json"
 }
-Invoke-PenetrationRiskCheck -Root $Root -ManifestPath $manifestPath -InpPath $InpJob -MetaPath $Meta `
+Invoke-PenetrationRiskCheck -Root $Root -ManifestPath $manifestPath -InpPath $InpSrc -MetaPath $Meta `
     -SkipPenetrationCheck:$SkipPenetrationCheck -StrictPenetration:$StrictPenetration
 
 $skipSolve = Confirm-SkipCompletedSolve -JobName $JobName -JobDir $JobDir -OdbPath $Odb -StaPath $Sta `
@@ -174,21 +173,33 @@ if (-not $skipSolve) {
         abaqus job=$JobName recover cpus=$Cpus memory=$MemoryMB interactive
     } else {
         Write-Host '[2/3] Re-solve: prepare job directory ...' -ForegroundColor Yellow
-        Prepare-AbaqusJobRerun -JobDir $JobDir -JobName $JobName -Force:$ForceRerun
-        Write-Host "[2/3] Submit Abaqus (cwd: $JobDir) ..."
+        Prepare-AbaqusJobRerun -JobDir $JobDir -JobName $JobName -Force:$ForceRerun `
+            -Root $Root -PostDir $PostDir -MetaPath $Meta -Slug $case.slug
+        Copy-Item -Path $InpSrc -Destination $InpJob -Force
+        Write-Host "[2/3] Submit Abaqus (cwd: $JobDir, cpus=$Cpus) ..."
         abaqus job=$JobName input=$($case.job_inp_name) oldjob=delete cpus=$Cpus memory=$MemoryMB interactive
     }
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($LASTEXITCODE -ne 0) {
+        Archive-FailedAbaqusJob -Root $Root -JobDir $JobDir -JobName $JobName `
+            -Slug $case.slug -PostDir $PostDir -MetaPath $Meta -StaPath $Sta -Reason 'abaqus_exit_error'
+        exit $LASTEXITCODE
+    }
     $Dat = Join-Path $JobDir ($JobName + ".dat")
     if ((Test-Path $Dat) -and ((Get-Content $Dat -Raw) -match '\*\*\*ERROR')) {
+        Archive-FailedAbaqusJob -Root $Root -JobDir $JobDir -JobName $JobName `
+            -Slug $case.slug -PostDir $PostDir -MetaPath $Meta -StaPath $Sta -Reason 'abaqus_dat_error'
         Write-Host "[ERROR] See $JobName.dat" -ForegroundColor Red
         exit 1
     }
     if (-not (Test-Path $Odb)) {
+        Archive-FailedAbaqusJob -Root $Root -JobDir $JobDir -JobName $JobName `
+            -Slug $case.slug -PostDir $PostDir -MetaPath $Meta -StaPath $Sta -Reason 'missing_odb'
         Write-Host "[ERROR] $Odb not found" -ForegroundColor Red
         exit 1
     }
     if (-not (Test-AbaqusJobCompleted -StaPath $Sta -OdbPath $Odb)) {
+        Archive-FailedAbaqusJob -Root $Root -JobDir $JobDir -JobName $JobName `
+            -Slug $case.slug -PostDir $PostDir -MetaPath $Meta -StaPath $Sta
         Write-Host "[ERROR] Job did not complete successfully (see $Sta)." -ForegroundColor Red
         exit 1
     }
@@ -205,9 +216,9 @@ $Png = $case.stress_strain_png
 $YieldJson = $case.yield_json
 
 if (Get-Command abaqus -ErrorAction SilentlyContinue) {
-    abaqus python $extract --odb $Odb --meta $Meta --csv $Csv --raw-csv $Raw --force-mode plate_ref --yield-json $YieldJson
+    abaqus python $extract --odb $Odb --meta $Meta --csv $Csv --raw-csv $Raw --force-mode paper --curve-method paper --yield-json $YieldJson
     if ($LASTEXITCODE -ne 0) {
-        abaqus python $extract --odb $Odb --meta $Meta --csv $Csv --raw-csv $Raw --force-mode bottom_field --yield-json $YieldJson
+        abaqus python $extract --odb $Odb --meta $Meta --csv $Csv --raw-csv $Raw --force-mode fixed_bottom_ref --curve-method paper --yield-json $YieldJson
     }
     if (Test-Path $Csv) {
         $plotRc = Invoke-PlotStressStrain -Root $Root -Csv $Csv -Png $Png
