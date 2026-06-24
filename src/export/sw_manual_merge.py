@@ -7,7 +7,12 @@ import os
 import time
 from typing import Iterable
 
-from src.export.sw_parasolid import _connect_solidworks, _doc_title, solidworks_com_available
+from src.export.sw_parasolid import (
+    _connect_solidworks,
+    _doc_title,
+    discover_part_templates,
+    solidworks_com_available,
+)
 
 swDocPART = 1
 swBodySolid = 0
@@ -71,28 +76,23 @@ def _gmsh_fuse_step_stack(step_paths: list[str], out_path: str, *, label: str = 
 
 def _new_empty_part(sw_app, *, visible: bool = False):
     sw_app.Visible = bool(visible)
-    templates = []
-    try:
-        templates.append(sw_app.GetUserPreferenceStringValue(swDefaultTemplatePart))
-    except Exception:
-        pass
-    try:
-        templates.append(sw_app.GetDocumentTemplate("Default", "prtdot", 0, 0, 0))
-    except Exception:
-        pass
-    templates.append("")
+    last_err: Exception | None = None
+    templates = discover_part_templates(sw_app)
 
     for template in templates:
-        if not template:
-            continue
         try:
             model = sw_app.NewDocument(template, 0, 0.0, 0.0)
             if model is not None:
                 return model
-        except Exception:
-            continue
+            last_err = RuntimeError(f"NewDocument returned Nothing for template: {template}")
+        except Exception as exc:
+            last_err = exc
 
-    raise RuntimeError("SolidWorks NewDocument failed (check default part template)")
+    tried = ", ".join(templates[:4]) if templates else "(none found)"
+    raise RuntimeError(
+        "SolidWorks NewDocument failed (no usable part template). "
+        f"Tried: {tried}. Set a default part template in SW, or open a blank Part first."
+    ) from last_err
 
 
 def _open_document(sw_app, file_path: str, *, visible: bool = False):

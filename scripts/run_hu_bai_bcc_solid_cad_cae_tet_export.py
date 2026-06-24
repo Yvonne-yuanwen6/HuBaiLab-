@@ -4,10 +4,13 @@ Export Hu & Bai CAD solid → Abaqus compression INP using CAE built-in C3D4 mes
 1) Abaqus/CAE noGUI meshes verified STEP (TET_FREE).
 2) Parse mesh INP → merge with rigid plates, contact, explicit step (export_inp).
 
-Example:
+Example (Windows: CAE mesh runs on server by default):
   py -3 scripts/run_hu_bai_bcc_solid_cad_cae_tet_export.py --cells 4 --Q 0 --profile fast \\
-    --case-suffix cae_tet1p2mm80_5mmin --cae-seed 1.2 --strain 0.8 --load-rate-mm-min 5 \\
-    --no-lattice-self-contact
+    --case-suffix cae_tet0p6mm80_5mmin_paper --cae-seed 0.6 --strain 0.8 --load-rate-mm-min 5 \\
+    --explicit-dt 0.0001 --explicit-dt-mode fixed --no-mass-scaling --material-model paper
+
+On Linux server (mesh locally):
+  py -3 scripts/run_hu_bai_bcc_solid_cad_cae_tet_export.py ... --mesh-locally
 """
 
 from __future__ import annotations
@@ -15,7 +18,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -47,6 +49,7 @@ from src.export.beam_utils import dedupe_beams
 from src.export.cad_solid_paths import resolve_step_and_xt, resolve_verified_solid_step
 from src.export.export_csv import export_beams, export_nodes
 from src.export.export_inp import export_inp
+from src.export.cae_mesh_runner import run_cae_mesh
 from src.export.parse_cae_mesh_inp import parse_cae_mesh_inp
 from src.generator.hu_bai_bcc import HuBaiLatticeGenerator
 from src.paths import ABAQUS_JOBS, ABAQUS_POST, CAD_VERIFIED_ROOT, EXPORT_ROOT, ensure_output_dirs
@@ -61,6 +64,23 @@ _parser.add_argument("--Af", type=float, default=2.0)
 _parser.add_argument("--cells", type=int, default=4)
 _parser.add_argument("--cad", type=str, default="")
 _parser.add_argument("--cae-seed", type=float, default=1.2, help="CAE global seed [mm]")
+_parser.add_argument(
+    "--cae-mesh-quality",
+    choices=("fast", "lattice", "lattice_contact", "paper"),
+    default="lattice_contact",
+    help="CAE tet seeding preset (lattice_contact: surface+short-edge for self-contact)",
+)
+_parser.add_argument(
+    "--cae-rods-per-diameter",
+    type=float,
+    default=3.0,
+    help="Target tet count across strut diameter for edge seeding",
+)
+_parser.add_argument(
+    "--cae-virtual-topology",
+    action="store_true",
+    help="CAE createVirtualTopology: merge small faces/edges before mesh",
+)
 _parser.add_argument(
     "--cae-mesh-inp",
     type=str,
@@ -90,13 +110,90 @@ _parser.add_argument(
     default="pair",
 )
 _parser.add_argument("--no-lattice-self-contact", action="store_true")
+_parser.add_argument(
+    "--contact-interference-fit",
+    action="store_true",
+    help="Explicit: gradual INTERFERENCE FIT for initial self-contact overclosures",
+)
+_parser.add_argument(
+    "--contact-init-step-fraction",
+    type=float,
+    default=0.20,
+    help="Step fraction for interference fit (default 0.20)",
+)
+_parser.add_argument(
+    "--contact-soft-clearance",
+    type=float,
+    default=None,
+    metavar="MM",
+    help="Explicit general contact: SCALE FACTOR s0 (e.g. 0.08 = 8% default stiffness)",
+)
+_parser.add_argument(
+    "--contact-store-offsets",
+    action="store_true",
+    help="Explicit: AUTOMATIC OVERCLOSURE RESOLUTION → STORE OFFSETS (avoid t=0 nodal push)",
+)
+_parser.add_argument(
+    "--contact-settle",
+    action="store_true",
+    help="Explicit two-step: ContactSettle (soft mu=0) then Compression",
+)
+_parser.add_argument(
+    "--contact-settle-fraction",
+    type=float,
+    default=0.15,
+    help="Extra settle time as fraction of compression step_time (default 0.15)",
+)
+_parser.add_argument(
+    "--contact-settle-soft-s0",
+    type=float,
+    default=0.02,
+    help="SETTLE-CONTACT SCALE FACTOR s0 (default 0.02)",
+)
+_parser.add_argument(
+    "--no-mass-scaling",
+    action="store_true",
+    help="Omit *Fixed Mass Scaling from INP (paper fixed dt without scaling)",
+)
 _parser.add_argument("--restart-interval", type=int, default=None)
 _parser.add_argument(
     "--material-model",
     choices=("paper", "hyperelastic", "elastic_plastic"),
     default=None,
 )
+_parser.add_argument(
+    "--mesh-on-server",
+    action="store_true",
+    help="Run Abaqus/CAE mesh on Linux server via SSH (default on Windows)",
+)
+_parser.add_argument(
+    "--mesh-locally",
+    action="store_true",
+    help="Run Abaqus/CAE mesh on this machine (default on Linux server)",
+)
+_parser.add_argument(
+    "--remote-host",
+    type=str,
+    default=os.environ.get("HU_BAI_REMOTE_HOST", "art@172.20.200.93"),
+    help="SSH host for --mesh-on-server (default art@172.20.200.93)",
+)
+_parser.add_argument(
+    "--remote-root",
+    type=str,
+    default=os.environ.get(
+        "HU_BAI_REMOTE_ROOT",
+        "/home/art/Documents/Lattice/LWY/HuBaiLab",
+    ),
+    help="Repo root on remote server",
+)
 _args = _parser.parse_args()
+
+if _args.mesh_locally:
+    MESH_ON_SERVER = False
+elif _args.mesh_on_server:
+    MESH_ON_SERVER = True
+else:
+    MESH_ON_SERVER = sys.platform == "win32"
 
 PROFILE = _args.profile
 CASE_SUFFIX_RAW = _args.case_suffix.strip().replace(" ", "_")
@@ -107,6 +204,8 @@ AF = float(_args.Af)
 Q = float(_args.Q)
 NX = NY = NZ = int(_args.cells)
 CAE_SEED = float(_args.cae_seed)
+CAE_MESH_QUALITY = str(_args.cae_mesh_quality)
+CAE_RODS_PER_DIAMETER = float(_args.cae_rods_per_diameter)
 
 E_MODULUS = HU_BAI_E_MODULUS_MPA
 POISSON = HU_BAI_POISSON
@@ -170,6 +269,7 @@ if PROFILE == "paper" and EXPLICIT_DT_MODE in ("automatic", "auto", "adaptive"):
 CASE_SUFFIX = CASE_SUFFIX_RAW or f"cae_tet{CAE_SEED:g}mm{int(round(TARGET_STRAIN * 100))}p_{int(LOAD_RATE_MM_MIN)}mmin"
 STROKE_TAG = "f"
 N_INC_EST = max(100, int(round(STEP_TIME / EXPLICIT_DT)))
+EXPLICIT_MASS_SCALING = None if _args.no_mass_scaling else HU_BAI_EXPLICIT_MASS_SCALING
 
 gen = HuBaiLatticeGenerator(
     cell_size=L,
@@ -239,7 +339,7 @@ compression = CompressionSettings(
     analysis="explicit",
     explicit_dt=EXPLICIT_DT,
     explicit_dt_mode=EXPLICIT_DT_MODE,
-    explicit_mass_scaling_factor=HU_BAI_EXPLICIT_MASS_SCALING,
+    explicit_mass_scaling_factor=EXPLICIT_MASS_SCALING,
     explicit_mass_scaling_dt_only=False,
     amplitude_hold_fraction=HOLD_FRACTION,
     lattice_self_contact=not _args.no_lattice_self_contact,
@@ -253,6 +353,17 @@ compression = CompressionSettings(
     bottom_surface_z_band=BOTTOM_SURFACE_Z_BAND,
     bottom_face_normal_z_max=BOTTOM_FACE_NORMAL_Z_MAX,
     explicit_restart_number_interval=_args.restart_interval,
+    contact_init_interference_fit=bool(_args.contact_interference_fit),
+    contact_init_step_fraction=float(_args.contact_init_step_fraction),
+    contact_soft_clearance_mm=(
+        float(_args.contact_soft_clearance)
+        if _args.contact_soft_clearance is not None
+        else None
+    ),
+    explicit_contact_settle=bool(_args.contact_settle),
+    contact_settle_time_fraction=float(_args.contact_settle_fraction),
+    contact_settle_soft_s0=float(_args.contact_settle_soft_s0),
+    contact_overclosure_store_offsets=bool(_args.contact_store_offsets),
 )
 
 paths = {
@@ -274,28 +385,30 @@ if cae_mesh_inp:
     if not os.path.isfile(cae_mesh_inp):
         raise FileNotFoundError(cae_mesh_inp)
     print(f"  Reusing CAE mesh INP: {cae_mesh_inp}", flush=True)
+    MESH_LOCATION = "reuse"
 else:
     cae_mesh_inp = paths["cae_mesh_inp"]
-    print(f"  CAE TET mesh STEP @ seed={CAE_SEED} mm ...", flush=True)
-    pilot_ps1 = os.path.join(_ROOT, "scripts", "run_abaqus_cae_hex_mesh_pilot.ps1")
-    cmd = [
-        "powershell",
-        "-NoProfile",
-        "-File",
-        pilot_ps1,
-        "-MeshMode",
-        "tet",
-        "-SeedMm",
-        str(CAE_SEED),
-        "-StepPath",
+    print(
+        f"  CAE TET mesh STEP @ seed={CAE_SEED} mm "
+        f"(quality={CAE_MESH_QUALITY}) ...",
+        flush=True,
+    )
+    MESH_LOCATION = run_cae_mesh(
+        _ROOT,
         step_path,
-        "-OutInp",
         cae_mesh_inp,
-        "-PartName",
+        CAE_SEED,
         _args.cae_part_name,
-    ]
-    print(f"  Running: {' '.join(cmd)}", flush=True)
-    subprocess.run(cmd, cwd=_ROOT, check=True)
+        mesh_on_server=MESH_ON_SERVER,
+        remote_host=_args.remote_host.strip(),
+        remote_root=_args.remote_root.strip(),
+        mesh_mode="tet",
+        mesh_quality=CAE_MESH_QUALITY,
+        rod_diameter_mm=ROD_D,
+        rods_per_diameter=CAE_RODS_PER_DIAMETER,
+        virtual_topology=bool(_args.cae_virtual_topology),
+    )
+    print(f"  CAE mesh location: {MESH_LOCATION}", flush=True)
     if not os.path.isfile(cae_mesh_inp):
         raise FileNotFoundError(f"CAE mesh INP not written: {cae_mesh_inp}")
 
@@ -400,7 +513,13 @@ manifest = {
         "method": "cae_tet",
         "source": "abaqus_cae_tet_free",
         "cae_seed_mm": CAE_SEED,
+        "cae_mesh_quality": CAE_MESH_QUALITY,
+        "cae_virtual_topology": bool(_args.cae_virtual_topology),
+        "cae_rods_per_diameter": CAE_RODS_PER_DIAMETER,
         "cae_part_name": _args.cae_part_name,
+        "mesh_location": MESH_LOCATION,
+        "remote_host": _args.remote_host if MESH_ON_SERVER else None,
+        "remote_root": _args.remote_root if MESH_ON_SERVER else None,
         "node_count": stats.get("node_count"),
         "element_count": stats.get("element_count"),
     },
@@ -415,7 +534,7 @@ manifest = {
         "explicit_dt": EXPLICIT_DT,
         "explicit_dt_mode": EXPLICIT_DT_MODE,
         "amplitude_hold_fraction": HOLD_FRACTION,
-        "explicit_mass_scaling": HU_BAI_EXPLICIT_MASS_SCALING,
+        "explicit_mass_scaling": EXPLICIT_MASS_SCALING,
         "explicit_n_increments_est": N_INC_EST,
         "case_suffix": CASE_SUFFIX,
         "contact_mode": CONTACT_MODE,
@@ -427,6 +546,13 @@ manifest = {
         "lattice_load_faces": stats.get("lattice_load_faces"),
         "lattice_load_nodes": stats.get("lattice_load_nodes"),
         "lattice_self_contact": compression.lattice_self_contact,
+        "contact_init_interference_fit": compression.contact_init_interference_fit,
+        "contact_init_step_fraction": compression.contact_init_step_fraction,
+        "contact_soft_clearance_mm": compression.contact_soft_clearance_mm,
+        "explicit_contact_settle": compression.explicit_contact_settle,
+        "contact_settle_time_fraction": compression.contact_settle_time_fraction,
+        "contact_settle_soft_s0": compression.contact_settle_soft_s0,
+        "contact_overclosure_store_offsets": compression.contact_overclosure_store_offsets,
         "explicit_restart_write": compression.explicit_restart_write,
         "explicit_restart_number_interval": compression.resolved_restart_number_interval(),
     },
@@ -448,5 +574,15 @@ update_manifest_penetration_check(
 print()
 print(f"Hu & Bai CAE tet compression INP (profile={PROFILE}):", paths["compression_inp"])
 print(f"  Mesh: {stats['node_count']} nodes, {stats['element_count']} C3D4 @ CAE seed {CAE_SEED} mm")
+print(f"  Target engineering strain: {TARGET_STRAIN:.0%}")
+print(
+    f"  Loading: {COMPRESSION_DISP:.1f} mm / {STEP_TIME:.1f} s "
+    f"({LOAD_RATE_MM_MIN:g} mm/min), mu={HU_BAI_FRICTION}"
+)
+_ms_note = "none" if EXPLICIT_MASS_SCALING is None else f"x{EXPLICIT_MASS_SCALING:g}"
+print(
+    f"  Explicit: dt_mode={EXPLICIT_DT_MODE}, dt={EXPLICIT_DT:g} s, "
+    f"mass scaling {_ms_note}, ~{N_INC_EST} increments"
+)
 print(f"  Slug: {slug}")
 print(f"  Server: scp export + jobs dirs, then bash scripts/linux/submit_job.sh --slug {slug}")

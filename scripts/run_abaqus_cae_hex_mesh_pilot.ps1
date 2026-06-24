@@ -6,6 +6,10 @@ param(
     [string]$PartName = "LATTICE",
     [ValidateSet("hex", "tet")]
     [string]$MeshMode = "hex",
+    [ValidateSet("fast", "lattice", "lattice_contact", "paper")]
+    [string]$MeshQuality = "lattice_contact",
+    [double]$RodDiameterMm = 2.0,
+    [double]$RodsPerDiameter = 3.0,
     [switch]$MergeSolids
 )
 
@@ -38,12 +42,15 @@ $env:HU_BAI_SEED = "$SeedMm"
 $env:HU_BAI_OUT = $OutInp
 $env:HU_BAI_PART_NAME = $PartName
 $env:HU_BAI_MESH_MODE = $MeshMode
+$env:HU_BAI_MESH_QUALITY = $MeshQuality
+$env:HU_BAI_ROD_DIAMETER = "$RodDiameterMm"
+$env:HU_BAI_RODS_PER_DIAMETER = "$RodsPerDiameter"
 if ($MergeSolids) { $env:HU_BAI_MERGE_SOLIDS = "1" } else { Remove-Item Env:HU_BAI_MERGE_SOLIDS -ErrorAction SilentlyContinue }
 
 Write-Host "=== Abaqus CAE built-in mesh pilot ===" -ForegroundColor Cyan
 Write-Host "  STEP: $StepPath"
 Write-Host "  part: $PartName (mergeSolids=$($MergeSolids.IsPresent))"
-Write-Host "  mode: $MeshMode (seed ${SeedMm} mm)"
+Write-Host "  mode: $MeshMode quality=$MeshQuality (seed ${SeedMm} mm)"
 Write-Host "  OUT:  $OutInp"
 
 & abaqus cae noGUI=scripts\abaqus_cae_hex_mesh_pilot.py

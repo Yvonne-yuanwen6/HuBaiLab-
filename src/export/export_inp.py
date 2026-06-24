@@ -13,6 +13,7 @@ from src.export.abaqus_compression import (
     compute_plate_xy_extent,
     collect_bottom_node_ids,
     collect_c3d4_bottom_element_faces,
+    collect_c3d4_exterior_faces,
     collect_c3d4_top_element_faces,
     collect_c3d8_bottom_element_faces,
     collect_c3d8_top_element_faces,
@@ -526,6 +527,8 @@ def export_inp_c3d4(
             stats["lattice_top_nodes"] = len(lattice_load_node_ids)
             if ref_node is not None:
                 stats["plate_ref_node_id"] = int(ref_node[0])
+            lattice_exterior_faces = None
+            # Explicit rejects self-contact IF assignments; plate-pair IF only.
             write_compression_sections(
                 f,
                 compression,
@@ -547,6 +550,7 @@ def export_inp_c3d4(
                 ),
                 fixed_ref_node_id=fixed_ref_node_id,
                 lattice_bottom_faces=lattice_bottom_faces if use_fixed_bottom_plate else None,
+                lattice_exterior_faces=lattice_exterior_faces,
             )
 
     return stats

@@ -683,8 +683,9 @@ def _occ_fuse_pipes_per_strut(
     *,
     progress_label: str = "intra-fuse",
     min_mass_ratio: float = 0.80,
+    per_strut_corner_caps: bool = True,
 ) -> tuple[int, int]:
-    """Rebuild each pipe + corner sphere on a clean OCC model, then merge."""
+    """Rebuild each pipe (+ optional corner sphere cap) on a clean OCC model, then merge."""
     import gmsh
 
     gmsh.model.occ.remove(gmsh.model.getEntities(), recursive=True)
@@ -697,6 +698,9 @@ def _occ_fuse_pipes_per_strut(
 
     strut_bodies: list[tuple[int, int]] = []
     for pipe_tag, part in zip(tags, pipe_parts):
+        if not per_strut_corner_caps:
+            strut_bodies.append(pipe_tag)
+            continue
         _kind, path_pts, radius = part
         cx, cy, cz = (float(path_pts[-1][0]), float(path_pts[-1][1]), float(path_pts[-1][2]))
         corner_tag = _occ_volume_dimtag(
@@ -730,7 +734,7 @@ def _occ_fuse_pipes_per_strut(
         if ratio < min_mass_ratio:
             print(
                 f"  [WARN] {progress_label}: per-strut pipe mass ratio "
-                f"{ratio:.2f} ({fused_mass:.1f}/{ref_mass:.1f} mm³)",
+                f"{ratio:.2f} ({fused_mass:.1f}/{ref_mass:.1f} mm3)",
                 flush=True,
             )
     return vols[0]
@@ -742,6 +746,7 @@ def _occ_fuse_pipe_tags(
     pipe_parts: list[tuple[str, tuple, float]] | None = None,
     pipe_endpoints: list[tuple[tuple[float, float, float], float]] | None = None,
     progress_label: str = "intra-fuse",
+    per_strut_corner_caps: bool = True,
 ) -> tuple[int, int]:
     """Merge pipe sweeps; pairwise tree for 5+ pipes (batch-all loses struts)."""
     import gmsh
@@ -760,7 +765,7 @@ def _occ_fuse_pipe_tags(
         if ref_mass > 0.0 and fused_mass < min_mass_ratio * ref_mass:
             raise RuntimeError(
                 f"{progress_label}: pipe fuse mass ratio "
-                f"{fused_mass / ref_mass:.2f} ({fused_mass:.1f}/{ref_mass:.1f} mm³)"
+                f"{fused_mass / ref_mass:.2f} ({fused_mass:.1f}/{ref_mass:.1f} mm3)"
             )
         return vol
 
@@ -799,7 +804,11 @@ def _occ_fuse_pipe_tags(
         )
 
     if pipe_parts and len(pipe_parts) == len(pipe_tags):
-        return _occ_fuse_pipes_per_strut(pipe_parts, progress_label=progress_label)
+        return _occ_fuse_pipes_per_strut(
+            pipe_parts,
+            progress_label=progress_label,
+            per_strut_corner_caps=per_strut_corner_caps,
+        )
 
     raise RuntimeError(
         f"{progress_label}: all pipe fuse strategies failed "
@@ -843,6 +852,7 @@ def _occ_fuse_unitcell_pipe_first(
     parts: list[tuple[str, tuple, float]],
     *,
     progress_label: str = "intra-fuse",
+    per_strut_corner_caps: bool = True,
 ) -> list[tuple[int, int]]:
     """Fuse 8 pipes first (pairwise / per-strut), then junction spheres."""
     import gmsh
@@ -865,12 +875,13 @@ def _occ_fuse_unitcell_pipe_first(
         pipe_tags,
         pipe_parts=pipe_parts,
         progress_label=progress_label,
+        per_strut_corner_caps=per_strut_corner_caps,
     )
     acc_mass = float(gmsh.model.occ.getMass(3, int(acc[1])))
     if pipe_ref_mass > 0.0 and acc_mass < 0.80 * pipe_ref_mass:
         raise RuntimeError(
             f"pipe fuse mass ratio {acc_mass / pipe_ref_mass:.2f} "
-            f"({acc_mass:.1f}/{pipe_ref_mass:.1f} mm³)"
+            f"({acc_mass:.1f}/{pipe_ref_mass:.1f} mm3)"
         )
 
     remainder_parts = sphere_parts + other_parts

@@ -11,7 +11,7 @@
 | 点阵生成 | BCC (Q=0) 与正弦屈曲杆 SFBLS (Q>0)，单胞 20 mm，杆径 2 mm |
 | 融合 STEP | 单胞 OCC 阵列（**推荐**）、z 层分层、小块 monolithic fuse |
 | SolidWorks | STL 预览、STEP → Parasolid X_T（需 Windows + SolidWorks） |
-| Abaqus 实体压缩 | STEP → gmsh 四面体网格 → Explicit INP + 刚体压板 |
+| Abaqus 实体压缩 | STEP → gmsh 四面体网格 → Explicit INP + 刚体压板；**paper_box** 另路：CAE C3D4 + STORE OFFSETS |
 | B31 梁单元 | 无实体 CAD 时快速出工程应力–应变曲线 |
 | 后处理 | 从 ODB 提取曲线、屈服/极限点分析 |
 
@@ -161,6 +161,58 @@ py -3 scripts/preview_hu_bai_sfbls.py --all-q --cells 1
 | 质量缩放 | ×50（`BELOW MIN, dt=…`） |
 | 板位 | `plate_margin=10 mm`，`plate_embed≈0.4–0.6 mm` |
 
+### `paper_box` + CAE C3D4：t=0 网格畸变（自接触过盈）
+
+Hu & Bai 论文 Fig.2.6 几何为 **无节点球** 的 `paper_box` 杆件（pipe-first + RVE 盒切割），与带 **9 个节点球** 融合的 `solid_merged` / `solid_array` 不同。在 **点阵自接触 ON**、**Abaqus/CAE 自动 C3D4** 前提下，曾出现 **increment 0 即失败**（畸变单元、autodt ~10⁻⁸–10⁻⁹ s、`CHNG MASS` 激增），易被误判为“网格质量差”。
+
+**根因（已用导出 INP 全扫描确认）**
+
+| 对比项 | `solid_merged`（体素 C3D8R，可跑通） | `paper_box`（CAE C3D4，t=0 失败） |
+|--------|--------------------------------------|-----------------------------------|
+| 静态网格长宽比 p95 | ~2（正常） | ~2（正常，**不是**主因） |
+| 初始自接触过盈对数 | 少；中位过盈 ~0.017 mm | **~1165–1423 对** |
+| 过盈量级 | 仅极少数 >0.15 mm | 枢纽处 **~0.2–0.3 mm**（无节点球，杆件在节点处几何相交） |
+| t=0 机制 | 过盈小，默认 nodal adjustment 可承受 | Explicit 默认 **无应变 nodal adjustment** 在 t=0 推节点 → **16–22 个畸变单元** |
+
+**无效或不足的尝试**
+
+- 仅调 CAE 网格（`lattice_contact` seed 0.6 mm；~94 万–131 万 C3D4）：预检通过，t=0 仍失败。
+- `--contact-soft-clearance`（general contact `SCALE FACTOR` s0=0.08）：预检通过，t=0 仍失败。
+- `INTERFERENCE FIT` 作用于 `ALL EXTERIOR` 自接触：预检失败（不支持）。
+- 板–点阵 `INTERFERENCE FIT`：预检失败（曲面过复杂）。
+- 仅 **ContactSettle** 两步（软接触 s0=0.02、μ=0）：预检通过，**t=0 仍失败**（仍触发 nodal adjustment）。
+- 仅 **Virtual Topology**（`createVirtualTopology`）：过盈对数略降，t=0 仍失败。
+
+**有效方案（当前 `paper_box` pipeline 默认）**
+
+两步 Explicit + **STORE OFFSETS**，在 `src/export/abaqus_compression.py` 写出：
+
+```inp
+*Contact Controls Assignment, AUTOMATIC OVERCLOSURE RESOLUTION
+, , STORE OFFSETS
+```
+
+- **STORE OFFSETS**：用接触偏移记录初始过盈，**避免** t=0 无应变 nodal adjustment 推畸变网格；increment 0 可通过，autodt 恢复 ~10⁻⁴ s 量级。
+- **Step 1 `ContactSettle`**（115.2 s = 15%×768 s）：零位移 + 软自接触 `SETTLE-CONTACT`（`SCALE FACTOR` s0=**0.02**，μ=**0**）；步内再次声明 STORE OFFSETS。
+- **Step 2 `Compression`**（768 s，80% 应变，5 mm/min）：切换 **HARD-CONTACT**（μ=0.1）+ 顶板位移加载。
+- **辅助**：CAE `--cae-virtual-topology`（默认开）略减过盈对数；**不能**单独替代 STORE OFFSETS。
+
+**Linux 服务器一键（BCC Q=0 / SFBLS Q=0.5 等同参）**
+
+```bash
+cd /path/to/HuBaiLab
+export PATH="$HOME/APP/abaqus2022/Commands:$PATH"
+export PYTHONPATH=.
+
+# BCC paper_box（默认 Q=0）
+bash scripts/linux/run_paperbox_cae_tet_pipeline.sh
+
+# SFBLS Q=0.5
+bash scripts/linux/run_paperbox_cae_tet_pipeline.sh --Q 0.5
+```
+
+算例 slug 形如：`hu_bai_{variant}_L20_4x4x4_solid_cad_f_cae_tet0p6mm80_5mmin_paperbox`。导出 CLI 开关：`--contact-store-offsets`、`--contact-settle`、`--contact-settle-fraction 0.15`、`--contact-settle-soft-s0 0.02`、`--cae-virtual-topology`。终端双算例监视：`scripts/watch_paperbox_jobs.ps1`。
+
 **fast 加速档**（非论文原参）：工程应变 **45%**，gmsh **1.2 mm**，准静态加载 **10 mm/min**，Explicit **dt = 5×10⁻⁴ s**，幅值 hold **2%** step_time，`--profile fast`（4×4×4：36 mm / **216 s**）。
 
 **fast80 档**（Fig. 3.3 对比用）：工程应变 **80%**，gmsh **0.8 mm**，加载与论文一致（**5 mm/min**，dt = **1×10⁻⁴ s**，hold **5%**），`--case-suffix fast80`（4×4×4：64 mm / **768 s**，约 **7.68×10⁶** 增量；8 核墙钟约 **25–40 h** 量级，视网格单元数与是否早停）。
@@ -224,6 +276,9 @@ Fig. 3.3 目标批量（3×3×3 SFBLS Q=0.5/1/1.5 fast80）见 `scripts/submit_h
 | `run_hu_bai_sfbls_step_fuse.py` | 一次性 monolithic fuse（≤3×3×3） |
 | `run_hu_bai_bcc_sw_export.py` | STL / STEP / X_T 导出 |
 | `run_hu_bai_bcc_solid_cad_export.py` | STEP → gmsh 网格 → Explicit INP |
+| `run_hu_bai_bcc_solid_cad_cae_tet_export.py` | STEP → **Abaqus/CAE C3D4** 网格 → Explicit INP（`paper_box` + STORE OFFSETS） |
+| `linux/run_paperbox_cae_tet_pipeline.sh` | 服务器：`paper_box` CAE 划分 + export + 提交（`--Q 0` / `0.5`） |
+| `watch_paperbox_jobs.ps1` | 远程轮询 BCC / SFBLS `paper_box` 算例 `.sta` 进度 |
 | `run_hu_bai_bcc_export.py` | B31 梁单元 INP |
 | `submit_hu_bai_bcc_solid_cad_compression.ps1` | 实体压缩一键：导出 → 求解 → 曲线 |
 | `submit_hu_bai_bcc_compression.ps1` | B31 压缩一键提交 |

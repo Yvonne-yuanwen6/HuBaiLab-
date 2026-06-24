@@ -38,6 +38,81 @@ def _doc_title(model) -> str:
     return title if isinstance(title, str) else title()
 
 
+def _sw_com_value(obj, name: str):
+    """Call ``name()`` when it is a method; otherwise read a COM property (SW 2025)."""
+    attr = getattr(obj, name)
+    if not callable(attr):
+        return attr
+    try:
+        return attr()
+    except Exception:
+        # Late-bound SW API: GetEquationMgr / GetTypeName2 / GetNextFeature are properties.
+        prop = getattr(obj, name, None)
+        if prop is not None and not callable(prop):
+            return prop
+        # pywin32 exposes properties as callable dispatch; invoke as propertyget via _oleobj_
+        try:
+            from win32com.client import dynamic
+
+            disp = dynamic.Dispatch(obj._oleobj_)
+            return getattr(disp, name)
+        except Exception:
+            return attr
+
+
+def discover_part_templates(sw_app=None) -> list[str]:
+    """
+    Candidate part templates for NewDocument.
+
+    SW 2025 zh-CN installs often use ``gb_part.prtdot`` instead of ``Part.prtdot``.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def _add(path: str | None) -> None:
+        if not path:
+            return
+        path = os.path.abspath(str(path))
+        if path.lower().endswith(".prtdot") and os.path.isfile(path) and path not in seen:
+            seen.add(path)
+            out.append(path)
+
+    if sw_app is not None:
+        try:
+            _add(sw_app.GetUserPreferenceStringValue(2))  # swDefaultTemplatePart
+        except Exception:
+            pass
+        try:
+            _add(sw_app.GetDocumentTemplate("Default", "prtdot", 0, 0, 0))
+        except Exception:
+            pass
+        try:
+            rev = str(_sw_com_value(sw_app, "RevisionNumber") or "")
+            year_m = re.search(r"(\d{4})", rev)
+            if year_m:
+                year = year_m.group(1)
+                base = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "SOLIDWORKS")
+                for name in ("gb_part.prtdot", "Part.prtdot", "part.prtdot"):
+                    _add(os.path.join(base, f"SOLIDWORKS {year}", "templates", name))
+        except Exception:
+            pass
+
+    program_data = os.environ.get("ProgramData", r"C:\ProgramData")
+    sw_root = os.path.join(program_data, "SOLIDWORKS")
+    if os.path.isdir(sw_root):
+        for name in ("gb_part.prtdot", "Part.prtdot", "part.prtdot"):
+            for year_dir in sorted(os.listdir(sw_root), reverse=True):
+                _add(os.path.join(sw_root, year_dir, "templates", name))
+
+    public_root = os.path.join(os.environ.get("PUBLIC", r"C:\Users\Public"), "Documents", "SOLIDWORKS")
+    if os.path.isdir(public_root):
+        for name in ("part.prtdot", "Part.prtdot", "gb_part.prtdot"):
+            for year_dir in sorted(os.listdir(public_root), reverse=True):
+                _add(os.path.join(public_root, year_dir, "samples", "tutorial", "advdrawings", name))
+
+    return out
+
+
 def solidworks_running() -> bool:
     """True if a SolidWorks instance is already running (does not start SW)."""
     if sys.platform != "win32":

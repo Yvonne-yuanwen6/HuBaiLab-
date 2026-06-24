@@ -192,6 +192,17 @@ _parser.add_argument(
     default=None,
     help="paper = Neo-Hooke TPU (§3.1); elastic_plastic = E+Plastic (§2.4.1); default: paper profile→hyperelastic, else elastic_plastic",
 )
+_parser.add_argument(
+    "--contact-interference-fit",
+    action="store_true",
+    help="Explicit: treat initial overclosures as interference fit (gradual, not strain-free)",
+)
+_parser.add_argument(
+    "--contact-init-step-fraction",
+    type=float,
+    default=0.15,
+    help="Fraction of step to resolve interference fit (default 0.15)",
+)
 _args = _parser.parse_args()
 
 PROFILE = _args.profile
@@ -308,6 +319,11 @@ else:
     EXPLICIT_DT = HU_BAI_EXPLICIT_DT
 if _args.hold_fraction is not None:
     HOLD_FRACTION = float(_args.hold_fraction)
+elif _args.contact_interference_fit:
+    HOLD_FRACTION = max(
+        HU_BAI_AMPLITUDE_HOLD_FRACTION,
+        float(_args.contact_init_step_fraction),
+    )
 elif IS_FAST80:
     HOLD_FRACTION = HU_BAI_AMPLITUDE_HOLD_FRACTION
 elif PROFILE == "fast":
@@ -435,6 +451,8 @@ compression = CompressionSettings(
     explicit_restart_number_interval=RESTART_INTERVAL,
     bulk_viscosity_linear=BULK_VISCOSITY_LINEAR,
     bulk_viscosity_quadratic=BULK_VISCOSITY_QUADRATIC,
+    contact_init_interference_fit=bool(_args.contact_interference_fit),
+    contact_init_step_fraction=float(_args.contact_init_step_fraction),
 )
 
 paths = {
@@ -611,6 +629,8 @@ manifest = {
         "lattice_load_faces": stats.get("lattice_load_faces"),
         "lattice_load_nodes": stats.get("lattice_load_nodes"),
         "lattice_self_contact": compression.lattice_self_contact,
+        "contact_init_interference_fit": compression.contact_init_interference_fit,
+        "contact_init_step_fraction": compression.contact_init_step_fraction,
         "explicit_restart_write": compression.explicit_restart_write,
         "explicit_restart_number_interval": compression.resolved_restart_number_interval(),
     },

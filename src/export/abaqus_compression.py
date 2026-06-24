@@ -174,6 +174,25 @@ class CompressionSettings:
     # *Bulk Viscosity linear, quadratic — 略增可抑制自接触高频振荡
     bulk_viscosity_linear: float = 0.12
     bulk_viscosity_quadratic: float = 1.6
+    contact_init_interference_fit: bool = False
+    contact_init_step_fraction: float = 0.15
+    # Explicit 自接触软化：SCALE FACTOR 的 s0（general contact；None=HARD）
+    contact_soft_clearance_mm: float | None = None
+    # Explicit 两步：先 ContactSettle（零位移 + 极软自接触），再 Compression
+    explicit_contact_settle: bool = False
+    contact_settle_time_fraction: float = 0.15
+    contact_settle_soft_s0: float = 0.02
+    contact_settle_friction: float = 0.0
+    contact_settle_step_name: str = "ContactSettle"
+    # Explicit general contact: STORE OFFSETS 替代 t=0 nodal adjustment（避免大过盈推畸变）
+    contact_overclosure_store_offsets: bool = False
+
+    def use_explicit_contact_settle(self) -> bool:
+        return (
+            self.explicit_contact_settle
+            and self.analysis.lower() == "explicit"
+            and self.lattice_self_contact
+        )
 
     @property
     def top_plane_z(self) -> float:
@@ -682,7 +701,7 @@ def write_element_surface(
     if not pairs:
         raise ValueError(f"No element faces for surface {name!r}")
 
-    f.write(f"\n*Surface, type=ELEMENT, name={name}\n")
+    f.write(f"*Surface, type=ELEMENT, name={name}\n")
     buf: list[str] = []
     for eid, face in pairs:
         buf.extend((str(eid), face))
@@ -693,17 +712,25 @@ def write_element_surface(
         f.write(", ".join(buf) + "\n")
 
 
-def write_hard_contact_interaction(f: TextIO, settings: CompressionSettings) -> None:
-    """*Surface Interaction for plate–lattice or lattice self-contact (Explicit)."""
-    mu = settings.contact_friction
-    f.write(
-        """
-*Surface Interaction, name=HARD-CONTACT
-*Surface Behavior, pressure-overclosure=HARD
-"""
-    )
+def write_surface_interaction(
+    f: TextIO,
+    *,
+    name: str,
+    settings: CompressionSettings,
+    soft_s0: float | None = None,
+    friction: float | None = None,
+    scale_overclosure_r: float = 0.25,
+) -> None:
+    """*Surface Interaction for plate–lattice or lattice self-contact."""
+    mu = settings.contact_friction if friction is None else friction
+    soft = settings.contact_soft_clearance_mm if soft_s0 is None else soft_s0
+    f.write(f"\n*Surface Interaction, name={name}\n")
+    if soft is not None and soft > 0.0 and settings.analysis.lower() == "explicit":
+        f.write("*Surface Behavior, pressure-overclosure=SCALE FACTOR\n")
+        f.write(f"{scale_overclosure_r:.6g}, , 2.0, {soft:.6g}\n")
+    else:
+        f.write("*Surface Behavior, pressure-overclosure=HARD\n")
     if mu > 0.0:
-        # slip tolerance is Standard-only; Explicit uses penalty friction without it
         if settings.analysis.lower() == "explicit":
             f.write(f"*Friction\n{mu:.6g}\n")
         else:
@@ -711,11 +738,122 @@ def write_hard_contact_interaction(f: TextIO, settings: CompressionSettings) -> 
             f.write(f"*Friction, slip tolerance={mu_tol:.6g}\n{mu:.6g}\n")
 
 
+def write_hard_contact_interaction(f: TextIO, settings: CompressionSettings) -> None:
+    write_surface_interaction(f, name="HARD-CONTACT", settings=settings)
+
+
+def write_model_contact_interactions(f: TextIO, settings: CompressionSettings) -> None:
+    if settings.use_explicit_contact_settle():
+        write_surface_interaction(
+            f,
+            name="SETTLE-CONTACT",
+            settings=settings,
+            soft_s0=settings.contact_settle_soft_s0,
+            friction=settings.contact_settle_friction,
+            scale_overclosure_r=0.25,
+        )
+        write_surface_interaction(f, name="HARD-CONTACT", settings=settings)
+    else:
+        write_surface_interaction(f, name="HARD-CONTACT", settings=settings)
+
+
+def _write_explicit_dynamic_block(
+    f: TextIO, settings: CompressionSettings, step_time: float
+) -> None:
+    dt = settings.resolved_explicit_dt()
+    dt_mode = (settings.explicit_dt_mode or "fixed").lower()
+    ms = settings.explicit_mass_scaling_factor
+    mass_line = ""
+    if settings.explicit_mass_scaling_dt_only:
+        mass_line = f"*Fixed Mass Scaling, type=BELOW MIN, dt={dt:.12g}\n"
+    elif ms is not None and ms > 0.0:
+        mass_line = (
+            f"*Fixed Mass Scaling, elset=ALLSOLID, factor={ms:.12g}, "
+            f"type=BELOW MIN, dt={dt:.12g}\n"
+        )
+    if dt_mode in ("automatic", "auto", "adaptive"):
+        f.write(
+            f"** Explicit automatic dt (limit {dt:.6g}s); step {step_time:.12g}s\n"
+            f"*Dynamic, Explicit\n"
+            f", {step_time:.12g}\n"
+        )
+    else:
+        n_inc = max(1, int(round(step_time / dt)))
+        f.write(
+            f"** Explicit fixed dt={dt:.6g}s (~{n_inc} increments)\n"
+            f"*Dynamic, Explicit, direct user control\n"
+            f"{dt:.12g}, {step_time:.12g}\n"
+        )
+    f.write(
+        f"{mass_line}*Bulk Viscosity\n"
+        f"{settings.bulk_viscosity_linear:.12g}, {settings.bulk_viscosity_quadratic:.12g}\n"
+    )
+
+
+def write_contact_initialization_data(
+    f: TextIO, settings: CompressionSettings
+) -> None:
+    if not settings.contact_init_interference_fit:
+        return
+    if settings.analysis.lower() != "explicit":
+        return
+    frac = max(0.01, min(1.0, float(settings.contact_init_step_fraction)))
+    f.write(
+        f"""** Interference fit: resolve initial overclosures over first {frac:.0%} of step
+*Contact Initialization Data, name=LAT-INIT, INTERFERENCE FIT, STEP FRACTION={frac:.6g}, SEARCH BELOW=0.35
+"""
+    )
+
+
+def write_contact_initialization_assignment(
+    f: TextIO,
+    settings: CompressionSettings,
+    plate_surface_pairs: list[tuple[str, str]] | None = None,
+    *,
+    lattice_exterior_surface: str | None = None,
+) -> None:
+    if not settings.contact_init_interference_fit:
+        return
+    if settings.analysis.lower() != "explicit":
+        return
+    pairs = list(plate_surface_pairs or [])
+    if not pairs:
+        return
+    for slave, master in pairs:
+        f.write(f"*Contact Initialization Assignment\n{slave}, {master}, LAT-INIT\n")
+
+
+def write_contact_initialization_if_needed(
+    f: TextIO,
+    settings: CompressionSettings,
+    plate_surface_pairs: list[tuple[str, str]] | None = None,
+) -> None:
+    write_contact_initialization_assignment(f, settings, plate_surface_pairs)
+
+
+def write_contact_overclosure_resolution(
+    f: TextIO,
+    settings: CompressionSettings,
+    *,
+    method: str = "STORE OFFSETS",
+) -> None:
+    if not settings.contact_overclosure_store_offsets:
+        return
+    if settings.analysis.lower() != "explicit":
+        return
+    f.write(
+        f"** Initial overclosure: {method} (no strain-free nodal adjustment)\n"
+        "*Contact Controls Assignment, AUTOMATIC OVERCLOSURE RESOLUTION\n"
+        f", , {method}\n"
+    )
+
+
 def write_lattice_general_contact_model(
     f: TextIO,
     *,
     interaction: str | None = "HARD-CONTACT",
     plate_surface_pairs: list[tuple[str, str]] | None = None,
+    settings: CompressionSettings | None = None,
 ) -> None:
     """
     Model-level general contact (solid exterior facets).
@@ -724,6 +862,8 @@ def write_lattice_general_contact_model(
     with no extra data lines avoids comma-leading INP lines that pre rejects.
     Optional plate_surface_pairs add named plate–lattice inclusions before ALL EXTERIOR.
     """
+    if settings is not None:
+        write_contact_initialization_data(f, settings)
     f.write(
         "** Lattice self-contact + plate–lattice (general contact)\n"
         "*Contact\n"
@@ -731,8 +871,22 @@ def write_lattice_general_contact_model(
     for slave, master in plate_surface_pairs or []:
         f.write(f"*Contact Inclusions\n{slave}, {master}\n")
     f.write("*Contact Inclusions, ALL EXTERIOR\n")
+    if settings is not None:
+        write_contact_initialization_assignment(
+            f,
+            settings,
+            plate_surface_pairs,
+            lattice_exterior_surface=(
+                "LATTICE_EXT"
+                if settings.contact_init_interference_fit
+                and settings.lattice_self_contact
+                else None
+            ),
+        )
     if interaction:
         f.write(f"*Contact Property Assignment\n, , {interaction}\n")
+    if settings is not None:
+        write_contact_overclosure_resolution(f, settings)
 
 
 def write_plate_pair_general_contact(
@@ -790,6 +944,7 @@ def write_compression_sections(
     fixed_plate_elem_ids: list[int] | None = None,
     fixed_ref_node_id: int | None = None,
     lattice_bottom_faces: list[tuple[int, str]] | None = None,
+    lattice_exterior_faces: list[tuple[int, str]] | None = None,
 ) -> None:
     """Write materials, interactions, step, BC, contact for compression."""
     if bottom_node_ids is not None and not fixed_node_ids:
@@ -838,7 +993,7 @@ PLATE, {plate_face}
     if needs_plate_surface:
         write_element_surface(f, load_face_surf, lattice_load_faces)
     if needs_hard_contact:
-        write_hard_contact_interaction(f, settings)
+        write_model_contact_interactions(f, settings)
     f.write(
         f"""*Material, name=PLATE-STEEL
 *Elastic
@@ -922,10 +1077,16 @@ LATTICE_TOP_NODES,
     if use_fixed_bottom:
         plate_pairs.append(("LATTICE_BOTTOM", "PLATE_FIXED_TOP"))
     if settings.lattice_self_contact:
+        default_contact = (
+            "SETTLE-CONTACT"
+            if settings.use_explicit_contact_settle()
+            else "HARD-CONTACT"
+        )
         write_lattice_general_contact_model(
             f,
-            interaction="HARD-CONTACT",
+            interaction=default_contact,
             plate_surface_pairs=plate_pairs if mode == "pair" else None,
+            settings=settings,
         )
     elif settings.analysis.lower() == "explicit" and plate_pairs:
         write_plate_pair_general_contact(f, plate_pairs)
@@ -939,7 +1100,11 @@ LATTICE_TOP_NODES,
 """
         )
     amp = settings.displacement_amplitude_name
-    t_hold = max(0.0, min(0.5, settings.amplitude_hold_fraction)) * t_total
+    t_compress = t_total
+    t_settle = 0.0
+    if settings.use_explicit_contact_settle():
+        frac = max(0.05, min(0.5, float(settings.contact_settle_time_fraction)))
+        t_settle = frac * t_total
     fixed_bc = (
         "PLATE_COUNTER_REF, 1, 6, 0.\n"
         if use_counter
@@ -953,53 +1118,8 @@ LATTICE_TOP_NODES,
         f"""*Boundary
 {fixed_bc}PLATE_REF, 1, 6, 0.
 
-** 位移幅值（每行一对 time,value；不可写 3 对在一行）
-*Amplitude, name={amp}, time=TOTAL TIME
-0., 0.
-{t_hold:.12g}, 0.
-{t_total:.12g}, 1.
-
-*Step, name={settings.step_name}, nlgeom=YES
 """
     )
-
-    if settings.analysis.lower() == "explicit":
-        dt = settings.resolved_explicit_dt()
-        n_inc = settings.resolved_explicit_n_increments()
-        dt_mode = (settings.explicit_dt_mode or "fixed").lower()
-        ms = settings.explicit_mass_scaling_factor
-        mass_line = ""
-        if settings.explicit_mass_scaling_dt_only:
-            mass_line = f"*Fixed Mass Scaling, type=BELOW MIN, dt={dt:.12g}\n"
-        elif ms is not None and ms > 0.0:
-            mass_line = (
-                f"*Fixed Mass Scaling, elset=ALLSOLID, factor={ms:.12g}, "
-                f"type=BELOW MIN, dt={dt:.12g}\n"
-            )
-        if dt_mode in ("automatic", "auto", "adaptive"):
-            # Abaqus 2022: 无 direct user control 时数据行仅写步长（前导逗号）；Δt 由稳定极限自动决定
-            dynamic_block = (
-                f"** Explicit automatic dt (stable limit; mass scaling dt={dt:.6g}s); step {t_total:.12g}s\n"
-                f"*Dynamic, Explicit\n"
-                f", {t_total:.12g}\n"
-            )
-        else:
-            dynamic_block = (
-                f"** Explicit fixed dt={dt:.6g}s (~{n_inc} increments); do not use \", 1.\" in CAE\n"
-                f"*Dynamic, Explicit, direct user control\n"
-                f"{dt:.12g}, {t_total:.12g}\n"
-            )
-        f.write(
-            f"""{dynamic_block}{mass_line}*Bulk Viscosity
-{settings.bulk_viscosity_linear:.12g}, {settings.bulk_viscosity_quadratic:.12g}
-"""
-        )
-    else:
-        f.write(
-            """*Static
-0.01, 1., 1e-08, 0.1
-"""
-        )
 
     contact_block = ""
     if mode == "pair":
@@ -1027,20 +1147,28 @@ LATTICE_BOTTOM, PLATE_FIXED_TOP
         contact_block = ""
 
     if mode == "direct_top":
-        step_bc = f"""*Boundary, type=DISPLACEMENT, op=MOD, amplitude={amp}
+        compression_bc = f"""*Boundary, type=DISPLACEMENT, op=MOD, amplitude={amp}
 {load_node_nset}, 3, 3, {disp:.12g}
 PLATE_REF, 3, 3, {disp:.12g}
 """
     else:
-        step_bc = f"""*Boundary, type=DISPLACEMENT, op=MOD, amplitude={amp}
+        compression_bc = f"""*Boundary, type=DISPLACEMENT, op=MOD, amplitude={amp}
 PLATE_REF, 3, 3, {disp:.12g}
 """
 
-    if contact_block:
-        f.write(contact_block)
-    f.write(
-        f"""{step_bc}
-*Output, field, number interval=50
+    def _write_step_outputs(step_time: float, *, full: bool) -> None:
+        if not full:
+            f.write(
+                """*Output, field, number interval=1
+*Node Output
+U,
+*Element Output, elset=LATTICE
+S, LE
+"""
+            )
+            return
+        f.write(
+            f"""*Output, field, number interval=50
 *Node Output
 U,
 *Node Output, nset=PLATE_REF
@@ -1050,25 +1178,112 @@ RF,
 *Element Output, elset=LATTICE
 S, LE
 
-*Output, history, time interval={max(t_total / 100.0, 1.0e-4):.12g}
+*Output, history, time interval={max(step_time / 100.0, 1.0e-4):.12g}
 *Node Output, nset=PLATE_REF
 RF, U
 *Energy Output
 ALLIE, ALLKE, ALLSE, ALLVD, ALLWK, ALLPD
 """
+        )
+        if use_fixed_bottom and fixed_ref_node_id is not None:
+            f.write(
+                f"""*Node Output, nset=PLATE_FIXED_REF
+RF, U
+"""
+            )
+        if settings.history_lattice_top_nodes and lattice_load_node_ids:
+            f.write(
+                f"""*Node Output, nset={load_node_nset}
+RF, U
+"""
+            )
+
+    if settings.use_explicit_contact_settle() and settings.analysis.lower() == "explicit":
+        settle_name = settings.contact_settle_step_name
+        f.write(
+            f"""** Step 1: zero displacement + soft self-contact (s0={settings.contact_settle_soft_s0:g}, mu={settings.contact_settle_friction:g}) store_offsets={settings.contact_overclosure_store_offsets}
+*Step, name={settle_name}, nlgeom=YES
+"""
+        )
+        _write_explicit_dynamic_block(f, settings, t_settle)
+        if settings.contact_overclosure_store_offsets:
+            f.write(
+                """** Reassert STORE OFFSETS at step 1 (general contact domain)
+*Contact
+*Contact Controls Assignment, AUTOMATIC OVERCLOSURE RESOLUTION
+, , STORE OFFSETS
+"""
+            )
+        if contact_block:
+            f.write(contact_block)
+        _write_step_outputs(t_settle, full=False)
+        f.write(
+            f"""** settle={t_settle:.9g}s compress={t_compress:.9g}s self_contact={settings.lattice_self_contact}
+*End Step
+
+** Step 2: full compression with HARD self-contact
+"""
+        )
+        t_hold = max(0.0, min(0.5, settings.amplitude_hold_fraction)) * t_compress
+        f.write(
+            f"""** 位移幅值（STEP TIME；压缩步内 ramp）
+*Amplitude, name={amp}, time=STEP TIME
+0., 0.
+{t_hold:.12g}, 0.
+{t_compress:.12g}, 1.
+
+*Step, name={settings.step_name}, nlgeom=YES
+"""
+        )
+        _write_explicit_dynamic_block(f, settings, t_compress)
+        f.write(
+            """** Switch to HARD self-contact for compression
+*Contact
+*Contact Property Assignment
+, , HARD-CONTACT
+"""
+        )
+        if contact_block:
+            f.write(contact_block)
+        f.write(compression_bc)
+        _write_step_outputs(t_compress, full=True)
+        restart_block = ""
+        if settings.explicit_restart_write:
+            n_restart = settings.resolved_restart_number_interval()
+            restart_block = f"*Restart, write, overlay, number interval={n_restart}\n"
+        direction = settings.loading_direction
+        f.write(
+            f"""{restart_block}** loading={direction} counter_plate={use_counter} fixed_bottom_plate={use_fixed_bottom} contact={mode} self_contact={settings.lattice_self_contact} amp={amp} dt_mode={settings.explicit_dt_mode} dt={settings.resolved_explicit_dt():.6g}s settle={t_settle:.9g}s disp={disp:.9g}/{t_compress:.9g}s
+*End Step
+"""
+        )
+        return
+
+    t_hold = max(0.0, min(0.5, settings.amplitude_hold_fraction)) * t_total
+    f.write(
+        f"""** 位移幅值（每行一对 time,value；不可写 3 对在一行）
+*Amplitude, name={amp}, time=TOTAL TIME
+0., 0.
+{t_hold:.12g}, 0.
+{t_total:.12g}, 1.
+
+*Step, name={settings.step_name}, nlgeom=YES
+"""
     )
-    if use_fixed_bottom and fixed_ref_node_id is not None:
+
+    if settings.analysis.lower() == "explicit":
+        _write_explicit_dynamic_block(f, settings, t_total)
+    else:
         f.write(
-            f"""*Node Output, nset=PLATE_FIXED_REF
-RF, U
+            """*Static
+0.01, 1., 1e-08, 0.1
 """
         )
-    if settings.history_lattice_top_nodes and lattice_load_node_ids:
-        f.write(
-            f"""*Node Output, nset={load_node_nset}
-RF, U
-"""
-        )
+
+    if contact_block:
+        f.write(contact_block)
+    f.write(compression_bc)
+    _write_step_outputs(t_total, full=True)
     restart_block = ""
     if settings.analysis.lower() == "explicit" and settings.explicit_restart_write:
         n_restart = settings.resolved_restart_number_interval()
