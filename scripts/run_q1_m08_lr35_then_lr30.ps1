@@ -49,7 +49,7 @@ function Get-JobOutcome {
         if ($staText -match 'SOLUTION PROGRESS') { return "failed" }
         return "failed"
     }
-    # No .sta yet (packager/submit still starting) â€” keep polling, do not treat as failure.
+    # No .sta yet (packager/submit still starting) â€?keep polling, do not treat as failure.
     if (Test-Path (Join-Path $jobDir "$JobSlug.inp")) { return "running" }
     return "running"
 }

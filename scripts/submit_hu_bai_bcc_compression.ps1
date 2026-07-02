@@ -1,4 +1,4 @@
-# Hu & Bai 2024 BCC quasi-static compression (Fig. 3.3 baseline)
+# Hu & Bai compression baseline (Fig. 3.3 comparison target; FE setup see repo docs)
 param(
     [switch]$ForceRerun,
     [switch]$ForceSkip,
@@ -27,7 +27,7 @@ function Get-ProjectPython {
 }
 
 Set-Location $Root
-Write-Host "=== Hu & Bai BCC compression (DEPRECATED â€” use solid_cad) ===" -ForegroundColor Yellow
+Write-Host "=== Hu & Bai BCC compression (DEPRECATED â€?use solid_cad) ===" -ForegroundColor Yellow
 Write-Host "  Use: scripts/submit_hu_bai_bcc_solid_cad_compression.ps1" -ForegroundColor Yellow
 exit 2
 if (-not $SkipExport) {

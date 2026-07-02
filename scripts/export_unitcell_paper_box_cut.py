@@ -20,7 +20,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from src.export.unitcell_box_cut import export_unitcell_step_paper_box_cut
-from src.generator.hu_bai_bcc import HuBaiLatticeGenerator
+from src.generator.hu_bai_bcc import HuBaiLatticeGenerator, is_q1_period
 from src.paths import CAD_ROOT, ensure_output_dirs
 
 ensure_output_dirs()
@@ -35,6 +35,13 @@ def main() -> int:
     p.add_argument("--L", type=float, default=20.0, help="Unit cell edge length [mm]")
     p.add_argument("--rod-d", type=float, default=2.0, help="Rod diameter [mm]")
     p.add_argument("--n-segments", type=int, default=24)
+    p.add_argument(
+        "--both-end-extension",
+        action="store_true",
+        help="Q=1: extend pipes at centre and corner before octant cut + fuse",
+    )
+    p.add_argument("--centre-extension-mm", type=float, default=None)
+    p.add_argument("--corner-extension-mm", type=float, default=None)
     p.add_argument("--out-dir", default="")
     args = p.parse_args()
 
@@ -58,7 +65,10 @@ def main() -> int:
         gen.build_unitcell()
         nodes, beams, polylines = gen.get_data(copy=True)
         slug = gen.variant_name.lower()
-        out_step = os.path.join(out_dir, f"unitcell_{slug}_paper_box.step")
+        if args.both_end_extension and is_q1_period(float(q)):
+            out_step = os.path.join(out_dir, f"unitcell_{slug}_paper_box_both_ext.step")
+        else:
+            out_step = os.path.join(out_dir, f"unitcell_{slug}_paper_box.step")
         print(f"Q={q} ({gen.variant_name}) -> {out_step}", flush=True)
         try:
             report = export_unitcell_step_paper_box_cut(
@@ -67,6 +77,11 @@ def main() -> int:
                 out_step,
                 polylines=polylines,
                 cell_size_mm=float(args.L),
+                n_segments_hint=max(3, int(args.n_segments)),
+                period_factor=float(q),
+                both_end_extension=args.both_end_extension,
+                centre_extension_mm=args.centre_extension_mm,
+                corner_extension_mm=args.corner_extension_mm,
             )
         except RuntimeError as exc:
             if not os.path.isfile(out_step):
@@ -92,6 +107,8 @@ def main() -> int:
             f"size={entry.get('size_bytes')}",
             flush=True,
         )
+        if entry.get("q1_paper_orientation"):
+            print(f"  Q=1 path formula: {entry['q1_paper_orientation']}", flush=True)
 
     manifest_path = os.path.join(out_dir, "manifest.json")
     with open(manifest_path, "w", encoding="utf-8") as fh:
@@ -99,8 +116,8 @@ def main() -> int:
         fh.write("\n")
     print(f"\nManifest: {manifest_path}", flush=True)
     print(
-        "Open STEPs in SolidWorks: expect 8 struts, flat caps on cell faces, "
-        "no junction spheres at corners.",
+        "Open STEPs in SolidWorks: open ONE file only → expect 1 part window, "
+        "1 fused solid, 8 struts, flat caps on cell faces, no junction spheres.",
         flush=True,
     )
     return 0

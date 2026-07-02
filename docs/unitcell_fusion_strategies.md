@@ -1,0 +1,153 @@
+# 单胞融合策略（paper box-cut）
+
+Hu & Bai 论文 Fig.2.6 几何：**8 根扫掠管、无节点球**，RVE 边界为虚拟立方体 **L³ 平面切割**（非球头连接）。
+
+导出入口：`scripts/export_unitcell_paper_box_cut.py`  
+实现：`src/export/unitcell_box_cut.py`
+
+种子 STEP 目录：`output/cad/_unitcell_paper_box_cut/unitcell_{variant}_paper_box.step`
+
+---
+
+## 总览（按 Q）
+
+| Q | 变体 | 单胞融合策略 | OCC 方法名 | 备注 |
+|---|------|--------------|------------|------|
+| **0** | BCC | pipe-first fuse → RVE L³ 相交 | `gmsh_occ_pipe_box_cut` | 直杆，中心可 pipe-first |
+| **0.5** | SFBLS | 同上 | `gmsh_occ_pipe_box_cut` | 正弦屈曲，pipe-first 通常成功 |
+| **1.0** | SFBLS | **8×1/8 octant 切杆 → 顺序 fuse** | `gmsh_occ_octant_box_cut` | 无节点球；centre chord stub |
+| **1.5** | SFBLS | 逐杆 full L³ box-cut → strut merge | `gmsh_occ_per_strut_pipe_box_cut` | pipe-first / 中心球均易失败 |
+
+单胞验收：`fused_volume_count=1`、`step_solidworks_safe=True`；SW 中 **只打开一个 STEP → 一个零件窗口**。
+
+---
+
+## Q=1 推荐路线（2026-06 固化）
+
+Q=1（**−A_f·sin**，在 `sinusoidal_path_points` 中对 Q=1 取负号）在胞心裸 pipe OCC 融合会丢杆；**禁止**依赖 `export_unitcell_seed_check.py` 的 junction-sphere + pipe-first 作为 paper_box 种子。
+
+### 核心思路
+
+1. 将单胞视为 **L³ 立方体**，用 **x=0 / y=0 / z=0** 切成 **8 个相等的 1/8 子块（octant）**。
+2. 每根杆从中心 `(0,0,0)` 到一个角点，只属于 **包含中心与该角点** 的那一个 octant。
+3. **先**对每根杆做 octant 布尔裁剪（**无 centre weld / 无节点球**），**再**把 8 段 **顺序** 融合成 **1 个实体**。
+4. 中心平面微重叠 `OCTANT_CENTER_OVERLAP_MM = 0.02` mm（各 bisector 对称 ±overlap/2），供 pairwise fuse 共享薄体积。
+5. **胞心几何**：自动融合路径使用 **centre chord stub**（首段弦圆柱 + open-start pipe），**不用** centre path extension（extension 会破坏 x/y/z=0 的 OCC 接触）。
+
+### 顺序 fuse 顺序（关键）
+
+固定顺序 **`OCTANT_SEQUENTIAL_FUSE_ORDER = (0, 1, 2, 3, 4, 5, 7, 6)`**（0-based 杆索引）。
+
+- 默认 `0..7` 会把最后一根 `(+,+,+)` 杆静默丢弃（~333 mm³，87%）。
+- 每步校验质量增量，face-only ``fuse`` 静默丢杆会 **fail-fast**。
+
+### 命令
+
+```powershell
+# 自动融合（默认 auto：失败时写 8-body compound）
+py -3 scripts/export_unitcell_paper_box_cut.py --Q 1.0
+
+# 仅自动融合
+py -3 scripts/export_unitcell_paper_box_cut.py --Q 1.0 --q1-mode fuse
+
+# 8 体 compound（centre path extension，SW 手工 Combine）
+py -3 scripts/export_unitcell_paper_box_cut.py --Q 1.0 --q1-mode compound
+```
+
+质量参考（L=20 mm，d=2 mm，A_f=2 mm）：切后合计 ~382 mm³，融合后 ~381 mm³（~99.8%）。
+
+### 相关 OCC / 文献结论（2026-06 实测）
+
+| 策略 | 结果 | 说明 |
+|------|------|------|
+| **顺序 fuse + centre stub** | ✅ ~381 mm³ | **当前默认** |
+| 顺序 fuse，无 stub（closed pipe） | ✅ ~381 mm³ | 胞心可能有三角缝隙 |
+| 一次性 batch fuse 8 体 | ❌ ~48 mm³ | 只保留 1 根杆 |
+| 3 级树 merge（x→y→z） | ❌ ~143 mm³ | extension 时丢杆 3+4、5+6 |
+| fragment → unify 全部碎片 | ❌ BRep_API | 53 碎片，无法 unify |
+| 向胞心平移 0.05 mm 再 fuse | ❌ step 5 空 | 重叠过大破坏拓扑 |
+| x 半胞 batch + 合并 | ❌ x+ 半胞 step 3 空 | 同 face-only 问题 |
+| centre path extension + 顺序 fuse | ❌ step 3 不增质量 | extension 破坏 bisector 接触 |
+| OpenCASCADE **SetGlue** (GlueFull/GlueShift) | 未暴露 | gmsh Python API 无 glue 选项；理论适用于共面接触加速，需原生 OCC 或未来 gmsh 版本 |
+| BooleanFragments 去重共面 | ❌ | 本几何产生 50+ 碎片，batch unify 失败 |
+
+OpenCASCADE 文档建议：共面/贴靠体用 **GlueFull**（层内）+ **GlueShift**（层间）；gmsh 当前仅暴露 `fuse` / `fragment`，Q=1 单胞仍依赖 **顺序 fuse + 质量校验**。
+
+---
+
+## Q=1 双模式交付
+
+| 模式 | 输出 | 胞心 | 阵列 auto-fuse |
+|------|------|------|----------------|
+| `fuse` / `auto` | 1 solid STEP | centre chord stub（推荐） | ✅ 可用作 4×4×4 种子 |
+| `compound` | 8 solid STEP | centre path extension（SW 验证） | ❌ SW 手工 fuse 的 STEP 再 OCC 平铺易 `BRep_API` |
+
+**阵列 4×4×4** 请使用 gmsh 自动融合的单胞种子（~2.6 MB），勿用 SW 手工 Combine 后的 STEP 作为 `export_paper_box_layered_array_fuse` 输入。
+
+---
+
+## Q=0 / Q=0.5（pipe-first + box-cut）
+
+1. 8 根 pipe sweep，**无** junction spheres  
+2. `_occ_fuse_lattice_for_box_cut`（pipe-first pairwise）  
+3. 与虚拟 RVE 立方体 **L³** 相交，截断外伸端面  
+
+失败时回退：逐杆 full L³ box-cut + merge。
+
+---
+
+## Q=1.5（per-strut full box-cut）
+
+pipe-first 与中心球 seed 均不稳定；默认 **逐杆 L³ 切割** 后 batch / pairwise merge。
+
+---
+
+## Q=1 失败/弃用路线（勿作 paper_box 种子）
+
+| 路线 | 问题 |
+|------|------|
+| pipe-first + L³ cut | 胞心丢杆（mass ratio ~0.12） |
+| **fuse-then-cut + centre weld + trim** | 胞心仍残留焊球；与论文几何不符 |
+| centre-weld + per-strut cut | 质量/STEP 验收不稳定 |
+| junction-sphere seed + box-cut | 与论文几何不符；fuse-all 易缺杆 |
+| z 半胞 **平移** 0.01 mm 再 fuse | 产生 `BREP_WITH_VOIDS`，SW 中心多分面 |
+| 3 级 octant 树 merge | 见上表；已替换为 sequential |
+| fragment 后取 top-8 质量 | 11+ 碎片时选错体 |
+
+---
+
+## 4×4×4 阵列融合（paper_box）
+
+单胞种子必须是 **1 volume** 的 `unitcell_*_paper_box.step`（Q=1 先完成上一节）。
+
+| 步骤 | 说明 |
+|------|------|
+| iz=0 | 4×4 单胞 OCC 顺序融合 → `zslab_iz0_4x4_paper_box_fused.step` |
+| iz=1..3 | 复制 iz=0（dz=L） |
+| 合并 | 4 个 z-slab → **1 solid** `*_paper_box_array.step` |
+
+```powershell
+py -3 scripts/run_hu_bai_paper_box_4x4x4_array_fuse.py --Q 1.0
+```
+
+输出目录：`output/cad/_paper_box_array_q1p0/`（Q 标签 `1p0` → `_q1p0`）。
+
+**2026-06 验收（Q=1.0）**：`hu_bai_sfbls_af2q1_L20_4x4x4_paper_box_array.step` — `fused_volume_count=1`，`step_solidworks_safe=True`，耗时 ~7 min（layered fuse）。
+
+实现：`src/export/paper_box_array_fuse.py`（`export_paper_box_layered_array_fuse`）。
+
+Legacy：`--auto-only` 一次性 64 胞 OCC（需稳定 1-volume seed）；`--stepwise-only` 输出 compound 供 SW 手工 Combine。
+
+---
+
+## 相关文件
+
+| 文件 | 用途 |
+|------|------|
+| `src/export/unitcell_box_cut.py` | 单胞 octant / box-cut 实现 |
+| `src/mesh/occ_pipe.py` | `gmsh_pipe_with_cell_centre_stub` |
+| `scripts/export_unitcell_paper_box_cut.py` | 单胞 STEP 批导出 |
+| `scripts/export_single_strut_paper_box_cut.py` | 单杆 octant 切 QA |
+| `scripts/_tmp_q1_fusion_strategy_sweep.py` | 融合策略对比探测 |
+| `scripts/run_hu_bai_paper_box_4x4x4_array_fuse.py` | 4×4×4 阵列 |
+| `docs/cad_fuse_routes.md` | BCC legacy OCC / SW 步进总表 |

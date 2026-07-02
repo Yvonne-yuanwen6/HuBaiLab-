@@ -1,5 +1,5 @@
 # Wait for 4x4x4 layered STEP files, then export + submit fast80 (80% strain) sequentially.
-# Matches Fig.3.3 SFBLS fast80: --case-suffix fast80 (1.2 mm, 80%, 5 mm/min, dt=5e-4).
+# Hu & Bai Fig. 3.3 comparison batch �?fast80 is repo profile (mesh/dt/strain 原文未给); 5 mm/min from §2.4.2
 param(
     [switch]$ForceRerun,
     [switch]$SkipWait,

@@ -1,6 +1,7 @@
 """
 Paper box-cut 4×4×4 array: fuse one 4×4 z-slab, copy along +Z, then merge.
 
+Default route (also used by run_hu_bai_paper_box_4x4x4_array_fuse.py without flags).
 Periodic lattice → all z-layers are identical up to a Z translation; only iz=0
 needs OCC fuse (~1.5–2 h for Q=1.0). iz=1..3 are fast STEP copies.
 
@@ -60,6 +61,18 @@ _parser.add_argument(
     action="store_true",
     help="Re-fuse or re-copy z-slabs even if STEP already exists",
 )
+_parser.add_argument(
+    "--strategy",
+    default="row_sequential",
+    choices=("row_sequential", "in_memory_block"),
+    help="gmsh iz z-slab strategy (ignored when --backend ocp)",
+)
+_parser.add_argument(
+    "--backend",
+    default="ocp",
+    choices=("ocp", "gmsh"),
+    help="Fuse backend for z-slab / layered merge",
+)
 _args = _parser.parse_args()
 
 if _args.copy_layers and _args.iz is not None:
@@ -83,12 +96,18 @@ variant = gen.variant_name.lower()
 q_tag = str(q).replace(".", "p")
 
 out_dir = _args.out_dir.strip() or os.path.join(
-    str(CAD_ROOT), f"_paper_box_array_q{q_tag}"
+    str(CAD_ROOT),
+    f"_paper_box_array_q{q_tag}{'_ocp' if _args.backend == 'ocp' else ''}",
 )
 os.makedirs(out_dir, exist_ok=True)
 
-seed_step = _args.seed.strip() or paper_box_seed_step(q)
-seed_step = os.path.abspath(seed_step)
+if _args.backend == "ocp":
+    from src.export.ocp_paper_box_array_fuse import resolve_paper_box_seed
+
+    seed_step = resolve_paper_box_seed(q, _args.seed)
+else:
+    seed_step = _args.seed.strip() or paper_box_seed_step(q)
+    seed_step = os.path.abspath(seed_step)
 if not os.path.isfile(seed_step):
     raise SystemExit(f"[FAIL] Seed not found: {seed_step}")
 
@@ -107,7 +126,12 @@ manifest: dict = {
     "seed_step": seed_step,
     "out_dir": os.path.abspath(out_dir),
     "cells": [n, n, n],
-    "method": "paper_box_layered_fuse",
+    "method": (
+        "ocp_paper_box_layered_fuse"
+        if _args.backend == "ocp"
+        else "paper_box_layered_fuse"
+    ),
+    "backend": _args.backend,
     "zslabs": [],
     "array_merge": None,
 }
@@ -139,15 +163,30 @@ def fuse_iz(iz: int) -> dict:
     print(f"\n=== Fuse z-slab iz={iz} ===", flush=True)
     print(f"  Seed: {seed_step}", flush=True)
     print(f"  Out:  {path}", flush=True)
-    report = export_paper_box_zslab_fuse(
-        seed_step,
-        path,
-        nx=n,
-        ny=n,
-        iz=iz,
-        nz_total=n,
-        cell_size=L,
-    )
+    if _args.backend == "ocp":
+        from src.export.ocp_paper_box_array_fuse import export_ocp_paper_box_zslab_fuse
+
+        report = export_ocp_paper_box_zslab_fuse(
+            seed_step,
+            path,
+            nx=n,
+            ny=n,
+            iz=iz,
+            nz_total=n,
+            cell_size=L,
+        )
+    else:
+        report = export_paper_box_zslab_fuse(
+            seed_step,
+            path,
+            nx=n,
+            ny=n,
+            iz=iz,
+            nz_total=n,
+            cell_size=L,
+            fuse_strategy=_args.strategy,
+            resume=not _args.force,
+        )
     _zslab_report(path, report)
     return report
 
@@ -202,11 +241,22 @@ if _args.all or _args.merge_only:
     for iz, p in enumerate(zslab_paths):
         print(f"  input iz={iz}: {p}", flush=True)
     print(f"  Out: {array_step}", flush=True)
-    merge_report = export_paper_box_array_from_zslabs(
-        zslab_paths,
-        array_step,
-        progress_label="paper-box-inter-slab",
-    )
+    if _args.backend == "ocp":
+        from src.export.ocp_paper_box_array_fuse import (
+            export_ocp_paper_box_array_from_zslabs,
+        )
+
+        merge_report = export_ocp_paper_box_array_from_zslabs(
+            zslab_paths,
+            array_step,
+            progress_label="ocp-paper-box-inter-slab",
+        )
+    else:
+        merge_report = export_paper_box_array_from_zslabs(
+            zslab_paths,
+            array_step,
+            progress_label="paper-box-inter-slab",
+        )
     manifest["array_merge"] = merge_report
     print(
         f"  OK: vol={merge_report.get('fused_volume_count')} "

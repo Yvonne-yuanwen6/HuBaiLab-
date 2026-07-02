@@ -1,11 +1,10 @@
 """
 Export Hu & Bai BCC solid CAD (STEP/X_T) → meshed Abaqus compression INP.
 
-Paper §2.4: TPU elastic-plastic, explicit quasi-static, μ=0.1, top loading plate +
-fixed bottom plate (footprint larger than lattice), engineering stress–strain curve.
-
-The Parasolid X_T from SolidWorks is the reference CAD; gmsh volume-meshes the sibling
-STEP (same BREP) and writes an INP with rigid plates + general contact (Hu & Bai Fig.2.6).
+Thesis §2.4.1: Abaqus/Explicit, TPU ρ/E/ν, rigid plates, μ=0.1, C3D4 0.6 mm.
+Thesis §2.4.2: experiment 5 mm/min (used here to set step time when stroke given).
+Material model (Neo-Hooke / elastic-plastic), self-contact, Explicit Δt, mass
+scaling, target strain, STORE OFFSETS, etc. are repo choices — 原文未给出.
 
   py -3 scripts/run_hu_bai_bcc_solid_cad_export.py --cells 3 --stroke pilot
   py -3 scripts/run_hu_bai_bcc_solid_cad_export.py --stroke full --mesh-size 0.6
@@ -95,7 +94,7 @@ _parser.add_argument(
     "--mesh-method",
     choices=("tet", "voxel"),
     default="tet",
-    help="tet = gmsh C3D4 volume mesh (paper); voxel = axis-aligned C3D8R brick fill",
+    help="tet = gmsh C3D4 (§2.4.1 mesh type/size); voxel = axis-aligned C3D8R (repo)",
 )
 _parser.add_argument(
     "--voxel-pitch",
@@ -113,19 +112,20 @@ _parser.add_argument(
     "--profile",
     choices=("fast", "paper", "pilot"),
     default=None,
-    help="fast = 45%% strain, 1.2 mm, 10 mm/min, dt=5e-4; fast80 = --case-suffix fast80 (1.2 mm, 80%%, 5 mm/min, dt=5e-4); paper/pilot = full QA",
+    help="fast/fast80 = repo acceleration profiles (strain/mesh/dt 原文未给); "
+    "paper = repo defaults aligned with §2.4.1 mesh 0.6 mm; pilot = coarse QA",
 )
 _parser.add_argument(
     "--stroke",
     choices=("pilot", "full"),
     default="full",
-    help="full = paper 70%% strain @ 0.6 mm (default); pilot = coarse QA",
+    help="full = repo paper profile (70%% strain default, 原文未给); pilot = coarse QA",
 )
 _parser.add_argument(
     "--contact-mode",
     choices=("pair", "coupling_nodes"),
     default="pair",
-    help="pair = plate–lattice hard contact (Fig.2.6); coupling_nodes = kinematic top nodes",
+    help="pair = plate–lattice hard contact (§2.4.1); coupling_nodes = kinematic top nodes",
 )
 _parser.add_argument(
     "--step-time",
@@ -137,7 +137,7 @@ _parser.add_argument(
     "--load-rate-mm-min",
     type=float,
     default=None,
-    help=f"Crosshead rate [mm/min] (default {HU_BAI_LOAD_RATE_MM_MIN:g}, paper §2.4)",
+    help=f"Crosshead rate [mm/min] (default {HU_BAI_LOAD_RATE_MM_MIN:g}; §2.4.2 experiment)",
 )
 _parser.add_argument(
     "--explicit-dt",
@@ -188,9 +188,10 @@ _parser.add_argument(
 )
 _parser.add_argument(
     "--material-model",
-    choices=("paper", "hyperelastic", "elastic_plastic"),
+    choices=("paper", "hyperelastic", "elastic_plastic", "elastic"),
     default=None,
-    help="paper = Neo-Hooke TPU (§3.1); elastic_plastic = E+Plastic (§2.4.1); default: paper profile→hyperelastic, else elastic_plastic",
+    help="paper = Neo-Hooke TPU (原文未写 FE 本构；Ch.3 描述平台段用超弹性材料); "
+    "elastic_plastic = E+Plastic (repo); default: paper profile→hyperelastic",
 )
 _parser.add_argument(
     "--contact-interference-fit",
@@ -202,6 +203,11 @@ _parser.add_argument(
     type=float,
     default=0.15,
     help="Fraction of step to resolve interference fit (default 0.15)",
+)
+_parser.add_argument(
+    "--contact-store-offsets",
+    action="store_true",
+    help="Explicit: AUTOMATIC OVERCLOSURE RESOLUTION → STORE OFFSETS",
 )
 _args = _parser.parse_args()
 
@@ -255,25 +261,26 @@ if PROFILE == "paper":
     if _args.load_rate_mm_min is not None and abs(float(_args.load_rate_mm_min) - HU_BAI_LOAD_RATE_MM_MIN) > 1e-9:
         print(
             f"  [paper] ignoring --load-rate-mm-min {_args.load_rate_mm_min}; "
-            f"using {HU_BAI_LOAD_RATE_MM_MIN:g} mm/min (§2.4)",
+            f"using {HU_BAI_LOAD_RATE_MM_MIN:g} mm/min (§2.4.2 experiment)",
             flush=True,
         )
     if _args.strain is not None and abs(float(_args.strain) - HU_BAI_TARGET_ENGINEERING_STRAIN) > 1e-9:
         print(
             f"  [paper] ignoring --strain {_args.strain}; "
-            f"using {HU_BAI_TARGET_ENGINEERING_STRAIN:.0%} (§2.4)",
+            f"using {HU_BAI_TARGET_ENGINEERING_STRAIN:.0%} (repo paper profile; 原文未给终止应变)",
             flush=True,
         )
     if _args.explicit_dt_mode in ("automatic", "auto", "adaptive"):
-        print("  [paper] forcing explicit_dt_mode=fixed (quasi-static KE/IE < 5%)", flush=True)
+        print("  [paper profile] forcing explicit_dt_mode=fixed (KE/IE<5% per §2.4.1)", flush=True)
     if MESH_METHOD == "voxel":
-        print("  [WARN] paper profile expects C3D4 tet mesh 0.6 mm; use --mesh-method tet", flush=True)
+        print("  [WARN] §2.4.1 mesh is C3D4 0.6 mm; use --mesh-method tet", flush=True)
 
 MATERIAL_KIND = _args.material_model
 if MATERIAL_KIND is None:
     MATERIAL_KIND = "paper" if PROFILE == "paper" else "elastic_plastic"
 USE_HYPERELASTIC = MATERIAL_KIND in ("paper", "hyperelastic")
 INP_MATERIAL_MODEL = "hyperelastic" if USE_HYPERELASTIC else "elastic"
+USE_PLASTIC = MATERIAL_KIND == "elastic_plastic"
 
 if PROFILE == "paper":
     TARGET_STRAIN = HU_BAI_TARGET_ENGINEERING_STRAIN
@@ -426,7 +433,7 @@ compression = CompressionSettings(
     step_time=STEP_TIME,
     contact_friction=FRICTION,
     tpu_d1=8e-4,
-    # pair：顶板刚体通过 LATTICE_TOP↔PLATE_BOT 接触传力（论文 Fig.2.6）
+    # pair：顶板刚体通过 LATTICE_TOP↔PLATE_BOT 接触传力（§2.4.1 Fig. 2.6）
     contact_mode=CONTACT_MODE,
     fixed_bottom_plate=True,
     plate_divisions=(14, 14),
@@ -453,6 +460,7 @@ compression = CompressionSettings(
     bulk_viscosity_quadratic=BULK_VISCOSITY_QUADRATIC,
     contact_init_interference_fit=bool(_args.contact_interference_fit),
     contact_init_step_fraction=float(_args.contact_init_step_fraction),
+    contact_overclosure_store_offsets=bool(_args.contact_store_offsets),
 )
 
 paths = {
@@ -513,7 +521,7 @@ stats = export_inp(
     c10=TPU_C10,
     elastic_e=E_MODULUS,
     elastic_nu=POISSON,
-    plastic_yield=None if USE_HYPERELASTIC else YIELD_MPA,
+    plastic_yield=None if USE_HYPERELASTIC or not USE_PLASTIC else YIELD_MPA,
     density=DENSITY_ABQ,
     compression=compression,
     geom_tag=geom_tag,
@@ -557,7 +565,7 @@ manifest = {
     "structure": gen.variant_name,
     "reference": "Hu & Bai 2024 — CAD solid (STEP/X_T) explicit compression",
     "figure_target": (
-        "Fig. 3.3 compressive stress-strain (solid C3D4 mesh)"
+        "Fig. 3.3 style compressive stress-strain (repo FE setup)"
         if MESH_METHOD == "tet"
         else "Voxel C3D8R solid mesh (print-oriented)"
     ),

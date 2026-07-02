@@ -1,7 +1,7 @@
 # Monitor BCC + SFBLS paper_box CAE tet jobs (remote poll).
 param(
     [string]$RemoteHost = "art@172.20.200.93",
-    [string]$RemoteRoot = "/home/art/Documents/Lattice/LWY/HuBaiLab",
+    [string]$RemoteRoot = "/media/art/file/XiangLang/Lattice/LWY/HuBaiLab",
     [double]$StepTimeS = 883.2,
     [double]$TargetStrain = 0.8,
     [int]$PollSeconds = 15

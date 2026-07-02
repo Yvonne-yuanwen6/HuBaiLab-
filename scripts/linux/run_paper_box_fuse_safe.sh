@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Safe server-side paper box 4x4x4 auto-fuse (Q=1.0, Q=1.5).
+# Safe server-side paper box 4x4x4 layered fuse (default route).
 # - Preflight free memory
 # - Per-Q hard timeout
 # - Stall watchdog (no log progress)
 # - RSS cap kills runaway OCC/python
 set -euo pipefail
 
-ROOT="${ROOT:-/home/art/Documents/Lattice/LWY/HuBaiLab}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=hubai_env.sh
+. "$SCRIPT_DIR/hubai_env.sh"
+
+ROOT="${ROOT:-$HU_BAI_REMOTE_ROOT}"
 cd "$ROOT"
 export PYTHONPATH="$ROOT"
 
@@ -117,7 +121,7 @@ run_q() {
   touch_progress "start"
   set +e
   timeout --signal=TERM "$TIMEOUT_Q_SEC" nice -n "$NICE_LEVEL" \
-    "$PY" scripts/run_hu_bai_paper_box_4x4x4_array_fuse.py --Q "$CURRENT_Q" --auto-only \
+    "$PY" scripts/run_hu_bai_paper_box_4x4x4_array_fuse.py --Q "$CURRENT_Q" \
     >> "$LOG" 2>&1 &
   local pid=$!
   set -e
@@ -156,7 +160,7 @@ main() {
   if [[ "$fail" -eq 0 ]]; then
     log "=== ALL DONE Q=1.0 Q=1.5 ==="
   else
-    log "=== STOPPED WITH FAILURE — use stepwise compound + SW fallback ==="
+    log "=== STOPPED WITH FAILURE — check log; stepwise SW fallback still available ==="
     exit 1
   fi
 }

@@ -1,7 +1,7 @@
 # Monitor server-side paper box auto-fuse (safe runner).
 param(
     [string]$RemoteHost = "art@172.20.200.93",
-    [string]$RemoteRoot = "/home/art/Documents/Lattice/LWY/HuBaiLab",
+    [string]$RemoteRoot = "/media/art/file/XiangLang/Lattice/LWY/HuBaiLab",
     [int]$IntervalSec = 60
 )
 

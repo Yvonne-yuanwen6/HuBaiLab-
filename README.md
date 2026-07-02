@@ -67,18 +67,56 @@ py -3 -m venv .venv
 
 ### 0. 单胞融合 STEP（SolidWorks QA，阵列前必做）
 
-在生成 2-cell / 4×4×4 阵列之前，**必须先导出并目视确认单胞**。经 SolidWorks 验证的正确方式如下。
+**paper box-cut（论文 Fig.2.6，无节点球）** — 推荐用于 Abaqus `paper_box` 与 CAE 网格。
+
+**Q=1 当前状态（2026-06）**：仅 **OCP 单胞** 验收通过；**4×4×4 阵列尚未成功**。详见 [docs/unitcell_fusion_strategies.md](docs/unitcell_fusion_strategies.md)。
+
+```bash
+# Q=1 单胞（OCP，当前成功路线）
+bash scripts/linux/run_ocp_glue_fuse_pilot.sh
+# 或本地：py -3 scripts/_tmp_ocp_glue_fuse_pilot.py --strategy sequential_glue_shift
+```
+
+输出：`output/cad/_ocp_glue_pilot/unitcell_af2q1_L20_ocp_stub_sequential-glue-shift.step`
+
+Q=0 / Q=0.5 / Q=1.5 仍用 gmsh：
 
 ```powershell
-cd D:\HuBaiLab
-$env:PYTHONPATH = (Get-Location).Path
+py -3 scripts/export_unitcell_paper_box_cut.py --Q 0.5
+```
 
+**各 Q 单胞融合策略**（pipe sweep + 虚拟 L³ 切割，无中心球）见 **[docs/unitcell_fusion_strategies.md](docs/unitcell_fusion_strategies.md)**：
+
+| Q | 策略摘要 | 状态 |
+|---|----------|------|
+| 0 / 0.5 | pipe-first fuse → RVE L³ 相交 | gmsh 通常成功 |
+| **1.0** | **8×octant 切杆 → OCP sequential_glue_shift** | **单胞 ✅；4×4×4 ❌** |
+| 1.5 | 逐杆 full L³ box-cut → strut merge | gmsh |
+
+Q=1 **不要**用下方 `export_unitcell_seed_check.py`（junction-sphere + pipe-first）作 paper_box 种子。
+
+**SolidWorks 验收（paper_box 单胞）**
+
+| 检查项 | 期望 |
+|--------|------|
+| 杆件 | **8 根** SFBLS 曲杆，外边界 ±L/2 平切 |
+| 节点球 | **无**（论文几何） |
+| 实体 | **1** 个 `MANIFOLD_SOLID_BREP` |
+| 窗口 | **只打开一个 STEP → 一个零件窗口** |
+
+单杆 octant 切 QA：`py -3 scripts/export_single_strut_paper_box_cut.py --Q 1.0 --strut 1`
+
+---
+
+**legacy：junction-sphere 单胞 QA**（`solid_merged` / 旧阵列，**非** paper_box）：
+
+```powershell
 py -3 scripts/export_unitcell_seed_check.py --Q 1.0
 ```
 
 输出：`output/cad/_unitcell_check/unitcell_sfbls_af2q1_fused.step`（及 `manifest.json`）
 
-**SolidWorks 验收标准**
+**SolidWorks 验收标准（legacy seed）**
 
 | 检查项 | 期望 |
 |--------|------|
@@ -106,7 +144,25 @@ py -3 scripts/export_unitcell_seed_check.py --Q 1.0
 
 单胞确认无误后，再按步进 QA 做 2-cell、Y 向 4-cell、4×4 层等（见 `scripts/export_pair_fuse_check.py` 等）。
 
-### 1. 生成 4×4×4 融合 STEP（推荐）
+### 0b. paper_box 4×4×4 融合 STEP（Q=1 进行中）
+
+先完成 **0. paper box-cut 单胞**（Q=1 须 OCP 路线，见上）。再尝试阵列融合：
+
+```bash
+# OCP 阵列（当前主攻）
+bash scripts/linux/run_ocp_q1_4x4x4_array_fuse.sh
+```
+
+```powershell
+# gmsh 阵列（对照）
+py -3 scripts/run_hu_bai_paper_box_4x4x4_array_fuse.py --Q 1.0
+```
+
+目标输出：`output/cad/_paper_box_array_q1p0_ocp/hu_bai_sfbls_af2q1_L20_4x4x4_paper_box_array.step`（或 gmsh 目录 `_paper_box_array_q1p0/`）
+
+**截至 2026-06：Q=1 的 4×4×4 尚未验收**（`vol=1`、`step_solidworks_safe=True`）。详见 [docs/unitcell_fusion_strategies.md](docs/unitcell_fusion_strategies.md#444-阵列融合paper_box--q1-进行中)。
+
+### 1. 生成 4×4×4 融合 STEP（legacy BCC / solid_array）
 
 ```powershell
 cd D:\HuBaiLab
@@ -242,7 +298,9 @@ powershell -File scripts/run_bcc_q1_4x4x4_fast80.ps1 -SkipQ1   # 仅 BCC fast80
 | 变体 | STEP 路径 | 生成方式 | SW / gmsh 验收 |
 |------|-----------|----------|----------------|
 | SFBLS Q=0.5/1/1.5 单胞 | `output/cad/_unitcell_check/unitcell_sfbls_af2q{0p5,1,1p5}_fused.step` | `export_unitcell_seed_check.py --Q …`，**pipe-first** + 平行移动截面扫掠（`occ_pipe.py`） | 8 杆均匀圆柱截面，9 节点球，单实体 |
-| SFBLS Q=1.0，4×4×4 | `output/cad/verified/hu_bai_sfbls_af2q1_L20_4x4x4_solid_merged.STEP` | `run_sfbls_sw_stepwise_4x4x4_pipeline.ps1`：16 体 compound → SW → Z 复制 → 4 体 SW 合并 | 已用于 fast80 网格导出 |
+| **SFBLS Q=1.0 单胞（paper_box，OCP）** | `output/cad/_ocp_glue_pilot/unitcell_af2q1_L20_ocp_stub_sequential-glue-shift.step` | `_tmp_ocp_glue_fuse_pilot.py` / `run_ocp_glue_fuse_pilot.sh`：octant 切杆 + **OCP GlueShift** | `vol=1`，无节点球，SW 单窗口 |
+| SFBLS Q=1.0，4×4×4（paper_box） | `output/cad/_paper_box_array_q1p0_ocp/`（目标） | `run_ocp_q1_4x4x4_array_fuse.sh` 或 gmsh `run_hu_bai_paper_box_4x4x4_array_fuse.py` | **❌ 尚未验收** |
+| SFBLS Q=1.0，4×4×4（legacy SW） | `output/cad/verified/hu_bai_sfbls_af2q1_L20_4x4x4_solid_merged.STEP` | `run_sfbls_sw_stepwise_4x4x4_pipeline.ps1`：16 体 compound → SW → Z 复制 → 4 体 SW 合并 | 已用于 fast80 网格导出（**非** paper_box 几何） |
 | **BCC Q=0，4×4×4**（进行中） | `output/cad/_stepwise_q0/` → `verified/…_solid_merged.STEP` | **同上 SW 步进** `-Q 0`；16 体已生成，待 SW 合并 | OCC 自动融合暂停，见 `docs/cad_fuse_routes.md` |
 
 > **manual/ 旧文件已清理**：此前 `output/cad/manual/` 下的 z-slab / merged STEP 为 Frenet 圆片堆叠（错误扫掠），已全部删除。请用修复后的扫掠重新生成：
@@ -271,7 +329,11 @@ Fig. 3.3 目标批量（3×3×3 SFBLS Q=0.5/1/1.5 fast80）见 `scripts/submit_h
 | `export_zslab_layer_from_column.py` | 4×4 z 层化合物 / 行融合 |
 | `run_hu_bai_bcc_unitcell_array_step_fuse.py` | 单胞 OCC 阵列融合 STEP（legacy；BCC 推荐 `run_hu_bai_array_auto_fuse.py`） |
 | `run_hu_bai_array_auto_fuse.py` | BCC OCC 自动阵列融合（**暂停/门控禁用**；问题见 `docs/cad_fuse_routes.md`） |
+| `docs/unitcell_fusion_strategies.md` | **单胞 paper box-cut 各 Q 融合策略**（Q=1：OCP 单胞 ✅，4×4×4 进行中） |
 | `docs/cad_fuse_routes.md` | CAD 融合路线、BCC OCC 已知问题与 SW 步进说明 |
+| `export_unitcell_paper_box_cut.py` | **paper_box 单胞 STEP**（Q=0/0.5/1/1.5） |
+| `export_single_strut_paper_box_cut.py` | Q=1 单杆 1/8 octant 切 QA |
+| `run_hu_bai_paper_box_4x4x4_array_fuse.py` | **paper_box 4×4×4** gmsh 分层阵列（Q=1 尚未验收） |
 | `run_hu_bai_bcc_layered_step_fuse.py` | z 层分层融合（4×4×4 备选，较慢） |
 | `run_hu_bai_sfbls_step_fuse.py` | 一次性 monolithic fuse（≤3×3×3） |
 | `run_hu_bai_bcc_sw_export.py` | STL / STEP / X_T 导出 |

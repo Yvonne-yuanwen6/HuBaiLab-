@@ -6,7 +6,7 @@ param(
     [string]$PartName = "LATTICE",
     [ValidateSet("hex", "tet")]
     [string]$MeshMode = "hex",
-    [ValidateSet("fast", "lattice", "lattice_contact", "paper")]
+    [ValidateSet("fast", "lattice", "lattice_contact", "lattice_curve", "paper")]
     [string]$MeshQuality = "lattice_contact",
     [double]$RodDiameterMm = 2.0,
     [double]$RodsPerDiameter = 3.0,

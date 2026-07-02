@@ -5,7 +5,7 @@
 
 param(
     [string]$RemoteHost = "art@172.20.200.93",
-    [string]$RemoteRoot = "/home/art/Documents/Lattice/LWY/HuBaiLab",
+    [string]$RemoteRoot = "/media/art/file/XiangLang/Lattice/LWY/HuBaiLab",
     [string[]]$Q = @("1.0", "1.5"),
     [int]$PollMinutes = 10,
     [switch]$IncludeZslabs
@@ -58,7 +58,7 @@ while ($true) {
     }
 
     if ($ready.Count -ge $Q.Count) {
-        Write-Log "all targets ready â€” pulling"
+        Write-Log "all targets ready â€?pulling"
         $pullArgs = @(
             "-File", $PullScript,
             "-RemoteHost", $RemoteHost,
@@ -72,7 +72,7 @@ while ($true) {
             Write-Log "pull complete"
             exit 0
         }
-        Write-Log "pull failed exit=$rc â€” will retry next poll"
+        Write-Log "pull failed exit=$rc â€?will retry next poll"
         $ready.Clear()
     }
 

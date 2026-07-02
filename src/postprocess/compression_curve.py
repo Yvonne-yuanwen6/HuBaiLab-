@@ -115,21 +115,23 @@ def load_compression_meta(path: str) -> CompressionMeta:
 
 
 def nominal_block_area_mm2(nx: int, ny: int, cell_size: float) -> float:
-    """Hu & Bai (2024) §2.2 / §2.4 — footprint area nx·L × ny·L."""
+    """Nominal footprint nx·L × ny·L (§2.2 block geometry; macro σ definition 原文未详述)."""
     return max(float(nx) * float(cell_size) * float(ny) * float(cell_size), 1e-9)
 
 
 def nominal_block_height_mm(nz: int, cell_size: float) -> float:
-    """Hu & Bai (2024) §2.2 Eq.(2.12) block height nz·L (not mesh bbox)."""
+    """Block height nz·L (§2.2 Eq. 2.12 strain definition for theory model)."""
     return max(float(nz) * float(cell_size), 1e-9)
 
 
 def paper_reference_geometry(meta: CompressionMeta) -> tuple[float, float]:
     """
-    Nominal 4×4×4 block references used in the thesis stress–strain curves.
+    Nominal block area/height for engineering σ–ε (repo convention).
 
-    σ = |F| / (nx·L·ny·L),  ε = |S| / (nz·L)
-    with F from the loading rigid plate reaction and S the plate stroke.
+    §2.4.2 experiment: record load F and stroke S from MTS; §2.2 Eq. 2.11–2.12
+    use single-cell area/height in theory. Thesis does not specify ODB extraction
+    (PLATE_REF RF3/U3 vs load cell). This repo uses:
+      σ = |F| / (nx·L·ny·L),  ε = |S| / (nz·L)
     """
     area = meta.reference_area_mm2
     height = meta.reference_height_mm
@@ -236,11 +238,10 @@ def build_curve_records(
     """
     Build engineering stress-strain (compression positive).
 
-    Paper (Hu & Bai 2024 §2.4.1–2.4.2, Fig. 3.3):
-      F = top rigid-plate reaction (PLATE_REF RF3, same as MTS load cell)
-      S = top plate stroke (PLATE_REF U3 − U3_0)
-      σ = |F| / (nx·L·ny·L)   [MPa]
-      ε = |S| / (nz·L)
+    Repo ``paper`` method (aligned with §2.4.2 F/S idea; FE output mapping 原文未写):
+      F ← top rigid-plate reaction (PLATE_REF RF3)
+      S ← top plate stroke (PLATE_REF U3 − U3_0)
+      σ = |F| / (nx·L·ny·L),  ε = |S| / (nz·L)
     """
     if not times:
         return []
@@ -271,6 +272,92 @@ def build_curve_records(
             }
         )
     return rows
+
+
+def _smooth_series(values: Sequence[float], window: int = 5) -> list[float]:
+    n = len(values)
+    if n < 3:
+        return [float(v) for v in values]
+    w = max(3, int(window) | 1)
+    half = w // 2
+    out: list[float] = []
+    for i in range(n):
+        lo = max(0, i - half)
+        hi = min(n, i + half + 1)
+        out.append(sum(float(values[j]) for j in range(lo, hi)) / (hi - lo))
+    return out
+
+
+def estimate_densification_strain(
+    strains: Sequence[float],
+    stresses: Sequence[float],
+    *,
+    smooth_window: int = 5,
+    min_strain: float = 0.2,
+    late_strain: float = 0.55,
+) -> dict[str, float]:
+    """
+    Densification onset from macro stress–strain (Hu & Bai 2024 §3.3, ISO 13314 style).
+
+    η(ε) = W(ε) / σ*(ε),  W = ∫σ dε,  σ* = max stress up to ε.
+    Densification starts near a local peak of η (efficiency rolls over before deep densification).
+
+    Returns engineering_strain, engineering_stress_MPa at the detected onset.
+  """
+    if len(strains) < 8:
+        return {
+            "densification_strain": float("nan"),
+            "densification_stress_MPa": float("nan"),
+        }
+
+    eps = [float(s) for s in strains]
+    sig = _smooth_series([float(s) for s in stresses], smooth_window)
+
+    w_abs = [0.0]
+    for i in range(1, len(eps)):
+        de = eps[i] - eps[i - 1]
+        w_abs.append(w_abs[-1] + 0.5 * (sig[i] + sig[i - 1]) * de)
+
+    sigma_star: list[float] = []
+    running = 0.0
+    for s in sig:
+        running = max(running, s)
+        sigma_star.append(running)
+
+    eta = [
+        w_abs[i] / sigma_star[i] if sigma_star[i] > 1e-12 else 0.0 for i in range(len(w_abs))
+    ]
+
+    peaks: list[tuple[float, float, float]] = []
+    for i in range(1, len(eta) - 1):
+        if eps[i] < min_strain:
+            continue
+        if eta[i] >= eta[i - 1] and eta[i] >= eta[i + 1]:
+            peaks.append((eta[i], eps[i], sig[i]))
+
+    if not peaks:
+        bi = max(range(len(eta)), key=lambda i: eta[i] if eps[i] >= min_strain else -1.0)
+        return {
+            "densification_strain": eps[bi],
+            "densification_stress_MPa": sig[bi],
+        }
+
+    eta_max = max(p[0] for p in peaks)
+    late = [p for p in peaks if p[1] >= late_strain and p[0] >= 0.85 * eta_max]
+    _, ed, sd = max(late or peaks, key=lambda p: (p[1], p[0]))
+    return {
+        "densification_strain": float(ed),
+        "densification_stress_MPa": float(sd),
+    }
+
+
+# §3.3.1 energy-absorption analysis (Hu & Bai thesis); used for sim compare & Fig.3.3 εd markers
+HU_BAI_PAPER_DENSIFICATION_STRAIN = {
+    "bcc": 0.70,
+    "q0.5": 0.79,
+    "q1": 0.75,
+    "q1.5": 0.56,
+}
 
 
 def write_curve_csv(rows: Iterable[dict[str, float]], path: str) -> None:

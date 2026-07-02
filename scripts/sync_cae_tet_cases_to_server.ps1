@@ -1,7 +1,7 @@
 # Copy CAE-tet export folders to Linux server (INP + manifest + meta only).
 param(
     [string]$RemoteHost = "art@172.20.200.93",
-    [string]$RemoteRoot = "/home/art/Documents/Lattice/LWY/HuBaiLab",
+    [string]$RemoteRoot = "/media/art/file/XiangLang/Lattice/LWY/HuBaiLab",
     [string]$CaseSuffix = "cae_tet1p2mm80_5mmin_noself"
 )
 

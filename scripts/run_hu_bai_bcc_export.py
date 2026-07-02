@@ -88,21 +88,21 @@ print(
 )
 sys.exit(2)
 
-# --- Paper §2.1 geometry (mm) ---
+# --- §2.1 geometry (mm) ---
 L = 20.0
 ROD_D = 2.0
 AF = float(_args.Af)
 Q = float(_args.Q)
 NX = NY = NZ = int(_args.cells)
 
-# --- Paper §2.4.1 material (TPU tensile test) ---
+# --- §2.3.2 tensile test (not necessarily used in §2.4.1 compression FE) ---
 E_MODULUS = 25.0
 POISSON = 0.47
 YIELD_MPA = 4.69
 DENSITY_KG_M3 = 1135.0
 DENSITY_ABQ = DENSITY_KG_M3 * 1.0e-12
 
-# --- Paper §2.4 quasi-static: 5 mm/min, 70 % engineering strain (overridable) ---
+# --- §2.4.2 experiment rate 5 mm/min; target strain 原文未给出 (repo default 70%) ---
 TARGET_STRAIN = (
     float(_args.strain) if _args.strain is not None else HU_BAI_TARGET_ENGINEERING_STRAIN
 )

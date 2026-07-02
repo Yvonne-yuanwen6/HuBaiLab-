@@ -586,7 +586,7 @@ function Invoke-PenetrationRiskCheck {
 
     $checkScript = Join-Path $Root "scripts\check_penetration_risk.py"
     if (-not (Test-Path $checkScript)) {
-        Write-Host "[WARN] Missing $checkScript â€” penetration precheck skipped." -ForegroundColor Yellow
+        Write-Host "[WARN] Missing $checkScript â€?penetration precheck skipped." -ForegroundColor Yellow
         return
     }
 
@@ -606,7 +606,7 @@ function Invoke-PenetrationRiskCheck {
     Write-Host "[1b] Penetration risk precheck ..." -ForegroundColor Cyan
     $cmd = Get-PlotPythonCommand -Root $Root
     if (-not $cmd) {
-        Write-Host "[WARN] Python not found â€” penetration precheck skipped." -ForegroundColor Yellow
+        Write-Host "[WARN] Python not found â€?penetration precheck skipped." -ForegroundColor Yellow
         return
     }
     & $cmd.Exe @($cmd.Prefix + $pyArgs)

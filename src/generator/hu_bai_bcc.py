@@ -1,5 +1,5 @@
 """
-Hu & Bai 2024 — BCC / SFBLS lattice generator (Chongqing University thesis).
+Hu & Bai (2024) — BCC / SFBLS lattice generator.
 
 Unit cell: body-centered cubic with eight struts from cell centre to cube corners.
 The block is **origin-centred**: unit-cell centre at (0,0,0), corners at (±L/2, ±L/2, ±L/2),
@@ -10,10 +10,9 @@ SFBLS replaces straight struts with sinusoidal buckling rods (Eq. 2.1):
     f(s) = A_f * sin(2 * pi * Q * s),   s in [0, 1] along the strut chord
 
 Buckling displacement uses a fixed global axis (default +Z) projected ⊥ to each strut.
-The sign is chosen so every half-rod bulges **outward** toward its corner octant (paper Fig.).
+The sign is chosen so every half-rod bulges **outward** toward its corner octant.
 
-Q = 0  → classic straight-rod BCC (SFBLS-AF2Q0).
-Paper block: 4×4×4 cells, L = 20 mm, rod diameter d = 2 mm, A_f = 2 mm.
+§2.1: 4×4×4 block, L=20 mm, rod d=2 mm, Q∈{0,0.5,1,1.5}; naming AF2Q* implies A_f=2 mm.
 """
 
 from __future__ import annotations
@@ -23,6 +22,14 @@ import math
 import numpy as np
 
 _DEFAULT_BUCKLING_REF = np.array([0.0, 0.0, 1.0])
+
+def is_q1_period(period_factor: float) -> bool:
+    return abs(float(period_factor) - 1.0) < 1e-9
+
+
+def q1_paper_orientation_label() -> str:
+    """Manifest label: Q=1 uses negated sin in Eq.2.1 (paper bending direction)."""
+    return "-A_f*sin(2*pi*Q*s), Q=1"
 
 
 def _bulge_direction_global(
@@ -116,10 +123,12 @@ def sinusoidal_path_points(
     else:
         n_hat /= n_norm
 
+    # Q=1: paper Eq.2.1 uses −|A_f|·sin (bending direction); other Q use +|A_f|·sin.
+    af_use = -abs(af) if abs(q - 1.0) < 1e-9 else abs(af)
     points: list[np.ndarray] = []
     for i in range(n_segments + 1):
         s = i / n_segments
-        w = af * math.sin(2.0 * math.pi * q * s)
+        w = af_use * math.sin(2.0 * math.pi * q * s)
         points.append(p0a + s * chord + w * n_hat)
     points[0] = p0a.copy()
     points[-1] = p1a.copy()

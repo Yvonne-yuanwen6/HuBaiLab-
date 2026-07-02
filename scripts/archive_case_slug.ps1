@@ -54,7 +54,7 @@ function Rename-SlugTree {
 Write-Host "=== Archive case slug ===" -ForegroundColor Cyan
 Write-Host "  Old: $OldSlug"
 Write-Host "  New: $NewSlug"
-if ($WhatIf) { Write-Host "  (WhatIf â€” no changes)" -ForegroundColor Yellow }
+if ($WhatIf) { Write-Host "  (WhatIf â€?no changes)" -ForegroundColor Yellow }
 
 $moved = @()
 foreach ($base in @("export", "jobs", "post")) {

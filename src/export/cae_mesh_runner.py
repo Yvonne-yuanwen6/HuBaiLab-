@@ -23,6 +23,7 @@ def _run_local_cae_mesh(
     rod_diameter_mm: float = 2.0,
     rods_per_diameter: float = 3.0,
     virtual_topology: bool = False,
+    element_type: str = "C3D4",
 ) -> None:
     if sys.platform == "win32":
         pilot_ps1 = os.path.join(root, "scripts", "run_abaqus_cae_hex_mesh_pilot.ps1")
@@ -63,6 +64,8 @@ def _run_local_cae_mesh(
             str(rods_per_diameter),
             "--part-name",
             part_name,
+            "--element-type",
+            element_type,
         ]
         if virtual_topology:
             cmd.append("--virtual-topology")
@@ -84,6 +87,7 @@ def _run_remote_cae_mesh(
     rod_diameter_mm: float = 2.0,
     rods_per_diameter: float = 3.0,
     virtual_topology: bool = False,
+    element_type: str = "C3D4",
 ) -> None:
     rel_step = _repo_rel(step_path, root)
     rel_out = _repo_rel(out_inp, root)
@@ -126,7 +130,7 @@ def _run_remote_cae_mesh(
         f"--seed {seed_mm} --mesh-mode {mesh_mode} "
         f"--mesh-quality {mesh_quality} "
         f"--rod-diameter {rod_diameter_mm} --rods-per-diameter {rods_per_diameter} "
-        f"--part-name '{part_name}'"
+        f"--part-name '{part_name}' --element-type {element_type}"
     )
     if virtual_topology:
         remote_cmd += " --virtual-topology"
@@ -154,6 +158,7 @@ def run_cae_mesh(
     rod_diameter_mm: float = 2.0,
     rods_per_diameter: float = 3.0,
     virtual_topology: bool = False,
+    element_type: str = "C3D4",
 ) -> str:
     """Run CAE mesh; returns 'server' or 'local'."""
     if mesh_on_server:
@@ -172,6 +177,7 @@ def run_cae_mesh(
             rod_diameter_mm=rod_diameter_mm,
             rods_per_diameter=rods_per_diameter,
             virtual_topology=virtual_topology,
+            element_type=element_type,
         )
         return "server"
     _run_local_cae_mesh(
@@ -185,5 +191,6 @@ def run_cae_mesh(
         rod_diameter_mm=rod_diameter_mm,
         rods_per_diameter=rods_per_diameter,
         virtual_topology=virtual_topology,
+        element_type=element_type,
     )
     return "local"

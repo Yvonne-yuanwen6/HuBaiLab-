@@ -1,7 +1,7 @@
 # Pull paper_box CAE tet ODBs from server, extract stress-strain, plot BCC + SFBLS Q=0.5.
 param(
     [string]$Server = "art@172.20.200.93",
-    [string]$Remote = "/home/art/Documents/Lattice/LWY/HuBaiLab",
+    [string]$Remote = "/media/art/file/XiangLang/Lattice/LWY/HuBaiLab",
     [string]$Local = "D:\HuBaiLab"
 )
 

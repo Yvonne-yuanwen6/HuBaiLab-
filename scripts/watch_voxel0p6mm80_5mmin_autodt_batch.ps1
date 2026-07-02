@@ -1,7 +1,7 @@
 # Poll server until all four voxel0p6mm80_5mmin_autodt jobs finish; log progress overnight.
 param(
     [string]$Server = "art@172.20.200.93",
-    [string]$Remote = "/home/art/Documents/Lattice/LWY/HuBaiLab",
+    [string]$Remote = "/media/art/file/XiangLang/Lattice/LWY/HuBaiLab",
     [int]$PollSeconds = 180,
     [double]$StepTimeS = 768.0
 )
@@ -54,9 +54,9 @@ while ($true) {
     foreach ($s in $Slugs) {
         $st = Get-SlugStatus $s
         $short = ($s -replace 'hu_bai_', '' -replace "_L20_4x4x4_solid_cad_f_$Suffix", '')
-        Write-Log "[$($st.State)] $short â€” $($st.Detail)"
+        Write-Log "[$($st.State)] $short â€?$($st.Detail)"
         if ($st.State -eq "DONE") { $done++ }
-        if ($st.State -eq "FAIL?") { Write-Log "[ALERT] $s may have failed â€” check queue log on server" }
+        if ($st.State -eq "FAIL?") { Write-Log "[ALERT] $s may have failed â€?check queue log on server" }
     }
     if ($done -eq $Slugs.Count) {
         Write-Log "=== ALL $($Slugs.Count) JOBS COMPLETED ==="

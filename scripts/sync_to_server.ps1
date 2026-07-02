@@ -1,49 +1,45 @@
-# Push HuBaiLab code (src/scripts/docs) to server via LAN UNC — no internet required.
+# Sync scripts + src (and optional docs) to the art workstation repo.
 param(
-    [Parameter(Mandatory)][string]$ServerRoot,
+    [switch]$IncludeDocs,
     [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "remote_config.ps1")
+
 $LocalRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$Dest = "${HuBaiRemoteHost}:${HuBaiRemoteRoot}"
 
-if (-not (Test-Path $ServerRoot)) {
-    throw "Cannot reach server path: $ServerRoot`nCheck: same LAN, share enabled, UNC correct (e.g. \\192.168.1.50\HuBaiLab)"
-}
-
-$robocopyArgs = @(
-    "/R:2", "/W:5", "/NFL", "/NDL", "/NJH", "/NJS"
-)
-if ($DryRun) { $robocopyArgs += "/L" }
-
-function Sync-Dir {
-    param([string]$Rel)
-    $src = Join-Path $LocalRoot $Rel
-    $dst = Join-Path $ServerRoot $Rel
-    if (-not (Test-Path $src)) { return }
-    Write-Host "  $Rel -> $dst" -ForegroundColor Cyan
-    & robocopy $src $dst /E /MIR @robocopyArgs
-}
-
-Write-Host "=== sync_to_server ===" -ForegroundColor Cyan
+Write-Host "=== Sync HuBaiLab -> $Dest ===" -ForegroundColor Cyan
 Write-Host "  local:  $LocalRoot"
-Write-Host "  server: $ServerRoot"
-if ($DryRun) { Write-Host "  (dry run)" -ForegroundColor Yellow }
-Write-Host ""
+Write-Host "  remote: $HuBaiRemoteRoot"
 
-foreach ($rel in @("src", "scripts", "docs")) { Sync-Dir $rel }
+$Paths = @(
+    (Join-Path $LocalRoot "scripts"),
+    (Join-Path $LocalRoot "src")
+)
+if ($IncludeDocs) {
+    $Paths += Join-Path $LocalRoot "docs"
+}
 
-foreach ($file in @("requirements.txt", "README.md")) {
-    $src = Join-Path $LocalRoot $file
-    if (-not (Test-Path $src)) { continue }
-    $dst = Join-Path $ServerRoot $file
-    Write-Host "  $file" -ForegroundColor Cyan
-  if ($DryRun) {
-        Write-Host "    (would copy)" -ForegroundColor Gray
+foreach ($p in $Paths) {
+    if (-not (Test-Path $p)) {
+        Write-Warning "Skip missing: $p"
+        continue
+    }
+    $rel = Split-Path $p -Leaf
+    $target = "$Dest/$rel"
+    if ($DryRun) {
+        Write-Host "[dry-run] scp -r $p $target"
     } else {
-        Copy-Item -Path $src -Destination $dst -Force
+        Write-Host "scp -r $rel ..." -ForegroundColor Yellow
+        # Trailing /. merges into existing remote dir (preserves scripts/linux/ layout).
+        scp -r "$p/." $target/
     }
 }
 
-Write-Host ""
-Write-Host "Done. output/ was NOT synced (jobs/odb stay on server)." -ForegroundColor Green
+if (-not $DryRun) {
+    ssh $HuBaiRemoteHost "test -f '$HuBaiRemoteRoot/scripts/linux/check_submit_resources.sh' && test -f '$HuBaiRemoteRoot/scripts/linux/hubai_env.sh' && echo 'remote OK: scripts/linux present'"
+}
+
+Write-Host "Done." -ForegroundColor Green

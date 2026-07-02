@@ -80,7 +80,7 @@ function Ensure-BccFastExport {
         stroke = "full"
         stroke_tag = "f"
         structure = "BCC_AF2Q0"
-        reference = "Hu & Bai 2024 â€” CAD solid (STEP/X_T) explicit compression"
+        reference = "Hu & Bai 2024 â€?CAD solid (STEP/X_T) explicit compression"
         figure_target = "Fig. 3.3 compressive stress-strain (solid C3D4 mesh)"
         export_dir = $fastExport
         job_dir = Join-Path $Root "output\jobs\$fastSlug"

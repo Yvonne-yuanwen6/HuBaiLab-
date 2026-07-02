@@ -74,6 +74,37 @@ def _refresh_live_volumes(dimtags: list[tuple[int, int]]) -> list[tuple[int, int
     return [d for d in dimtags if d in live]
 
 
+def _unify_live_volumes_to_one(*, progress_label: str = "unify") -> None:
+    """Fuse every live 3D volume in the current model down to one solid."""
+    from src.export.export_sw import (
+        _occ_fuse_sequential,
+        _occ_list_volume_dimtags,
+        _occ_remove_all_volumes_except,
+    )
+    from src.mesh.occ_pipe import prune_occ_for_step_export
+
+    live = _refresh_live_volumes(_occ_list_volume_dimtags())
+    if len(live) <= 1:
+        if len(live) == 1:
+            _occ_remove_all_volumes_except(live[0])
+        return
+    print(
+        f"  {progress_label}: unify {len(live)} residual volume(s)...",
+        flush=True,
+    )
+    united = _occ_fuse_sequential(
+        live,
+        progress_label=f"{progress_label}-sequential",
+        restrict_cleanup=True,
+    )
+    prune_occ_for_step_export()
+    if len(united) != 1:
+        raise RuntimeError(
+            f"{progress_label}: unify produced {len(united)} volume(s), expected 1"
+        )
+    _occ_remove_all_volumes_except(united[0])
+
+
 def _fuse_occ_layer_volumes_safe(
     dimtags: list[tuple[int, int]],
     *,
@@ -142,23 +173,49 @@ def _fuse_unitcell_array_inter_cell_safe(
     nx: int,
     ny: int,
     nz: int,
+    volumes_per_cell: int = 1,
     progress_label: str = "inter-cell",
 ) -> None:
     from src.mesh.occ_pipe import prune_occ_for_step_export
     from src.export.export_sw import _occ_fuse_dimtags, _occ_primary_volume
 
+    vpc = max(1, int(volumes_per_cell))
+    nx_i, ny_i, nz_i = int(nx), int(ny), int(nz)
+    n_spatial = nx_i * ny_i * nz_i
     n = len(cell_volumes)
     if n <= 1:
         return
 
-    nx_i, ny_i, nz_i = int(nx), int(ny), int(nz)
+    if vpc > 1 and n == n_spatial * vpc:
+        print(
+            f"  {progress_label}: intra-cell fuse {n_spatial} cell(s), "
+            f"{vpc} volume(s)/cell...",
+            flush=True,
+        )
+        fused_cells: list[tuple[int, int]] = []
+        for ic in range(n_spatial):
+            chunk = cell_volumes[ic * vpc : (ic + 1) * vpc]
+            if len(chunk) == 1:
+                fused_cells.append(chunk[0])
+                continue
+            fused = _fuse_occ_layer_volumes_safe(
+                chunk,
+                progress_label=f"{progress_label}-cell{ic}",
+            )
+            prune_occ_for_step_export()
+            fused_cells.append(_occ_primary_volume(fused))
+        cell_volumes = fused_cells
+        n = len(cell_volumes)
+
     if nx_i * ny_i * nz_i != n:
         print(f"  {progress_label}: batch fuse {n} volume(s)...", flush=True)
         _occ_fuse_dimtags(cell_volumes)
+        _unify_live_volumes_to_one(progress_label=f"{progress_label}-unify")
         return
 
     if n <= 4:
         _fuse_occ_layer_volumes_safe(cell_volumes, progress_label=progress_label)
+        _unify_live_volumes_to_one(progress_label=f"{progress_label}-unify")
         return
 
     block_nx = min(2, nx_i)
@@ -207,6 +264,7 @@ def _fuse_unitcell_array_inter_cell_safe(
             slab_vols.append(_occ_primary_volume(fused_slab))
 
     if len(slab_vols) <= 1:
+        _unify_live_volumes_to_one(progress_label=f"{progress_label}-unify")
         return
 
     print(
@@ -214,6 +272,7 @@ def _fuse_unitcell_array_inter_cell_safe(
         flush=True,
     )
     _fuse_occ_layer_volumes_safe(slab_vols, progress_label=f"{progress_label}-slab")
+    _unify_live_volumes_to_one(progress_label=f"{progress_label}-unify")
 
 
 def export_lattice_step_occ_unitcell_array_auto(
@@ -244,6 +303,7 @@ def export_lattice_step_occ_unitcell_array_auto(
         _occ_dimtags_from_parts,
         _occ_fuse_unitcell_solid_for_array,
         _occ_imported_volume_bbox,
+        _postprocess_written_step,
     )
     from src.mesh.occ_pipe import prune_occ_for_step_export
 
@@ -357,6 +417,9 @@ def export_lattice_step_occ_unitcell_array_auto(
         xmin, ymin, zmin, xmax, ymax, zmax = _occ_imported_volume_bbox()
     finally:
         gmsh.finalize()
+
+    step_report = _postprocess_written_step(path, step_report, fused_single=True)
+    fused_volume_count = int(step_report.get("solid_count", fused_volume_count))
 
     pipe_count = sum(1 for k, *_ in parts if k == "pipe")
     return {

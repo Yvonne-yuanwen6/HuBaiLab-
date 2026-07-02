@@ -1,4 +1,4 @@
-# Hu & Bai 4x4x4 â€” verified SolidWorks stepwise pipeline (BCC Q=0, SFBLS Q=0.5/1/1.5).
+# Hu & Bai 4x4x4 â€?verified SolidWorks stepwise pipeline (BCC Q=0, SFBLS Q=0.5/1/1.5).
 #
 # Proven route: 16-body iz0 compound -> SW fuse 1 body -> Z-copy ->
 # 4-body compound -> SW fuse 1 body -> verified merged -> fast80.

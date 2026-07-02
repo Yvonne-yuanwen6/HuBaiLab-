@@ -11,7 +11,8 @@ Environment (optional):
   HU_BAI_PART_NAME         Part name in CAE (default: LATTICE)
   HU_BAI_MERGE_SOLIDS      1/true to combine+mergeSolidRegions on import
   HU_BAI_MESH_MODE         hex (default) or tet (C3D4 free mesh)
-  HU_BAI_MESH_QUALITY      fast | lattice | lattice_contact | paper
+  HU_BAI_MESH_QUALITY      fast | lattice | lattice_contact | lattice_curve | paper
+  (tet free mesh: allowMapped=ON on boundary quads when CAE supports it)
   HU_BAI_ROD_DIAMETER      strut diameter mm (default: 2.0)
   HU_BAI_RODS_PER_DIAMETER target elems across rod diameter (default: 3.0)
   HU_BAI_SURFACE_SEED_FACTOR  face seed = global * factor (lattice_contact)
@@ -55,6 +56,7 @@ MESH_QUALITY = os.environ.get(
     "HU_BAI_MESH_QUALITY",
     "lattice_contact" if MESH_MODE == "tet" else "fast",
 ).lower()
+ELEM_TYPE = os.environ.get("HU_BAI_ELEM_TYPE", "C3D4").upper()
 
 
 def _env_float(name, default):
@@ -67,6 +69,11 @@ def _env_float(name, default):
 ROD_DIAMETER_MM = float(os.environ.get("HU_BAI_ROD_DIAMETER", "2.0"))
 RODS_PER_DIAMETER = float(os.environ.get("HU_BAI_RODS_PER_DIAMETER", "3.0"))
 VIRTUAL_TOPOLOGY = os.environ.get("HU_BAI_VIRTUAL_TOPOLOGY", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+SEED_PART_ONLY = os.environ.get("HU_BAI_SEED_PART_ONLY", "").lower() in (
     "1",
     "true",
     "yes",
@@ -113,8 +120,23 @@ QUALITY_PRESETS = {
         fine_edge_ratio=0.40,
         short_edge_ratio=6.0,
         all_edge_seeds=False,
+        force_rod_edge_seeds=False,
         min_transition=False,
         size_growth=1.12,
+    ),
+    # SFBLS curved struts: enforce d/N edge seeds on all strut edges + surface refine.
+    "lattice_curve": dict(
+        deviation=0.08,
+        min_size=0.50,
+        surface_faces=True,
+        surface_factor=0.60,
+        short_edge_seeds=True,
+        fine_edge_ratio=0.40,
+        short_edge_ratio=6.0,
+        all_edge_seeds=False,
+        force_rod_edge_seeds=True,
+        min_transition=True,
+        size_growth=1.08,
     ),
     "paper": dict(
         deviation=0.06,
@@ -126,6 +148,15 @@ QUALITY_PRESETS = {
         all_edge_seeds=False,
         min_transition=True,
         size_growth=1.10,
+    ),
+    # When junction edge seeding causes 0-element meshes on fragile BREP.
+    "coarse": dict(
+        deviation=0.12,
+        min_size=0.20,
+        surface_faces=False,
+        short_edge_seeds=False,
+        all_edge_seeds=False,
+        min_transition=False,
     ),
 }
 
@@ -281,14 +312,20 @@ def _edge_lengths(part_obj):
     return lengths
 
 
-def _is_c3d4_element(el):
+def _is_linear_tet_element(el):
+    """C3D4 or C3D10M (corner nodes 0..3 used for aspect ratio)."""
     try:
         code = el.type
-        if code == C3D4:
+        if code in (C3D4, C3D10M):
             return True
     except Exception:
         pass
-    return "C3D4" in str(getattr(el, "type", ""))
+    t = str(getattr(el, "type", ""))
+    return "C3D4" in t or "C3D10" in t
+
+
+def _is_c3d4_element(el):
+    return _is_linear_tet_element(el)
 
 
 def _seed_face_by_size(part_obj, face_size, deviation, min_size):
@@ -377,6 +414,9 @@ def apply_seeds(part_obj):
             % (ls[0], ls[len(ls) // 2], ls[int(0.95 * (len(ls) - 1))], ls[-1], len(ls))
         )
 
+    if SEED_PART_ONLY:
+        log("seedPart only (skip junction/surface/all-edge seeds)")
+        return
     if preset.get("surface_faces") and len(part_obj.faces):
         face_factor = _env_float(
             "HU_BAI_SURFACE_SEED_FACTOR",
@@ -391,31 +431,56 @@ def apply_seeds(part_obj):
             )
 
     seed_junction_edges(part_obj, preset, deviation, min_size)
+    seed_rod_diameter_edges(part_obj, preset, deviation, min_size)
 
-    if preset.get("all_edge_seeds") and ROD_DIAMETER_MM > 0 and RODS_PER_DIAMETER > 0:
-        rod_edge_size = min(SEED_MM, ROD_DIAMETER_MM / max(RODS_PER_DIAMETER, 1.0))
-        elems_across_rod = ROD_DIAMETER_MM / SEED_MM if SEED_MM > 0 else 0.0
-        if rod_edge_size < SEED_MM * 0.95 and elems_across_rod < RODS_PER_DIAMETER - 0.25:
-            _seed_edges_by_size(
-                part_obj, part_obj.edges, rod_edge_size, deviation, min_size
+
+def seed_rod_diameter_edges(part_obj, preset, deviation, min_size):
+    """Seed strut edges at d/N so curved SFBLS arcs resolve bending (mesh convergence / lattice_curve)."""
+    if ROD_DIAMETER_MM <= 0 or RODS_PER_DIAMETER <= 0:
+        return
+    if not preset.get("force_rod_edge_seeds") and not preset.get("all_edge_seeds"):
+        return
+
+    rod_edge_size = ROD_DIAMETER_MM / max(RODS_PER_DIAMETER, 1.0)
+    elems_across_rod = ROD_DIAMETER_MM / SEED_MM if SEED_MM > 0 else 0.0
+
+    if preset.get("force_rod_edge_seeds"):
+        _seed_edges_by_size(part_obj, part_obj.edges, rod_edge_size, deviation, min_size)
+        log(
+            "curve rod edge seeds (forced): edges=%d size=%.4g mm (d=%.3g N=%.2f ~%.2f/seed)"
+            % (
+                len(part_obj.edges),
+                rod_edge_size,
+                ROD_DIAMETER_MM,
+                RODS_PER_DIAMETER,
+                elems_across_rod,
             )
-            log(
-                "seedEdgeBySize all edges=%d size=%.4g mm"
-                % (len(part_obj.edges), rod_edge_size)
-            )
-        else:
-            log(
-                "skip all-edge seeds: ~%.2f elems/rod (target %.2f)"
-                % (elems_across_rod, RODS_PER_DIAMETER)
-            )
+        )
+        return
+
+    rod_edge_size = min(SEED_MM, rod_edge_size)
+    if rod_edge_size < SEED_MM * 0.95 and elems_across_rod < RODS_PER_DIAMETER - 0.25:
+        _seed_edges_by_size(part_obj, part_obj.edges, rod_edge_size, deviation, min_size)
+        log(
+            "seedEdgeBySize all edges=%d size=%.4g mm"
+            % (len(part_obj.edges), rod_edge_size)
+        )
+    else:
+        log(
+            "skip all-edge seeds: ~%.2f elems/rod (target %.2f)"
+            % (elems_across_rod, RODS_PER_DIAMETER)
+        )
+
+
+def _tet_mesh_control_base(part_obj, algorithm=None):
+    base = dict(regions=part_obj.cells, elemShape=TET, technique=FREE)
+    if algorithm == ADVANCING_FRONT:
+        base["algorithm"] = ADVANCING_FRONT
+    return base
 
 
 def set_tet_mesh_controls(part_obj, algorithm=None):
     preset, _, _ = _quality_params()
-    base = dict(regions=part_obj.cells, elemShape=TET, technique=FREE)
-    if algorithm == ADVANCING_FRONT:
-        base["algorithm"] = ADVANCING_FRONT
-    extras = ()
     if preset.get("min_transition"):
         growth = preset.get("size_growth", 1.12)
         extras = (
@@ -425,15 +490,23 @@ def set_tet_mesh_controls(part_obj, algorithm=None):
         )
     else:
         extras = ({},)
-    for extra in extras:
-        try:
-            part_obj.setMeshControls(**dict(base, **extra))
-            if extra:
-                log("setMeshControls extras: %s" % extra)
-            return
-        except TypeError:
+
+    for allow_mapped, tag in ((ON, "ON"), (OFF, "OFF (fallback)")):
+        base = _tet_mesh_control_base(part_obj, algorithm=algorithm)
+        if allow_mapped:
+            base["allowMapped"] = ON
+        for extra in extras:
+            try:
+                part_obj.setMeshControls(**dict(base, **extra))
+                log("setMeshControls allowMapped=%s%s" % (tag, (" extras=%s" % extra if extra else "")))
+                return
+            except TypeError:
+                continue
+        if allow_mapped:
             continue
-    part_obj.setMeshControls(**base)
+        part_obj.setMeshControls(**base)
+        log("setMeshControls allowMapped=%s (minimal)" % tag)
+        return
 
 
 def node_coord_map(part_obj):
@@ -494,7 +567,7 @@ def log_mesh_quality(part_obj, sample_limit=120000):
         if n_sampled >= sample_limit:
             break
     if not aspects:
-        log("mesh quality: no C3D4 elements sampled")
+        log("mesh quality: no tet elements sampled")
         return
     aspects.sort()
     p50 = aspects[len(aspects) // 2]
@@ -572,7 +645,12 @@ best_score = 1.0e18
 best_label = ""
 
 if MESH_MODE == "tet":
-    elem_type_tet = mesh.ElemType(elemCode=C3D4, elemLibrary=STANDARD)
+    if ELEM_TYPE == "C3D10M":
+        elem_type_tet = mesh.ElemType(elemCode=C3D10M, elemLibrary=STANDARD)
+    elif ELEM_TYPE == "C3D10":
+        elem_type_tet = mesh.ElemType(elemCode=C3D10, elemLibrary=STANDARD)
+    else:
+        elem_type_tet = mesh.ElemType(elemCode=C3D4, elemLibrary=STANDARD)
     p.setElementType(regions=(p.cells,), elemTypes=(elem_type_tet,))
 
     tet_attempts = (
@@ -582,7 +660,10 @@ if MESH_MODE == "tet":
             lambda: set_tet_mesh_controls(p, algorithm=ADVANCING_FRONT),
         ),
     )
-    compare_algorithms = MESH_QUALITY in ("lattice_contact", "paper")
+    compare_algorithms = (
+        MESH_QUALITY in ("lattice_contact", "lattice_curve", "paper")
+        and ELEM_TYPE not in ("C3D10M", "C3D10")
+    )
     for label, setup in tet_attempts:
         ok, info = try_mesh(p, label, setup)
         if not ok:
@@ -602,7 +683,7 @@ if MESH_MODE == "tet":
         except Exception:
             pass
 
-    if mesh_ok and best_label != tet_attempts[-1][0]:
+    if compare_algorithms and mesh_ok and best_label != tet_attempts[-1][0]:
         for label, setup in tet_attempts:
             if label == best_label:
                 ok, info = try_mesh(p, label, setup)
@@ -679,5 +760,31 @@ with open(src_inp, "rb") as f_in:
     data = f_in.read()
 with open(OUT_INP, "wb") as f_out:
     f_out.write(data)
+
+manifest_path = os.path.splitext(OUT_INP)[0] + "_cae_mesh_manifest.json"
+try:
+    import json
+
+    manifest = {
+        "inp": OUT_INP.replace("\\", "/"),
+        "step": STEP_PATH.replace("\\", "/"),
+        "mesh_mode": MESH_MODE,
+        "mesh_quality": MESH_QUALITY,
+        "seed_mm": SEED_MM,
+        "rod_diameter_mm": ROD_DIAMETER_MM,
+        "rods_per_diameter": RODS_PER_DIAMETER,
+        "virtual_topology": VIRTUAL_TOPOLOGY,
+        "mesh_technique": mesh_label,
+        "element_type": ELEM_TYPE,
+        "node_count": len(p.nodes),
+        "element_count": len(p.elements),
+        "log": LOG_PATH.replace("\\", "/"),
+    }
+    with open(manifest_path, "w") as mf:
+        json.dump(manifest, mf, indent=2)
+        mf.write("\n")
+    print("Wrote manifest:", manifest_path)
+except Exception as exc:
+    log("WARN manifest write failed: %s" % exc)
 
 print("Wrote:", OUT_INP)

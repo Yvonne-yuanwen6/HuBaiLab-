@@ -1,7 +1,7 @@
 # Poll server until all four autodt jobs COMPLETED, then post-process and plot.
 param(
     [string]$Server = "art@172.20.200.93",
-    [string]$Remote = "/home/art/Documents/Lattice/LWY/HuBaiLab",
+    [string]$Remote = "/media/art/file/XiangLang/Lattice/LWY/HuBaiLab",
     [int]$PollSeconds = 120
 )
 
@@ -35,5 +35,5 @@ while ($true) {
     Start-Sleep -Seconds $PollSeconds
 }
 
-Write-Host "=== All complete â€” post-process ===" -ForegroundColor Cyan
+Write-Host "=== All complete â€?post-process ===" -ForegroundColor Cyan
 & "$PSScriptRoot\postpull_voxel0p8mm80_autodt_batch.ps1"

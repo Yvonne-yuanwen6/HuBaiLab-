@@ -24,6 +24,8 @@ def hu_bai_lattice_slug(
 def verified_solid_step_filenames(slug_base: str) -> tuple[str, ...]:
     """Preferred STEP filenames under ``output/cad/verified/``."""
     return (
+        f"{slug_base}_paper_box_array.step",
+        f"{slug_base}_paper_box_array.STEP",
         f"{slug_base}_solid_array.step",
         f"{slug_base}_solid_array.STEP",
         f"{slug_base}_solid_merged.step",

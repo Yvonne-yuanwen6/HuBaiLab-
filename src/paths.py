@@ -18,6 +18,10 @@ CAD_VERIFIED_ROOT = CAD_ROOT / "verified"
 PREVIEWS_ROOT = OUTPUT_ROOT / "previews"
 REPORTS_ROOT = OUTPUT_ROOT / "reports"
 
+# Linux workstation (art@172.20.200.93) — mechanical disk mount
+HUBAI_REMOTE_HOST = "art@172.20.200.93"
+HUBAI_REMOTE_ROOT = "/media/art/file/XiangLang/Lattice/LWY/HuBaiLab"
+
 
 def export_dir_for_slug(slug: str) -> Path:
     return EXPORT_ROOT / slug

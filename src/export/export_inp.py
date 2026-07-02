@@ -34,6 +34,66 @@ def geom_tag_for_generator(gen, *, nx: int = 3, ny: int = 3, nz: int = 3) -> str
     """Geometry tag embedded in INP Heading (matches case slug without stroke)."""
     return build_geometry_tag(gen, nx=nx, ny=ny, nz=nz)
 
+
+def _write_tpu_material(
+    f,
+    *,
+    material_name: str,
+    density: float,
+    material_model: str,
+    elastic_e: float,
+    elastic_nu: float,
+    plastic_yield: float | None,
+    c10: float,
+    tpu_d1: float,
+    uniaxial_test_data: list[tuple[float, float]] | None = None,
+) -> None:
+    """Write TPU *Material block (elastic / Neo-Hooke / Marlow+test data)."""
+    mat = str(material_model).lower()
+    f.write(f"*Material, name={material_name}\n*Density\n{density}\n")
+    if mat == "elastic":
+        f.write(f"*Elastic\n{float(elastic_e)}, {float(elastic_nu)}\n")
+        if plastic_yield is not None and float(plastic_yield) > 0.0:
+            f.write(f"*Plastic\n{float(plastic_yield)}, 0.\n")
+    elif mat in ("marlow", "hyperelastic_marlow", "hyperelastic_testdata"):
+        data = list(uniaxial_test_data or [])
+        if len(data) < 3:
+            raise ValueError("marlow material requires >=3 uniaxial test data points")
+        f.write("*Hyperelastic, marlow\n")
+        f.write("*Uniaxial Test Data\n")
+        for e, s in data:
+            f.write(f"{float(e)}, {float(s)}\n")
+    elif mat in ("polynomial", "hyperelastic_polynomial", "hyperelastic_testdata_polynomial"):
+        data = list(uniaxial_test_data or [])
+        if len(data) < 3:
+            raise ValueError("polynomial material requires >=3 uniaxial test data points")
+        # CAE: Polynomial order 1 + test data → Abaqus fits Mooney-Rivlin from data.
+        # *Uniaxial Test Data: nominal stress (MPa), nominal strain.
+        f.write(f"*Hyperelastic, test data input, poisson={float(elastic_nu)}\n")
+        f.write("*Uniaxial Test Data\n")
+        for e, s in data:
+            f.write(f"{float(s)}, {float(e)}\n")
+    elif mat in ("ogden", "ogden_n1", "ogden_n2", "ogden_n3", "hyperelastic_ogden"):
+        data = list(uniaxial_test_data or [])
+        if len(data) < 3:
+            raise ValueError("ogden material requires >=3 uniaxial test data points")
+        n_map = {"ogden": 2, "ogden_n1": 1, "ogden_n2": 2, "ogden_n3": 3, "hyperelastic_ogden": 2}
+        n = n_map.get(mat, 2)
+        f.write(f"*Hyperelastic, OGDEN, N={n}, TEST DATA INPUT, POISSON={float(elastic_nu)}\n")
+        f.write("*Uniaxial Test Data\n")
+        for e, s in data:
+            f.write(f"{float(s)}, {float(e)}\n")
+    elif mat in ("reduced_polynomial", "reduced_poly_n2", "yeoh", "hyperelastic_yeoh"):
+        data = list(uniaxial_test_data or [])
+        if len(data) < 3:
+            raise ValueError("reduced_polynomial material requires >=3 uniaxial test data points")
+        f.write(f"*Hyperelastic, REDUCED POLYNOMIAL, N=2, TEST DATA INPUT, POISSON={float(elastic_nu)}\n")
+        f.write("*Uniaxial Test Data\n")
+        for e, s in data:
+            f.write(f"{float(s)}, {float(e)}\n")
+    else:
+        f.write(f"*Hyperelastic, neo Hooke\n{c10}, {tpu_d1}\n")
+
 # Default Neo-Hookean constants for TPU (Pa). Calibrate from tensile tests.
 # Neo-Hooke C10，单位与模型一致（mm–N–MPa 时约为 0.1~2 MPa 量级软 TPU）
 DEFAULT_TPU_C10 = 0.5
@@ -127,6 +187,7 @@ def export_inp_c3d4(
     elastic_e: float = 1250.0,
     elastic_nu: float = 0.3,
     plastic_yield: float | None = None,
+    uniaxial_test_data: list[tuple[float, float]] | None = None,
     material_name: str = "TPU",
     compression: CompressionSettings | None = None,
     include_wireframe: bool = True,
@@ -157,6 +218,11 @@ def export_inp_c3d4(
     elif elem_key in ("C3D4", "C3D4R"):
         mesh_fn = mesh_beams_c3d4
         abq_elem = "C3D4"
+        collect_top_faces = collect_c3d4_top_element_faces
+        collect_bottom_faces = collect_c3d4_bottom_element_faces
+    elif elem_key in ("C3D10M", "C3D10"):
+        mesh_fn = mesh_beams_c3d4
+        abq_elem = elem_key
         collect_top_faces = collect_c3d4_top_element_faces
         collect_bottom_faces = collect_c3d4_bottom_element_faces
     else:
@@ -237,36 +303,31 @@ def export_inp_c3d4(
         xmin, xmax, ymin, ymax, zmin, zmax = lattice_bounds(nodes)
         mesh_z_min = min(z for _, _, _, z in mesh_nodes)
         mesh_z_max = max(z for _, _, _, z in mesh_nodes)
-        x0, x1, y0, y1 = compute_plate_xy_extent(mesh_nodes, compression)
         half_thk = compression.plate_thickness / 2.0
         bottom_up = compression.is_bottom_up()
+        fixed_tol = compression.resolved_fixed_tol()
+        z_plate = mesh_z_max
+
         if bottom_up:
+            x0, x1, y0, y1 = compute_plate_xy_extent(mesh_nodes, compression)
             z_plate = compute_loading_plate_z(
                 mesh_z_min, half_thk=half_thk, settings=compression, bottom_up=True
             )
-        else:
-            z_plate = compute_loading_plate_z(
-                mesh_z_max, half_thk=half_thk, settings=compression, bottom_up=False
+            plate_nodes, plate_elements, plate_node_ids = build_plate_mesh(
+                x0,
+                x1,
+                y0,
+                y1,
+                z_plate,
+                compression.plate_divisions[0],
+                compression.plate_divisions[1],
+                node_id_start=plate_node_start,
+                elem_id_start=max_eid + len(wire_eids) + 1,
             )
-
-        plate_nodes, plate_elements, plate_node_ids = build_plate_mesh(
-            x0,
-            x1,
-            y0,
-            y1,
-            z_plate,
-            compression.plate_divisions[0],
-            compression.plate_divisions[1],
-            node_id_start=plate_node_start,
-            elem_id_start=max_eid + len(wire_eids) + 1,
-        )
-        ref_node_id = (plate_nodes[-1][0] + 1 if plate_nodes else plate_node_start)
-        cx = 0.5 * (x0 + x1)
-        cy = 0.5 * (y0 + y1)
-        ref_node = (ref_node_id, cx, cy, z_plate)
-
-        fixed_tol = compression.resolved_fixed_tol()
-        if bottom_up:
+            ref_node_id = (plate_nodes[-1][0] + 1 if plate_nodes else plate_node_start)
+            cx = 0.5 * (x0 + x1)
+            cy = 0.5 * (y0 + y1)
+            ref_node = (ref_node_id, cx, cy, z_plate)
             z_band_faces = compression.resolved_load_surface_z_band()
             lattice_load_faces = collect_bottom_faces(
                 mesh_nodes,
@@ -303,12 +364,30 @@ def export_inp_c3d4(
                     else counter_node_start
                 )
                 counter_ref_node = (counter_ref_node_id, cx, cy, z_counter)
-                # 与无顶板时的 TOP_FIX 相同：仅最顶薄层节点，勿用宽 z_band
                 counter_lattice_node_ids = collect_top_node_ids(mesh_nodes, fixed_tol)
                 fixed_node_ids = counter_lattice_node_ids
             else:
                 fixed_node_ids = collect_top_node_ids(mesh_nodes, fixed_tol)
         else:
+            x0, x1, y0, y1 = compute_plate_xy_extent(mesh_nodes, compression)
+            z_plate = compute_loading_plate_z(
+                mesh_z_max, half_thk=half_thk, settings=compression, bottom_up=False
+            )
+            plate_nodes, plate_elements, plate_node_ids = build_plate_mesh(
+                x0,
+                x1,
+                y0,
+                y1,
+                z_plate,
+                compression.plate_divisions[0],
+                compression.plate_divisions[1],
+                node_id_start=plate_node_start,
+                elem_id_start=max_eid + len(wire_eids) + 1,
+            )
+            ref_node_id = (plate_nodes[-1][0] + 1 if plate_nodes else plate_node_start)
+            cx = 0.5 * (x0 + x1)
+            cy = 0.5 * (y0 + y1)
+            ref_node = (ref_node_id, cx, cy, z_plate)
             use_fixed_bottom_plate = compression.use_fixed_bottom_plate()
             if use_fixed_bottom_plate:
                 z_fixed = compute_passive_plate_z(
@@ -440,8 +519,14 @@ def export_inp_c3d4(
                 eid = row[0]
                 n1, n2, n3, n4, n5, n6, n7, n8 = row[1:9]
                 f.write(f"{eid}, {n1}, {n2}, {n3}, {n4}, {n5}, {n6}, {n7}, {n8}\n")
+        elif abq_elem in ("C3D10M", "C3D10"):
+            for row in mesh_elements:
+                eid = row[0]
+                nids = ", ".join(str(int(n)) for n in row[1:11])
+                f.write(f"{eid}, {nids}\n")
         else:
-            for eid, n1, n2, n3, n4 in mesh_elements:
+            for row in mesh_elements:
+                eid, n1, n2, n3, n4 = row[0], row[1], row[2], row[3], row[4]
                 f.write(f"{eid}, {n1}, {n2}, {n3}, {n4}\n")
 
         if wire_elements:
@@ -474,14 +559,18 @@ def export_inp_c3d4(
         if compression is not None:
             tpu_d1 = compression.tpu_d1
 
-        mat = str(material_model).lower()
-        f.write(f"*Material, name={material_name}\n*Density\n{density}\n")
-        if mat == "elastic":
-            f.write(f"*Elastic\n{float(elastic_e)}, {float(elastic_nu)}\n")
-            if plastic_yield is not None and float(plastic_yield) > 0.0:
-                f.write(f"*Plastic\n{float(plastic_yield)}, 0.\n")
-        else:
-            f.write(f"*Hyperelastic, neo Hooke\n{c10}, {tpu_d1}\n")
+        _write_tpu_material(
+            f,
+            material_name=material_name,
+            density=density,
+            material_model=material_model,
+            elastic_e=elastic_e,
+            elastic_nu=elastic_nu,
+            plastic_yield=plastic_yield,
+            c10=c10,
+            tpu_d1=tpu_d1,
+            uniaxial_test_data=uniaxial_test_data,
+        )
         f.write(f"*Solid Section, elset=ALLSOLID, material={material_name}\n")
 
         if wire_eids:
@@ -573,7 +662,7 @@ def export_inp(
     if element_type.upper() == "B31":
         export_inp_b31(nodes, beams, path)
         return None
-    if element_type.upper() in ("C3D4", "C3D4R", "C3D8R", "C3D8"):
+    if element_type.upper() in ("C3D4", "C3D4R", "C3D8R", "C3D8", "C3D10", "C3D10M"):
         return export_inp_c3d4(
             nodes,
             beams,

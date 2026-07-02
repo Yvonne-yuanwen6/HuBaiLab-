@@ -439,6 +439,10 @@ def _collect_solid_primitives(
     trim_for_junctions: bool | None = None,
     polyline_sweep: str = "cylinder",
     polyline_endpoints_only: bool = False,
+    solid_profile: str = "circle",
+    ellipse_minor_ratio: float = 0.6,
+    compression_axis: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    ellipse_align_to_compression: str = "minor",
 ) -> tuple[dict[int, np.ndarray], list[tuple[str, tuple, float]]]:
     """
     Return node lookup and analytic primitives.
@@ -474,6 +478,10 @@ def _collect_solid_primitives(
             if center is not None and radius > 0.0:
                 parts.append(("sphere", tuple(center), float(radius)))
 
+    profile = str(solid_profile).strip().lower()
+    if profile not in ("circle", "ellipse"):
+        raise ValueError(f"unknown solid_profile: {solid_profile!r}")
+
     for _bid, n1, n2, radius, btype in beams:
         if str(btype) in SOLID_SKIP_BEAM_TYPES:
             continue
@@ -490,7 +498,22 @@ def _collect_solid_primitives(
             if trimmed is None:
                 continue
             p1, p2 = trimmed
-        parts.append(("cylinder", tuple(p1), tuple(p2), r))
+        if profile == "ellipse":
+            r_major = float(r)
+            r_minor = float(r) * float(ellipse_minor_ratio)
+            parts.append(
+                (
+                    "cylinder_ellipse",
+                    tuple(p1),
+                    tuple(p2),
+                    r_major,
+                    r_minor,
+                    tuple(compression_axis),
+                    str(ellipse_align_to_compression),
+                )
+            )
+        else:
+            parts.append(("cylinder", tuple(p1), tuple(p2), r))
 
     if polylines:
         for poly in polylines:
@@ -504,7 +527,21 @@ def _collect_solid_primitives(
                 if len(node_ids) < 2:
                     continue
                 path = tuple(tuple(lookup[nid]) for nid in node_ids)
-                parts.append(("pipe", path, r))
+                if profile == "ellipse":
+                    r_major = float(r)
+                    r_minor = float(r) * float(ellipse_minor_ratio)
+                    parts.append(
+                        (
+                            "pipe_ellipse",
+                            path,
+                            r_major,
+                            r_minor,
+                            tuple(compression_axis),
+                            str(ellipse_align_to_compression),
+                        )
+                    )
+                else:
+                    parts.append(("pipe", path, r))
                 continue
             for i in range(len(node_ids) - 1):
                 pa = lookup[node_ids[i]]
@@ -519,7 +556,22 @@ def _collect_solid_primitives(
                     if trimmed is None:
                         continue
                     pa, pb = trimmed
-                parts.append(("cylinder", tuple(pa), tuple(pb), r))
+                if profile == "ellipse":
+                    r_major = float(r)
+                    r_minor = float(r) * float(ellipse_minor_ratio)
+                    parts.append(
+                        (
+                            "cylinder_ellipse",
+                            tuple(pa),
+                            tuple(pb),
+                            r_major,
+                            r_minor,
+                            tuple(compression_axis),
+                            str(ellipse_align_to_compression),
+                        )
+                    )
+                else:
+                    parts.append(("cylinder", tuple(pa), tuple(pb), r))
 
     return lookup, parts
 
@@ -577,9 +629,22 @@ def _occ_dimtags_from_parts(
     parts: list[tuple[str, tuple, float]],
     *,
     tag_start: int | None = None,
+    pipe_centre_stub: bool = False,
+    pipe_open_centre: bool = False,
 ) -> list[tuple[int, int]]:
-    """Create OCC volume dimtags from analytic primitives (active gmsh model)."""
-    from src.mesh.occ_pipe import gmsh_pipe_along_points
+    """Create OCC volume dimtags from analytic primitives (active gmsh model).
+
+    ``pipe_open_centre=True`` omits the end cap at the cell-centre path start
+    (avoids oblique cap sliver after octant box cut; use for single-strut export).
+
+    ``pipe_centre_stub=True`` adds a chord cylinder at the centre plus open-start
+    pipe (clean cell-centre faces; stable with Q=1 octant sequential fuse).
+    """
+    from src.mesh.occ_pipe import (
+        gmsh_pipe_along_points,
+        gmsh_pipe_along_points_ellipse,
+        gmsh_pipe_with_cell_centre_stub,
+    )
 
     import gmsh
 
@@ -594,13 +659,64 @@ def _occ_dimtags_from_parts(
                     gmsh.model.occ.addSphere(cx, cy, cz, float(radius), tag=tag)
                 )
             )
-        elif kind == "pipe":
-            path_pts, radius = payload
+        elif kind in ("pipe", "pipe_ellipse"):
+            if kind == "pipe":
+                path_pts, radius = payload
+                r_major = float(radius)
+                r_minor = float(radius)
+                up = (0.0, 0.0, 1.0)
+            else:
+                path_pts, r_major, r_minor, up, align_mode = payload
             points = [np.asarray(p, dtype=float) for p in path_pts]
-            if len(points) < 2 or float(radius) <= 0.0:
+            if len(points) < 2 or float(r_major) <= 0.0 or float(r_minor) <= 0.0:
                 tag += 1
                 continue
-            vol_tag = gmsh_pipe_along_points(points, radius=float(radius))
+            if pipe_centre_stub:
+                # Centre-stub path is only used in Q=1 workflows (circular). Keep as-is.
+                vol_tag = gmsh_pipe_with_cell_centre_stub(points, radius=float(r_major))
+            elif pipe_open_centre:
+                if kind == "pipe_ellipse":
+                    vol_tag = gmsh_pipe_along_points_ellipse(
+                        points,
+                        r_major=float(r_major),
+                        r_minor=float(r_minor),
+                        up=tuple(up),
+                        align_up_to=str(align_mode),
+                        open_at_start=True,
+                    )
+                else:
+                    vol_tag = gmsh_pipe_along_points(
+                        points,
+                        radius=float(r_major),
+                        open_at_start=True,
+                    )
+            else:
+                if kind == "pipe_ellipse":
+                    vol_tag = gmsh_pipe_along_points_ellipse(
+                        points,
+                        r_major=float(r_major),
+                        r_minor=float(r_minor),
+                        up=tuple(up),
+                        align_up_to=str(align_mode),
+                    )
+                else:
+                    vol_tag = gmsh_pipe_along_points(points, radius=float(r_major))
+            dimtags.append((3, int(vol_tag)))
+        elif kind == "cylinder_ellipse":
+            p1, p2, r_major, r_minor, up, align_mode = payload
+            a = np.asarray(p1, dtype=float)
+            b = np.asarray(p2, dtype=float)
+            if float(r_major) <= 0.0 or float(r_minor) <= 0.0:
+                tag += 1
+                continue
+            vol_tag = gmsh_pipe_along_points_ellipse(
+                [a, b],
+                r_major=float(r_major),
+                r_minor=float(r_minor),
+                up=tuple(up),
+                align_up_to=str(align_mode),
+                smooth_wire=False,
+            )
             dimtags.append((3, int(vol_tag)))
         else:
             p1, p2, radius = payload
@@ -1416,12 +1532,14 @@ def _finalize_occ_step_write(
     *,
     fuse: bool,
     validate_step: bool = True,
+    max_flatten_bodies: int = 64,
 ) -> dict[str, int | bool | str]:
-    """Prune construction geometry, write STEP, validate SolidWorks safety."""
+    """Write STEP from current gmsh OCC model (call finalize_step_for_solidworks after gmsh.finalize)."""
     import gmsh
 
-    from src.export.sw_parasolid import analyze_step_for_solidworks
     from src.mesh.occ_pipe import prune_occ_for_step_export
+
+    del max_flatten_bodies  # used by _rewrite_and_analyze_fused_step after gmsh.finalize()
 
     # Prune removes 2D/1D/0D pipe construction geometry before STEP write.
     # Safe only after boolean fuse into one (or few) volumes — on unfused
@@ -1435,52 +1553,43 @@ def _finalize_occ_step_write(
 
     gmsh.write(path)
 
-    if not fuse:
-        import re
+    import re
 
-        with open(path, encoding="utf-8", errors="ignore") as fh:
-            text = fh.read()
-        n_products = len(re.findall(r"=\s*PRODUCT\s*\(", text))
-        n_solids = text.count("MANIFOLD_SOLID_BREP")
-        sw_safe = n_products <= n_volumes and n_solids == n_volumes
-        report: dict[str, int | bool | str] = {
-            "step_path": os.path.abspath(path),
-            "product_count": n_products,
-            "solid_count": n_solids,
-            "expected_volumes": n_volumes,
-            "solidworks_safe": sw_safe,
-        }
-        if not sw_safe:
-            report["problems"] = (
-                f"{n_products} STEP PRODUCT entries for {n_volumes} volume(s) — "
-                "orphan pipe construction geometry; open 03_individual/*.step one at a time"
-            )
-        return report
-
-    try:
-        return analyze_step_for_solidworks(
-            path,
-            expected_volumes=n_volumes,
-            fused_single=fuse,
-            require_advanced_brep=fuse,
+    with open(path, encoding="utf-8", errors="ignore") as fh:
+        text = fh.read()
+    n_products = len(re.findall(r"=\s*PRODUCT\s*\(", text))
+    n_solids = text.count("MANIFOLD_SOLID_BREP")
+    if not n_solids:
+        n_solids = text.count("BREP_WITH_VOIDS")
+    sw_safe = n_products <= 1 and (
+        (fuse and n_solids == 1) or (not fuse and n_products <= n_volumes and n_solids == n_volumes)
+    )
+    report: dict[str, int | bool | str] = {
+        "step_path": os.path.abspath(path),
+        "product_count": n_products,
+        "solid_count": n_solids,
+        "expected_volumes": n_volumes,
+        "solidworks_safe": sw_safe,
+        "fuse": fuse,
+    }
+    if not sw_safe:
+        report["problems"] = (
+            f"{n_products} STEP PRODUCT entries for {n_volumes} volume(s) — "
+            "will flatten after gmsh.finalize()"
         )
-    except RuntimeError as exc:
-        if validate_step:
-            raise
-        import re
+    if validate_step and fuse and not sw_safe:
+        from src.export.sw_parasolid import analyze_step_for_solidworks
 
-        with open(path, encoding="utf-8", errors="ignore") as fh:
-            text = fh.read()
-        n_products = len(re.findall(r"=\s*PRODUCT\s*\(", text))
-        n_solids = text.count("MANIFOLD_SOLID_BREP")
-        return {
-            "step_path": os.path.abspath(path),
-            "product_count": n_products,
-            "solid_count": n_solids,
-            "expected_volumes": n_volumes,
-            "solidworks_safe": False,
-            "validation_error": str(exc),
-        }
+        try:
+            return analyze_step_for_solidworks(
+                path,
+                expected_volumes=n_volumes,
+                fused_single=True,
+            )
+        except RuntimeError as exc:
+            report["solidworks_safe"] = False
+            report["validation_error"] = str(exc)
+    return report
 
 
 def export_lattice_step_occ(
@@ -1493,6 +1602,10 @@ def export_lattice_step_occ(
     fuse: bool = False,
     polyline_sweep: str | None = None,
     cell_size: float | None = None,
+    solid_profile: str = "circle",
+    ellipse_minor_ratio: float = 0.6,
+    compression_axis: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    ellipse_align_to_compression: str = "minor",
 ) -> dict[str, int | float | bool | str]:
     """
     Export analytic rod/sphere BREP as STEP via gmsh OpenCASCADE.
@@ -1525,6 +1638,10 @@ def export_lattice_step_occ(
         junction_spheres=use_junction,
         trim_for_junctions=trim_ends,
         polyline_sweep=polyline_sweep,
+        solid_profile=solid_profile,
+        ellipse_minor_ratio=ellipse_minor_ratio,
+        compression_axis=compression_axis,
+        ellipse_align_to_compression=ellipse_align_to_compression,
     )
     if not parts:
         raise ValueError("No solid primitives to export.")
@@ -1589,9 +1706,13 @@ def export_lattice_step_occ(
     finally:
         gmsh.finalize()
 
-    if fuse:
-        step_report = _rewrite_and_analyze_fused_step(path, prior=step_report)
-        fused_volume_count = int(step_report.get("solid_count", 0))
+    step_report = _postprocess_written_step(
+        path,
+        step_report,
+        fused_single=bool(fuse and int(step_report.get("expected_volumes", 1)) <= 1),
+        max_flatten_bodies=int(step_report.get("expected_volumes", 64)),
+    )
+    fused_volume_count = int(step_report.get("solid_count", fused_volume_count))
 
     pipe_count = sum(1 for k, *_ in parts if k == "pipe")
     return {
@@ -1608,6 +1729,24 @@ def export_lattice_step_occ(
         "polyline_count": len(polylines or []),
         "method": "gmsh_occ_pipe" if use_pipe and pipe_count else "gmsh_occ_step",
     }
+
+
+def _postprocess_written_step(
+    path: str,
+    step_report: dict[str, int | bool | str],
+    *,
+    fused_single: bool = True,
+    max_flatten_bodies: int = 64,
+) -> dict[str, int | bool | str]:
+    """Run after gmsh.finalize() on any STEP export path."""
+    exp = step_report.get("expected_volumes") or step_report.get("solid_count") or 1
+    return _rewrite_and_analyze_fused_step(
+        path,
+        prior=step_report,
+        expected_bodies=int(exp),
+        fused_single=fused_single,
+        max_flatten_bodies=max_flatten_bodies,
+    )
 
 
 def _lattice_cell_center_mm(index: int, count: int, cell_size: float) -> float:
@@ -1682,7 +1821,6 @@ def export_unitcell_array_from_seed(
     """
     import gmsh
 
-    from src.export.sw_parasolid import finalize_compound_step_for_solidworks
     from src.mesh.occ_pipe import prune_occ_for_step_export
 
     seed_step = os.path.abspath(seed_step)
@@ -1719,7 +1857,12 @@ def export_unitcell_array_from_seed(
         gmsh.model.occ.synchronize()
 
         if not fuse:
-            report = _finalize_occ_step_write(path, fuse=False, validate_step=False)
+            report = _finalize_occ_step_write(
+                path,
+                fuse=False,
+                validate_step=False,
+                max_flatten_bodies=int(compound_max_flatten),
+            )
             xmin, ymin, zmin, xmax, ymax, zmax = _occ_imported_volume_bbox()
             compound_pending = {
                 "report": report,
@@ -1779,12 +1922,13 @@ def export_unitcell_array_from_seed(
     if compound_pending is not None:
         report = dict(compound_pending["report"])
         xmin, ymin, zmin, xmax, ymax, zmax = compound_pending["bbox"]
-        flat = finalize_compound_step_for_solidworks(
+        report = _rewrite_and_analyze_fused_step(
             path,
+            prior=report,
             expected_bodies=n_cells,
+            fused_single=False,
             max_flatten_bodies=int(compound_max_flatten),
         )
-        report.update(flat)
         report["method"] = "unitcell_seed_compound"
         report["cell_count"] = n_cells
         report["bbox_mm"] = {
@@ -1950,6 +2094,9 @@ def export_lattice_step_occ_unitcell_array(
     finally:
         gmsh.finalize()
 
+    step_report = _postprocess_written_step(path, step_report, fused_single=True)
+    fused_volume_count = int(step_report.get("solid_count", fused_volume_count))
+
     pipe_count = sum(1 for k, *_ in parts if k == "pipe")
     return {
         "step_path": path,
@@ -2107,6 +2254,9 @@ def export_lattice_step_occ_row(
         xmin, ymin, zmin, xmax, ymax, zmax = _occ_imported_volume_bbox()
     finally:
         gmsh.finalize()
+
+    step_report = _postprocess_written_step(path, step_report, fused_single=True)
+    fused_volume_count = int(step_report.get("solid_count", fused_volume_count))
 
     pipe_count = sum(1 for k, *_ in parts if k == "pipe")
     return {
@@ -2273,6 +2423,9 @@ def export_lattice_step_occ_zslab(
         xmin, ymin, zmin, xmax, ymax, zmax = _occ_imported_volume_bbox()
     finally:
         gmsh.finalize()
+
+    step_report = _postprocess_written_step(path, step_report, fused_single=True)
+    fused_volume_count = int(step_report.get("solid_count", fused_volume_count))
 
     pipe_count = sum(1 for k, *_ in parts if k == "pipe")
     return {
@@ -2584,6 +2737,9 @@ def export_lattice_step_occ_block(
     finally:
         gmsh.finalize()
 
+    step_report = _postprocess_written_step(path, step_report, fused_single=True)
+    fused_volume_count = int(step_report.get("solid_count", fused_volume_count))
+
     pipe_count = sum(1 for k, *_ in parts if k == "pipe")
     return {
         "step_path": path,
@@ -2701,41 +2857,29 @@ def _rewrite_and_analyze_fused_step(
     path: str,
     *,
     prior: dict[str, int | bool | str] | None = None,
+    expected_bodies: int | None = None,
+    fused_single: bool = True,
+    max_flatten_bodies: int = 64,
 ) -> dict[str, int | bool | str]:
-    """Drop orphan STEP PRODUCTs after gmsh session is closed."""
-    _rewrite_step_file_for_solidworks(path)
-    from src.export.sw_parasolid import analyze_step_for_solidworks
+    """Post-process STEP after gmsh session is closed (one SolidWorks window)."""
+    from src.export.sw_parasolid import finalize_step_for_solidworks
 
     try:
-        return analyze_step_for_solidworks(path, fused_single=True)
+        return finalize_step_for_solidworks(
+            path,
+            expected_bodies=expected_bodies,
+            fused_single=fused_single,
+            max_flatten_bodies=max_flatten_bodies,
+        )
     except RuntimeError:
         return dict(prior or {})
 
 
 def _rewrite_step_file_for_solidworks(step_path: str) -> None:
     """Re-import fused STEP and export one PRODUCT (drops orphan construction)."""
-    import gmsh
+    from src.export.sw_parasolid import rewrite_step_drop_orphan_products
 
-    from src.export.sw_parasolid import count_step_products
-    from src.mesh.occ_pipe import prune_occ_for_step_export
-
-    step_path = os.path.abspath(step_path)
-    if count_step_products(step_path) <= 1:
-        return
-
-    tmp_path = f"{step_path}.__clean__.step"
-    gmsh.initialize()
-    try:
-        gmsh.option.setNumber("General.Terminal", 0)
-        gmsh.model.add("step_clean")
-        gmsh.model.occ.importShapes(step_path)
-        gmsh.model.occ.synchronize()
-        prune_occ_for_step_export()
-        gmsh.write(tmp_path)
-    finally:
-        gmsh.finalize()
-
-    os.replace(tmp_path, step_path)
+    rewrite_step_drop_orphan_products(step_path)
 
 
 def _merge_step_files_to_path(

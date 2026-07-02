@@ -1,22 +1,26 @@
 #!/usr/bin/env bash
-# Paper box 4×4×4 layered fuse: fuse iz=0, copy iz=1..3, merge.
-# Resumable — skips z-slabs that already exist on disk.
+# Paper box 4×4×4 layered fuse (default): iz=0 fuse → copy iz=1..3 → merge.
+# Resumable — skips outputs that already exist unless FORCE=1.
 #
 #   Q=1.0  bash scripts/linux/run_paper_box_layered_safe.sh
-#   Q=1.5  Q=1.5 bash scripts/linux/run_paper_box_layered_safe.sh
+#   Q=1.0  FORCE=1 bash scripts/linux/run_paper_box_layered_safe.sh
 set -euo pipefail
 
-ROOT="${ROOT:-/home/art/Documents/Lattice/LWY/HuBaiLab}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=hubai_env.sh
+. "$SCRIPT_DIR/hubai_env.sh"
+
+ROOT="${ROOT:-$HU_BAI_REMOTE_ROOT}"
 cd "$ROOT"
 export PYTHONPATH="$ROOT"
 
 MIN_FREE_GB="${MIN_FREE_GB:-80}"
 MAX_RSS_GB="${MAX_RSS_GB:-48}"
 STALL_SEC="${STALL_SEC:-7200}"
-TIMEOUT_LAYER_SEC="${TIMEOUT_LAYER_SEC:-10800}"   # 3 h iz=0 fuse
-TIMEOUT_MERGE_SEC="${TIMEOUT_MERGE_SEC:-14400}"  # 4 h inter-slab merge
+TIMEOUT_ALL_SEC="${TIMEOUT_ALL_SEC:-28800}"  # 8 h full pipeline
 NICE_LEVEL="${NICE_LEVEL:-10}"
 Q="${Q:-1.0}"
+FORCE="${FORCE:-0}"
 Q_TAG="${Q_TAG:-$(echo "$Q" | tr '.' 'p')}"
 ARRAY_DIR="${ARRAY_DIR:-$ROOT/output/cad/_paper_box_array_q${Q_TAG}}"
 LOG="${LOG:-$ROOT/output/logs/paperbox_layered_fuse_q${Q_TAG}.log}"
@@ -139,57 +143,29 @@ run_timed() {
 }
 
 main() {
-  log "=== paper box layered fuse Q=$Q ==="
-  log "caps: max_rss=${MAX_RSS_GB}G stall=${STALL_SEC}s layer_timeout=${TIMEOUT_LAYER_SEC}s merge_timeout=${TIMEOUT_MERGE_SEC}s"
+  log "=== paper box layered fuse Q=$Q (default: iz0 fuse -> copy x3 -> merge) ==="
+  log "caps: max_rss=${MAX_RSS_GB}G stall=${STALL_SEC}s timeout=${TIMEOUT_ALL_SEC}s force=${FORCE}"
   preflight
 
-  for iz in 0 1 2 3; do
-    out="$ARRAY_DIR/zslab_iz${iz}_4x4_paper_box_fused.step"
-    if [[ -f "$out" ]]; then
-      log "SKIP iz=$iz (exists): $out"
-      continue
-    fi
-    if [[ "$iz" -eq 0 ]]; then
-      log "========== START iz=0 (fuse) =========="
-      if ! run_timed "$TIMEOUT_LAYER_SEC" \
-          "$PY" scripts/run_hu_bai_paper_box_layered_fuse.py --Q "$Q" --iz 0 \
-          --out-dir "$ARRAY_DIR"; then
-        log "Stopping after iz=0 failure"
-        exit 1
-      fi
-      log "OK iz=0"
-    else
-      log "========== COPY iz=$iz from iz=0 (dz=$((iz * 20))mm) =========="
-      if ! run_timed 600 \
-          "$PY" -c "
-import sys
-sys.path.insert(0, '$ROOT')
-from src.export.paper_box_array_fuse import export_paper_box_zslab_copies
-ref = '$ARRAY_DIR/zslab_iz0_4x4_paper_box_fused.step'
-out = '$ARRAY_DIR/zslab_iz${iz}_4x4_paper_box_fused.step'
-export_paper_box_zslab_copies(ref, [out], cell_size=20.0, start_iz=${iz})
-"; then
-        log "Stopping after iz=$iz copy failure"
-        exit 1
-      fi
-      log "OK iz=$iz (copy)"
-    fi
-  done
-
-  if [[ -f "$ARRAY_STEP" ]]; then
-    log "SKIP merge (array exists): $ARRAY_STEP"
-    log "=== ALL DONE Q=$Q ==="
-    exit 0
+  if [[ "$FORCE" == "1" ]]; then
+    log "FORCE=1: removing prior z-slabs + array STEP"
+    rm -f "$ARRAY_DIR"/zslab_iz*_4x4_paper_box_fused.step
+    rm -f "$ARRAY_STEP"
+    rm -rf "$ARRAY_DIR/.work_zslab_cells"
   fi
 
-  log "========== START inter-slab merge =========="
-  if ! run_timed "$TIMEOUT_MERGE_SEC" \
-      "$PY" scripts/run_hu_bai_paper_box_layered_fuse.py --Q "$Q" --merge-only \
-      --out-dir "$ARRAY_DIR"; then
-    log "Merge failed"
+  fuse_args=(scripts/run_hu_bai_paper_box_4x4x4_array_fuse.py --Q "$Q" --out-dir "$ARRAY_DIR")
+  if [[ "$FORCE" == "1" ]]; then
+    fuse_args+=(--force)
+  fi
+
+  log "========== START layered fuse pipeline =========="
+  if ! run_timed "$TIMEOUT_ALL_SEC" "$PY" "${fuse_args[@]}"; then
+    log "Layered fuse failed"
     exit 1
   fi
   log "=== ALL DONE Q=$Q ==="
+  log "Array: $ARRAY_STEP"
 }
 
 main "$@"

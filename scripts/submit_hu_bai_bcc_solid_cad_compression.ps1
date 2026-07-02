@@ -1,4 +1,4 @@
-# Hu & Bai 2024 — CAD solid (STEP/X_T) explicit compression + stress-strain curve
+# Hu & Bai 2024 �?CAD solid (STEP/X_T) explicit compression + stress-strain curve
 param(
     [switch]$ForceRerun,
     [switch]$Continue,

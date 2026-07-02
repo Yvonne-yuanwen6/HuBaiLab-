@@ -1,7 +1,7 @@
 # Gmsh C3D4 export (local) + sync to server + submit. Server has no gmsh/pip.
 param(
     [string]$RemoteHost = "art@172.20.200.93",
-    [string]$RemoteRoot = "/home/art/Documents/Lattice/LWY/HuBaiLab",
+    [string]$RemoteRoot = "/media/art/file/XiangLang/Lattice/LWY/HuBaiLab",
     [switch]$ForceRemesh,
     [switch]$ExportOnly,
     [switch]$SubmitOnly

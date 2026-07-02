@@ -1,7 +1,7 @@
 # Poll server until both paper_box CAE tet jobs COMPLETED, then post-process and plot.
 param(
     [string]$Server = "art@172.20.200.93",
-    [string]$Remote = "/home/art/Documents/Lattice/LWY/HuBaiLab",
+    [string]$Remote = "/media/art/file/XiangLang/Lattice/LWY/HuBaiLab",
     [int]$PollSeconds = 120
 )
 
@@ -36,5 +36,5 @@ while ($true) {
     Start-Sleep -Seconds $PollSeconds
 }
 
-Write-Host "=== All complete â€” post-process ===" -ForegroundColor Cyan
+Write-Host "=== All complete â€?post-process ===" -ForegroundColor Cyan
 & "$PSScriptRoot\postpull_paperbox_cae_tet_batch.ps1" -Server $Server -Remote $Remote

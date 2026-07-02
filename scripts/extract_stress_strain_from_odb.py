@@ -77,9 +77,22 @@ def _resolve_ref_node_id(meta, root: str) -> int:
     )
 
 
-def _region_has_rf_u3(region) -> bool:
+def _compression_axis(meta) -> tuple[int, str, str]:
+    """Return (component_index, RF_key, U_key) for Z-axis compression."""
+    return 2, "RF3", "U3"
+
+
+def _load_side_nset(meta) -> str:
+    return "LATTICE_TOP_NODES"
+
+
+def _fixed_side_nset(meta) -> str:
+    return "BOTTOM_FIX"
+
+
+def _region_has_rf_u(region, rf_key: str, u_key: str) -> bool:
     keys = region.historyOutputs.keys()
-    return "RF3" in keys and "U3" in keys
+    return rf_key in keys and u_key in keys
 
 
 def _history_series(region, key: str):
@@ -90,12 +103,12 @@ def _history_series(region, key: str):
     return [float(p[0]) for p in out.data], [float(p[1]) for p in out.data]
 
 
-def _node_history_regions(step) -> list[tuple[int, str, object]]:
-    """History regions like 'Node PART-1-1.118683' with RF3 and U3."""
+def _node_history_regions(step, rf_key: str, u_key: str) -> list[tuple[int, str, object]]:
+    """History regions like 'Node PART-1-1.118683' with RF/U on compression axis."""
     out: list[tuple[int, str, object]] = []
     pat = re.compile(r"^Node\s+.+\.(\d+)\s*$")
     for name, region in step.historyRegions.items():
-        if not _region_has_rf_u3(region):
+        if not _region_has_rf_u(region, rf_key, u_key):
             continue
         m = pat.match(name.strip())
         if m:
@@ -103,14 +116,14 @@ def _node_history_regions(step) -> list[tuple[int, str, object]]:
     return out
 
 
-def _find_history_region(step, odb, ref_node_id: int, history_tag: str):
+def _find_history_region(step, odb, ref_node_id: int, history_tag: str, rf_key: str, u_key: str):
     tag_upper = history_tag.upper()
 
     for name, region in step.historyRegions.items():
-        if tag_upper in name.upper() and _region_has_rf_u3(region):
+        if tag_upper in name.upper() and _region_has_rf_u(region, rf_key, u_key):
             return region, name
 
-    node_hist = _node_history_regions(step)
+    node_hist = _node_history_regions(step, rf_key, u_key)
     if ref_node_id:
         for lid, name, region in node_hist:
             if lid == int(ref_node_id):
@@ -164,19 +177,30 @@ def _node_labels_from_set(odb, set_name: str) -> set[int]:
     return {int(n.label) for n in nset.nodes}
 
 
-def _bottom_nodes_by_z(assembly, z_cutoff: float) -> list[tuple[str, int]]:
-    """Fallback: all mesh nodes with initial z <= z_cutoff."""
+def _passive_nodes_by_axis(
+    assembly,
+    axis_idx: int,
+    cutoff: float,
+    *,
+    from_min: bool,
+) -> list[tuple[str, int]]:
+    """Fallback: mesh nodes on passive end (bottom z-min or right x-max)."""
     found: list[tuple[str, int]] = []
     for inst_name, inst in assembly.instances.items():
         for n in inst.nodes:
-            z = float(n.coordinates[2])
-            if z <= z_cutoff + 1e-6:
+            v = float(n.coordinates[axis_idx])
+            if from_min:
+                if v <= cutoff + 1e-6:
+                    found.append((inst_name, int(n.label)))
+            elif v >= cutoff - 1e-6:
                 found.append((inst_name, int(n.label)))
     return found
 
 
-def _sum_nset_rf3_history(step, labels: set[int]) -> tuple[list[float], list[float], int]:
-    """Sum RF3 history over all nodes whose label is in ``labels``."""
+def _sum_nset_rf_history(
+    step, labels: set[int], rf_key: str
+) -> tuple[list[float], list[float], int]:
+    """Sum RF history over all nodes whose label is in ``labels``."""
     if not labels:
         return [], [], 0
 
@@ -184,12 +208,12 @@ def _sum_nset_rf3_history(step, labels: set[int]) -> tuple[list[float], list[flo
     series: list[tuple[list[float], list[float]]] = []
 
     for name, region in step.historyRegions.items():
-        if not _region_has_rf_u3(region):
+        if rf_key not in region.historyOutputs:
             continue
         m = label_pat.search(name)
         if not m or int(m.group(1)) not in labels:
             continue
-        t, rf = _history_series(region, "RF3")
+        t, rf = _history_series(region, rf_key)
         series.append((t, rf))
 
     if not series:
@@ -200,7 +224,7 @@ def _sum_nset_rf3_history(step, labels: set[int]) -> tuple[list[float], list[flo
     rf_sum = [0.0] * n
     for t, rf in series:
         if len(t) != n:
-            raise ValueError("Top-node RF3 history time bases differ; re-export with uniform interval")
+            raise ValueError(f"Top-node {rf_key} history time bases differ; re-export with uniform interval")
         for i in range(n):
             rf_sum[i] += rf[i]
 
@@ -228,27 +252,41 @@ def _resolve_fixed_ref_node_id(meta, root: str) -> int:
     return 0
 
 
-def _extract_plate_ref(step, odb, ref_node_id: int, *, source: str = "paper_top_plate"):
-    region, name = _find_history_region(step, odb, ref_node_id, "PLATE_REF")
-    times, u3 = _history_series(region, "U3")
-    _, rf3 = _history_series(region, "RF3")
-    return times, u3, rf3, name, source
+def _extract_plate_ref(
+    step,
+    odb,
+    ref_node_id: int,
+    *,
+    rf_key: str,
+    u_key: str,
+    source: str = "paper_top_plate",
+):
+    region, name = _find_history_region(step, odb, ref_node_id, "PLATE_REF", rf_key, u_key)
+    times, u_disp = _history_series(region, u_key)
+    _, rf = _history_series(region, rf_key)
+    return times, u_disp, rf, name, source
 
 
-def _extract_fixed_bottom_ref(step, odb, ref_node_id: int):
-    region, name = _find_history_region(step, odb, ref_node_id, "PLATE_FIXED_REF")
-    times, u3 = _history_series(region, "U3")
-    _, rf3 = _history_series(region, "RF3")
-    return times, u3, rf3, name, "paper_bottom_plate"
+def _extract_fixed_bottom_ref(
+    step, odb, ref_node_id: int, *, rf_key: str, u_key: str
+):
+    region, name = _find_history_region(
+        step, odb, ref_node_id, "PLATE_FIXED_REF", rf_key, u_key
+    )
+    times, u_disp = _history_series(region, u_key)
+    _, rf = _history_series(region, rf_key)
+    return times, u_disp, rf, name, "paper_bottom_plate"
 
 
-def _extract_top_sum(step, odb):
-    labels = _node_labels_from_set(odb, "LATTICE_TOP_NODES")
-    times, rf_sum, n_regions = _sum_nset_rf3_history(step, labels)
+def _extract_top_sum(step, odb, meta):
+    load_nset = _load_side_nset(meta)
+    _, rf_key, u_key = _compression_axis(meta)
+    labels = _node_labels_from_set(odb, load_nset)
+    times, rf_sum, n_regions = _sum_nset_rf_history(step, labels, rf_key)
 
     if n_regions == 0:
         raise ValueError(
-            "No LATTICE_TOP_NODES RF3 history in ODB. "
+            f"No {load_nset} {rf_key} history in ODB. "
             "Use --force-mode plate_ref, or re-run with history_lattice_top_nodes=True (large ODB)."
         )
 
@@ -259,18 +297,116 @@ def _extract_top_sum(step, odb):
     except (AttributeError, IndexError):
         ref_id = 0
     if ref_id:
-        times, u3, _, u_name, _ = _extract_plate_ref(step, odb, ref_id, source="top_sum_u3")
+        times, u_disp, _, u_name, _ = _extract_plate_ref(
+            step,
+            odb,
+            ref_id,
+            rf_key=rf_key,
+            u_key=u_key,
+            source="top_sum_u3",
+        )
     else:
-        u_name = "PLATE_REF U3 (missing)"
-        u3 = [0.0] * len(times)
+        u_name = f"PLATE_REF {u_key} (missing)"
+        u_disp = [0.0] * len(times)
 
-    if len(u3) != len(times):
-        raise ValueError("U3 and summed RF3 point counts differ")
+    if len(u_disp) != len(times):
+        raise ValueError(f"{u_key} and summed {rf_key} point counts differ")
 
-    return times, u3, rf_sum, f"sum({n_regions}) LATTICE_TOP_NODES RF3; U3 from {u_name}", "top_sum"
+    return (
+        times,
+        u_disp,
+        rf_sum,
+        f"sum({n_regions}) {load_nset} {rf_key}; {u_key} from {u_name}",
+        "top_sum",
+    )
 
 
-def _sum_rf3_from_field(step, assembly, bottom_region, bottom_label: str):
+def _resolve_plate_ref_region(assembly, ref_node_id: int):
+    """PLATE_REF nset, or Abaqus REFERENCE_POINT_* set containing ref node id."""
+    plate, plate_label = _resolve_node_set(assembly, "PLATE_REF", "PLATE")
+    if plate is not None:
+        return plate, plate_label
+
+    ref_s = str(int(ref_node_id))
+    for k in assembly.nodeSets.keys():
+        ku = k.upper()
+        if "REFERENCE_POINT" in ku and ref_s in k:
+            return assembly.nodeSets[k], k
+
+    return None, None
+
+
+def _field_series_at_node_label(step, ref_node_id: int, *, comp_idx: int):
+    """RF/U at a mesh node label from every field frame (no nset required)."""
+    times: list[float] = []
+    u_list: list[float] = []
+    rf_list: list[float] = []
+    label = int(ref_node_id)
+
+    for frame in step.frames:
+        if "RF" not in frame.fieldOutputs or "U" not in frame.fieldOutputs:
+            continue
+        rf_val = u_val = None
+        for v in frame.fieldOutputs["RF"].values:
+            if int(v.nodeLabel) == label:
+                rf_val = abs(float(v.data[comp_idx]))
+                break
+        for v in frame.fieldOutputs["U"].values:
+            if int(v.nodeLabel) == label:
+                u_val = float(v.data[comp_idx])
+                break
+        if rf_val is None or u_val is None:
+            continue
+        times.append(float(frame.frameValue))
+        rf_list.append(rf_val)
+        u_list.append(u_val)
+
+    return times, u_list, rf_list
+
+
+def _extract_plate_ref_field(step, assembly, ref_node_id: int, *, comp_idx: int, rf_key: str, u_key: str):
+    """Dense PLATE_REF RF/U from field frames (*Output field, number interval=…)."""
+    plate, plate_label = _resolve_plate_ref_region(assembly, ref_node_id)
+
+    times: list[float] = []
+    u_list: list[float] = []
+    rf_list: list[float] = []
+
+    if plate is not None:
+        for frame in step.frames:
+            if "RF" not in frame.fieldOutputs or "U" not in frame.fieldOutputs:
+                continue
+            rf_sub = frame.fieldOutputs["RF"].getSubset(region=plate)
+            u_sub = frame.fieldOutputs["U"].getSubset(region=plate)
+            if not rf_sub.values or not u_sub.values:
+                continue
+            times.append(float(frame.frameValue))
+            rf_list.append(abs(float(rf_sub.values[0].data[comp_idx])))
+            u_list.append(float(u_sub.values[0].data[comp_idx]))
+        region_name = f"{plate_label} field {rf_key}/{u_key} ({len(times)} frames)"
+    else:
+        times, u_list, rf_list = _field_series_at_node_label(step, ref_node_id, comp_idx=comp_idx)
+        region_name = f"node {ref_node_id} field {rf_key}/{u_key} ({len(times)} frames)"
+
+    if len(times) < 3:
+        raise ValueError(
+            f"Too few field frames with RF/U for PLATE_REF node {ref_node_id}. "
+            "Re-export Compression step with *Node Output, nset=PLATE_REF, RF, U field output."
+        )
+
+    return times, u_list, rf_list, region_name, "plate_ref_field"
+
+
+def _sum_rf_from_field(
+    step,
+    assembly,
+    bottom_region,
+    bottom_label: str,
+    *,
+    comp_idx: int,
+    rf_key: str,
+    u_key: str,
+):
     plate, plate_label = _resolve_node_set(assembly, "PLATE_REF", "PLATE")
     if plate is None:
         raise ValueError(
@@ -289,57 +425,77 @@ def _sum_rf3_from_field(step, assembly, bottom_region, bottom_label: str):
         if "RF" not in frame.fieldOutputs or "U" not in frame.fieldOutputs:
             continue
 
-        rf3_sum = 0.0
+        rf_sum = 0.0
         if lookup is not None:
             for v in frame.fieldOutputs["RF"].values:
                 inst = v.instance.name if v.instance else ""
                 key = (inst, int(v.nodeLabel))
                 if key in lookup:
-                    rf3_sum += float(v.data[2])
+                    rf_sum += float(v.data[comp_idx])
         else:
             rf_sub = frame.fieldOutputs["RF"].getSubset(region=bottom_region)
-            rf3_sum = sum(float(v.data[2]) for v in rf_sub.values)
+            rf_sum = sum(float(v.data[comp_idx]) for v in rf_sub.values)
 
         u_sub = frame.fieldOutputs["U"].getSubset(region=plate)
         if not u_sub.values:
             continue
 
-        u3 = float(u_sub.values[0].data[2])
+        u_disp = float(u_sub.values[0].data[comp_idx])
         times.append(float(frame.frameValue))
-        rf_list.append(abs(rf3_sum))
-        u3_list.append(u3)
+        rf_list.append(abs(rf_sum))
+        u3_list.append(u_disp)
 
     if len(times) < 3:
         raise ValueError(
             "Too few field frames with RF/U on bottom/plate. "
-            "Try --force-mode plate_ref or re-export INP with BOTTOM_FIX RF field output."
+            "Try --force-mode plate_ref or re-export INP with passive-end RF field output."
         )
 
-    return times, u3_list, rf_list, f"sum({bottom_label}) field RF3; U3 field {plate_label}", "bottom_field"
+    return (
+        times,
+        u3_list,
+        rf_list,
+        f"sum({bottom_label}) field {rf_key}; {u_key} field {plate_label}",
+        "bottom_field",
+    )
 
 
 def _extract_bottom_field(step, odb, ref_node_id: int, meta):
-    """Sum RF3 on bottom nodes from field frames; U3 from PLATE_REF field."""
+    """Sum RF on passive-end nodes from field frames; U from PLATE_REF field."""
     assembly = odb.rootAssembly
-    bottom, bottom_label = _resolve_node_set(assembly, "BOTTOM_FIX", "BOTTOM")
+    comp_idx, rf_key, u_key = _compression_axis(meta)
+    fixed_nset = _fixed_side_nset(meta)
+    bottom, bottom_label = _resolve_node_set(assembly, fixed_nset, "BOTTOM", "RIGHT")
 
     if bottom is None:
         z_cut = float(meta.mesh_z_min) + max(0.02 * meta.cell_size, 0.5)
-        node_list = _bottom_nodes_by_z(assembly, z_cut)
+        node_list = _passive_nodes_by_axis(assembly, 2, z_cut, from_min=True)
+        cut_label = f"z<={z_cut:.3g}mm ({len(node_list)} nodes)"
         if len(node_list) < 10:
             keys = ", ".join(list(assembly.nodeSets.keys())[:20])
             raise ValueError(
-                f"BOTTOM_FIX not in ODB and z-cutoff found {len(node_list)} nodes. "
+                f"{fixed_nset} not in ODB and coordinate cutoff found {len(node_list)} nodes. "
                 f"Node sets sample: {keys}"
             )
-        return _sum_rf3_from_field(
+        return _sum_rf_from_field(
             step,
             assembly,
             node_list,
-            f"z<={z_cut:.3g}mm ({len(node_list)} nodes)",
+            cut_label,
+            comp_idx=comp_idx,
+            rf_key=rf_key,
+            u_key=u_key,
         )
 
-    return _sum_rf3_from_field(step, assembly, bottom, bottom_label)
+    return _sum_rf_from_field(
+        step,
+        assembly,
+        bottom,
+        bottom_label,
+        comp_idx=comp_idx,
+        rf_key=rf_key,
+        u_key=u_key,
+    )
 
 
 def extract_from_odb(
@@ -361,6 +517,7 @@ def extract_from_odb(
     root = root or _ROOT
     ref_node_id = _resolve_ref_node_id(meta, root)
     fixed_ref_node_id = _resolve_fixed_ref_node_id(meta, root)
+    comp_idx, rf_key, u_key = _compression_axis(meta)
 
     odb = openOdb(path=odb_path, readOnly=True)
     try:
@@ -372,22 +529,52 @@ def extract_from_odb(
         mode = force_mode.lower()
         if mode in ("paper", "plate_ref", "top_plate"):
             times, u3, rf3, region_name, source = _extract_plate_ref(
-                step, odb, ref_node_id, source="paper_top_plate"
+                step,
+                odb,
+                ref_node_id,
+                rf_key=rf_key,
+                u_key=u_key,
+                source="paper_top_plate",
             )
         elif mode in ("fixed_bottom_ref", "bottom_plate", "paper_bottom"):
             if fixed_ref_node_id <= 0:
                 raise ValueError("plate_fixed_ref_node_id missing in meta/INP")
             top_times, top_u3, _, _, _ = _extract_plate_ref(
-                step, odb, ref_node_id, source="paper_top_plate"
+                step,
+                odb,
+                ref_node_id,
+                rf_key=rf_key,
+                u_key=u_key,
+                source="paper_top_plate",
             )
             times, _, rf3, region_name, source = _extract_fixed_bottom_ref(
-                step, odb, fixed_ref_node_id
+                step, odb, fixed_ref_node_id, rf_key=rf_key, u_key=u_key
             )
             u3 = top_u3
             if len(u3) != len(times):
-                raise ValueError("Top U3 and bottom RF3 history lengths differ")
+                raise ValueError(f"Load-side {u_key} and passive {rf_key} history lengths differ")
         elif mode == "top_sum":
-            times, u3, rf3, region_name, source = _extract_top_sum(step, odb)
+            times, u3, rf3, region_name, source = _extract_top_sum(step, odb, meta)
+        elif mode in ("plate_ref_field", "top_plate_field", "field"):
+            try:
+                times, u3, rf3, region_name, source = _extract_plate_ref_field(
+                    step,
+                    odb.rootAssembly,
+                    ref_node_id,
+                    comp_idx=comp_idx,
+                    rf_key=rf_key,
+                    u_key=u_key,
+                )
+            except Exception as exc:
+                print(f"[WARN] plate_ref_field failed ({exc}); fallback to history PLATE_REF.")
+                times, u3, rf3, region_name, source = _extract_plate_ref(
+                    step,
+                    odb,
+                    ref_node_id,
+                    rf_key=rf_key,
+                    u_key=u_key,
+                    source="paper_top_plate",
+                )
         elif mode == "bottom_field":
             try:
                 times, u3, rf3, region_name, source = _extract_bottom_field(
@@ -396,7 +583,12 @@ def extract_from_odb(
             except Exception as exc:
                 print(f"[WARN] bottom_field failed ({exc}); fallback to paper top plate.")
                 times, u3, rf3, region_name, source = _extract_plate_ref(
-                    step, odb, ref_node_id, source="paper_top_plate"
+                    step,
+                    odb,
+                    ref_node_id,
+                    rf_key=rf_key,
+                    u_key=u_key,
+                    source="paper_top_plate",
                 )
         else:
             raise ValueError(f"Unknown force_mode: {force_mode}")
@@ -423,6 +615,7 @@ def extract_from_odb(
 
     print(f"Force mode: {source}")
     print(f"Region: {region_name}")
+    print(f"Compression axis: {rf_key}/{u_key} (loading_direction={meta.loading_direction})")
     print(f"PLATE_REF node id: {ref_node_id}")
     if trim_hold:
         print(f"Trimmed hold: t < {meta.hold_end_time():.4g} s")
@@ -468,13 +661,18 @@ def main() -> int:
             "paper",
             "plate_ref",
             "top_plate",
+            "plate_ref_field",
+            "top_plate_field",
+            "field",
             "fixed_bottom_ref",
             "bottom_plate",
             "top_sum",
             "bottom_field",
         ),
         default="paper",
-        help="paper: top PLATE_REF RF3 + U3 (Hu & Bai Fig.3.3); fixed_bottom_ref: bottom reaction",
+        help="paper/plate_ref: history PLATE_REF RF3+U3 (~step_time/100 pts); "
+        "plate_ref_field: dense field frames on PLATE_REF; "
+        "fixed_bottom_ref: bottom reaction",
     )
     parser.add_argument(
         "--curve-method",
@@ -486,6 +684,11 @@ def main() -> int:
         "--yield-json",
         default="",
         help="Write 0.2%% offset yield etc. to JSON (optional path)",
+    )
+    parser.add_argument(
+        "--csv-tag",
+        default="",
+        help="If set, write {slug}_stress_strain_{tag}.csv instead of default name",
     )
     parser.add_argument("--no-trim-hold", action="store_true")
     parser.add_argument("--no-drop-spike", action="store_true")
@@ -504,6 +707,15 @@ def main() -> int:
             args.raw_csv = defaults.get("stress_strain_raw_csv", "")
         if not args.yield_json and defaults.get("yield_json"):
             args.yield_json = defaults["yield_json"]
+
+    if defaults and args.csv_tag.strip():
+        tag = args.csv_tag.strip().replace(" ", "_")
+        base, ext = os.path.splitext(args.csv or defaults.get("stress_strain_csv", ""))
+        if base:
+            args.csv = f"{base}_{tag}{ext or '.csv'}"
+        raw_base, raw_ext = os.path.splitext(args.raw_csv or defaults.get("stress_strain_raw_csv", ""))
+        if raw_base and not args.no_raw:
+            args.raw_csv = f"{raw_base}_{tag}{raw_ext or '.csv'}"
 
     if not args.odb or not args.meta or not args.csv:
         print("[ERROR] Missing --odb/--meta/--csv. Run export script first or pass explicit paths.")

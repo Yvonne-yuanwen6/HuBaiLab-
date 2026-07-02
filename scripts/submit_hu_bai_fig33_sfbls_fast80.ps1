@@ -1,4 +1,4 @@
-# Fig. 3.3 — SFBLS Q=0.5 / 1.0 / 1.5 @ 80% strain (fast profile), sequential submit
+# Fig. 3.3 style batch �?repo fast80 profile (80% strain etc. 原文未给); Q values from §2.1
 param(
     [switch]$ForceRerun
 )

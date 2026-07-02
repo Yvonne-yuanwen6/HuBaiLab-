@@ -1,5 +1,5 @@
 # Pull paper-box 4x4x4 array STEP (+ manifest, z-slabs) from server to local staging.
-# Does NOT write into output/cad/verified/ â€” copy there manually after QA.
+# Does NOT write into output/cad/verified/ â€?copy there manually after QA.
 #
 #   powershell -File scripts/pull_paper_box_array_from_server.ps1
 #   powershell -File scripts/pull_paper_box_array_from_server.ps1 -Q 1.0,1.5
@@ -7,7 +7,7 @@
 
 param(
     [string]$RemoteHost = "art@172.20.200.93",
-    [string]$RemoteRoot = "/home/art/Documents/Lattice/LWY/HuBaiLab",
+    [string]$RemoteRoot = "/media/art/file/XiangLang/Lattice/LWY/HuBaiLab",
     [string[]]$Q = @("1.0", "1.5"),
     [switch]$IncludeZslabs,
     [switch]$Force
@@ -37,7 +37,7 @@ foreach ($qVal in $Q) {
     $tag = Q-Tag $qVal
     $variant = $VariantByQ[$qVal]
     if (-not $variant) {
-        Write-Warning "Unknown Q=$qVal â€” skip"
+        Write-Warning "Unknown Q=$qVal â€?skip"
         continue
     }
 

@@ -8,7 +8,7 @@
 |------|-----|
 | 本机 | Windows，`D:\HuBaiLab` |
 | 服务器 | `art@172.20.200.93` |
-| 服务器仓库 | `/home/art/Documents/Lattice/LWY/HuBaiLab` |
+| 服务器仓库 | `/media/art/file/XiangLang/Lattice/LWY/HuBaiLab`（机械盘，XiangLang 目录下） |
 | Abaqus | `/home/art/APP/abaqus2022/Commands/abq` |
 | 连接方式 | SSH（日常）；VNC 仅看桌面时用 |
 
@@ -56,7 +56,7 @@ export PATH="/home/art/APP/abaqus2022/Commands:$PATH"
 abq information=release
 
 # 长期生效（可选）
-cd /home/art/Documents/Lattice/LWY/HuBaiLab
+cd /media/art/file/XiangLang/Lattice/LWY/HuBaiLab
 bash scripts/linux/setup_abaqus_env.sh
 source ~/.bashrc
 ```
@@ -67,6 +67,17 @@ source ~/.bashrc
 ssh-keygen -t ed25519
 type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh art@172.20.200.93 "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys"
 ```
+
+### 2.3a 服务器仓库路径（可覆盖）
+
+默认在机械盘：`/media/art/file/XiangLang/Lattice/LWY/HuBaiLab`。
+
+| 平台 | 变量 |
+|------|------|
+| 本机 PowerShell | `$env:HU_BAI_REMOTE_ROOT` |
+| 服务器 bash | `export HU_BAI_REMOTE_ROOT=...` |
+
+集中配置：`scripts/remote_config.ps1`、`scripts/linux/hubai_env.sh`、`src/paths.py` 中的 `HUBAI_REMOTE_ROOT`。
 
 ### 2.4 CAD 文件（export 必需）
 
@@ -187,7 +198,7 @@ $cases = @(
 
 ```powershell
 $Server = "art@172.20.200.93"
-$Remote = "/home/art/Documents/Lattice/LWY/HuBaiLab"
+$Remote = "/media/art/file/XiangLang/Lattice/LWY/HuBaiLab"
 $Local  = "D:\HuBaiLab"
 $Suffix = "voxel0p8mm75_15mmin"
 
@@ -211,7 +222,7 @@ foreach ($s in $Slugs) {
 服务器上确认：
 
 ```bash
-ls /home/art/Documents/Lattice/LWY/HuBaiLab/output/export/*voxel0p8mm75_15mmin*/*.inp
+ls /media/art/file/XiangLang/Lattice/LWY/HuBaiLab/output/export/*voxel0p8mm75_15mmin*/*.inp
 ```
 
 ---
@@ -255,7 +266,7 @@ tmux new -s abq
 仅在需要重跑、或 job 已失败但进程还在时执行：
 
 ```bash
-cd /home/art/Documents/Lattice/LWY/HuBaiLab
+cd /media/art/file/XiangLang/Lattice/LWY/HuBaiLab
 export PATH="/home/art/APP/abaqus2022/Commands:$PATH"
 
 SLUG=hu_bai_bcc_af2q0_L20_4x4x4_solid_cad_f_voxel0p8mm75_15mmin
@@ -277,12 +288,38 @@ ps aux | grep "${SLUG}" | grep -E 'explicit|SMAPython' | grep -v grep
 rm -f output/jobs/${SLUG}/${SLUG}.lck
 ```
 
+#### C.3.5 提交前资源检查（自动）
+
+`submit_job.sh` / `submit_queue.sh` / pipeline 在启动 Abaqus **之前**会调用 `scripts/linux/check_submit_resources.sh`：
+
+| 检查项 | 规则（默认） |
+|--------|----------------|
+| **内存** | 可用内存 ≥ 申请 `memory-mb` 换算 GiB + **32 GiB** 余量 |
+| **CPU** | `load_1min + 申请cpus` ≤ `nproc × 0.90`（共享工作站保守估计） |
+| **状态输出** | 打印当前 `nproc`、可用内存、正在跑的 Abaqus 进程数、`.lck` 数量 |
+
+手动预检（不提交 job）：
+
+```bash
+bash scripts/linux/check_submit_resources.sh \
+  --cpus 48 --memory-mb 262144
+```
+
+资源不足时会 **ABORT 退出**（exit 2），避免占满机器影响他人。紧急跳过：
+
+```bash
+bash scripts/linux/submit_job.sh --slug SLUG ... --skip-resource-check
+# 或 export HU_BAI_SKIP_RESOURCE_CHECK=1
+```
+
+可调阈值：`HU_BAI_SUBMIT_HEADROOM_GB`（默认 32）、`HU_BAI_SUBMIT_MAX_LOAD_FRAC`（默认 0.90）。
+
 #### C.4 提交求解（必须带 `--cpus` 和 `--memory-mb`）
 
 在 **tmux 内**执行：
 
 ```bash
-cd /home/art/Documents/Lattice/LWY/HuBaiLab
+cd /media/art/file/XiangLang/Lattice/LWY/HuBaiLab
 export PATH="/home/art/APP/abaqus2022/Commands:$PATH"
 
 CPUS=32
@@ -356,6 +393,22 @@ bash scripts/linux/submit_job.sh \
 
 先完成 C.3 清理，再在 tmux 里 recover。续算同样用 C.5 验证 `-cpus 32`。
 
+#### C.8 更高应变续算（`*Restart, read, end step`）
+
+源算例**正常结束**且保留 `${SLUG}.res` 时，可从末步变形态继续压到更高应变（不必 0→目标重跑）：
+
+1. **先备份源算例：** `bash scripts/linux/backup_case_slug.sh SOURCE_SLUG TAG`
+2. **导出续算 INP 并提交：**
+
+```bash
+bash scripts/linux/run_paperbox_variant.sh --Q 0.5 \
+  --variant-suffix NAME --short-slug NEW_SLUG \
+  --restart-from-slug SOURCE_SLUG --continue-to-strain 0.75 \
+  --cpus 48 --memory-mb 262144 --submit-background
+```
+
+详见 [`docs/explicit_restart_continuation.md`](explicit_restart_continuation.md)（含 s45→75% 示例、曲线合并、风险说明）。
+
 ---
 
 ### 步骤 D：本机监控进度（进度条 + ETA）
@@ -368,7 +421,7 @@ bash scripts/linux/submit_job.sh \
 cd D:\HuBaiLab
 .\scripts\watch_job_progress.ps1 `
   -RemoteHost "art@172.20.200.93" `
-  -RemoteRoot "/home/art/Documents/Lattice/LWY/HuBaiLab" `
+  -RemoteRoot "/media/art/file/XiangLang/Lattice/LWY/HuBaiLab" `
   -SlugQueueCsv "hu_bai_bcc_af2q0_L20_4x4x4_solid_cad_f_voxel0p8mm75_15mmin,hu_bai_sfbls_af2q0p5_L20_4x4x4_solid_cad_f_voxel0p8mm75_15mmin,hu_bai_sfbls_af2q1_L20_4x4x4_solid_cad_f_voxel0p8mm75_15mmin,hu_bai_sfbls_af2q1p5_L20_4x4x4_solid_cad_f_voxel0p8mm75_15mmin" `
   -UseMeta -PollSeconds 30
 ```
@@ -378,7 +431,7 @@ cd D:\HuBaiLab
 ```powershell
 .\scripts\watch_job_progress.ps1 `
   -RemoteHost "art@172.20.200.93" `
-  -RemoteRoot "/home/art/Documents/Lattice/LWY/HuBaiLab" `
+  -RemoteRoot "/media/art/file/XiangLang/Lattice/LWY/HuBaiLab" `
   -Slug hu_bai_bcc_af2q0_L20_4x4x4_solid_cad_f_voxel0p8mm75_15mmin `
   -UseMeta -PollSeconds 30
 ```
@@ -403,7 +456,7 @@ cd D:\HuBaiLab
 
 ```powershell
 $Server = "art@172.20.200.93"
-$Remote = "/home/art/Documents/Lattice/LWY/HuBaiLab"
+$Remote = "/media/art/file/XiangLang/Lattice/LWY/HuBaiLab"
 $Local  = "D:\HuBaiLab"
 $Slug   = "hu_bai_bcc_af2q0_L20_4x4x4_solid_cad_f_voxel0p8mm75_15mmin"
 
@@ -541,10 +594,16 @@ job 已在跑时再次 submit 会覆盖 `.com` 但不会替换正在跑的进程
 ### Q：如何同步代码到服务器？
 
 ```powershell
-scp -r D:\HuBaiLab\src D:\HuBaiLab\scripts art@172.20.200.93:/home/art/Documents/Lattice/LWY/HuBaiLab/
+cd D:\HuBaiLab
+powershell -NoProfile -File scripts\sync_to_server.ps1
+powershell -NoProfile -File scripts\sync_to_server.ps1 -IncludeDocs   # 含 docs
 ```
 
-（LAN UNC 共享可用 `scripts/sync_to_server.ps1`；SSH 环境用 scp。）
+等价 scp：
+
+```powershell
+scp -r D:\HuBaiLab\src D:\HuBaiLab\scripts art@172.20.200.93:/media/art/file/XiangLang/Lattice/LWY/HuBaiLab/
+```
 
 ### Q：VNC 隧道（可选）
 
@@ -561,7 +620,9 @@ RealVNC 连接 `localhost:6666`。日常传文件、跑仿真用 SSH 即可，�
 | 脚本 | 用途 |
 |------|------|
 | `scripts/run_hu_bai_bcc_solid_cad_export.py` | 本机 export INP |
-| `scripts/linux/submit_job.sh` | 服务器提交单 job |
+| `scripts/linux/submit_job.sh` | 服务器提交单 job（含资源预检） |
+| `scripts/linux/check_submit_resources.sh` | 提交前 CPU/内存预检 |
+| `scripts/sync_to_server.ps1` | 本机同步 scripts+src 到工作站 |
 | `scripts/linux/submit_queue.sh` | 服务器串行多 job（可选 `--wait-for` 等前一个结束） |
 | `scripts/watch_job_progress.ps1` | 本机进度条 + ETA（加 `-RemoteHost` / `-RemoteRoot` 监控服务器） |
 | `scripts/sync_to_server.ps1` | LAN UNC 同步代码（非 SSH） |

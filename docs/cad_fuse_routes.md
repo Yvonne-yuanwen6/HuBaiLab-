@@ -5,7 +5,8 @@
 | 结构 | 推荐 | 脚本 |
 |------|------|------|
 | **BCC Q=0** | **SW 步进**（当前） | `run_sfbls_sw_stepwise_4x4x4_pipeline.ps1 -Q 0` |
-| SFBLS Q=0.5/1/1.5 | SW 步进 | 同上 `-Q 0.5` / `1.0` / `1.5` |
+| SFBLS Q=0.5/1/1.5 | SW 步进 **或** paper_box OCC | 见 [unitcell_fusion_strategies.md](unitcell_fusion_strategies.md) |
+| **SFBLS Q=1 paper_box** | **OCP 单胞 ✅ → 4×4×4 进行中** | `run_ocp_glue_fuse_pilot.sh` → `run_ocp_q1_4x4x4_array_fuse.sh` |
 | BCC Q=0（历史） | OCC 单胞阵列 fuse | `run_hu_bai_bcc_unitcell_array_step_fuse.py`（legacy，见下方问题） |
 
 SW 步进流程（与 SFBLS Q=1.0 已验证路线相同）：
@@ -18,6 +19,20 @@ SW 步进流程（与 SFBLS Q=1.0 已验证路线相同）：
 
 BCC 工作目录：`output/cad/_stepwise_q0/`  
 说明文件：`output/cad/_stepwise_q0/README_SW_BCC.txt`
+
+---
+
+## SFBLS Q=1 paper_box — 当前状态（2026-06）
+
+| 阶段 | 路线 | 状态 |
+|------|------|------|
+| 单胞 1×1×1 | OCP `sequential_glue_shift`（`run_ocp_glue_fuse_pilot.sh`） | ✅ 已验收 |
+| 单胞 1×1×1 | gmsh `export_unitcell_paper_box_cut.py --Q 1.0` | ⚠️ 未作当前基准 |
+| 阵列 4×4×4 | OCP `run_ocp_q1_4x4x4_array_fuse.sh` | ❌ 尚未成功 |
+| 阵列 4×4×4 | gmsh `run_hu_bai_paper_box_4x4x4_array_fuse.py` | ❌ 尚未成功 |
+
+OCP 单胞种子：`output/cad/_ocp_glue_pilot/unitcell_af2q1_L20_ocp_stub_sequential-glue-shift.step`  
+详情：[unitcell_fusion_strategies.md](unitcell_fusion_strategies.md)
 
 ---
 

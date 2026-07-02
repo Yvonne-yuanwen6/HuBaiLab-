@@ -138,5 +138,5 @@ Write-QLog "=== CAE tet queue finished: $($results | ConvertTo-Json -Compress) =
 Write-Host ""
 Write-Host "Log: $LogPath" -ForegroundColor Cyan
 Write-Host "Server sync example:" -ForegroundColor Cyan
-Write-Host "  scp -r output/export/hu_bai_*_${CaseSuffix} art@172.20.200.93:/home/art/Documents/Lattice/LWY/HuBaiLab/output/export/" -ForegroundColor Gray
-Write-Host "  ssh art@172.20.200.93 'cd /home/art/Documents/Lattice/LWY/HuBaiLab && bash scripts/linux/submit_queue.sh --slugs-csv ...'" -ForegroundColor Gray
+Write-Host "  scp -r output/export/hu_bai_*_${CaseSuffix} art@172.20.200.93:/media/art/file/XiangLang/Lattice/LWY/HuBaiLab/output/export/" -ForegroundColor Gray
+Write-Host "  ssh art@172.20.200.93 'cd /media/art/file/XiangLang/Lattice/LWY/HuBaiLab && bash scripts/linux/submit_queue.sh --slugs-csv ...'" -ForegroundColor Gray

@@ -1,8 +1,8 @@
 """
 Export Hu & Bai CAD solid → Abaqus compression INP using CAE built-in C3D4 mesh.
 
-1) Abaqus/CAE noGUI meshes verified STEP (TET_FREE).
-2) Parse mesh INP → merge with rigid plates, contact, explicit step (export_inp).
+§2.4.1 states C3D4 and 0.6 mm mesh; CAE seeding / vtopo / self-contact / ContactSettle
+are repo additions (原文未写). See ``run_hu_bai_bcc_solid_cad_export.py`` for thesis vs repo notes.
 
 Example (Windows: CAE mesh runs on server by default):
   py -3 scripts/run_hu_bai_bcc_solid_cad_cae_tet_export.py --cells 4 --Q 0 --profile fast \\
@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -51,8 +52,18 @@ from src.export.export_csv import export_beams, export_nodes
 from src.export.export_inp import export_inp
 from src.export.cae_mesh_runner import run_cae_mesh
 from src.export.parse_cae_mesh_inp import parse_cae_mesh_inp
+from src.export.step_heal_for_cae import HEAL_PRESETS, heal_step_for_cae, heal_step_once
+from src.paperbox_slug import build_paperbox_short_slug, paperbox_slug_descriptor
 from src.generator.hu_bai_bcc import HuBaiLatticeGenerator
-from src.paths import ABAQUS_JOBS, ABAQUS_POST, CAD_VERIFIED_ROOT, EXPORT_ROOT, ensure_output_dirs
+from src.material.tpu_fig25 import load_tpu_fig25_uniaxial
+from src.paths import (
+    ABAQUS_JOBS,
+    ABAQUS_POST,
+    CAD_VERIFIED_ROOT,
+    EXPORT_ROOT,
+    HUBAI_REMOTE_ROOT,
+    ensure_output_dirs,
+)
 from src.postprocess.compression_curve import CompressionMeta, save_compression_meta
 from src.validation.penetration_risk import update_manifest_penetration_check
 
@@ -66,9 +77,9 @@ _parser.add_argument("--cad", type=str, default="")
 _parser.add_argument("--cae-seed", type=float, default=1.2, help="CAE global seed [mm]")
 _parser.add_argument(
     "--cae-mesh-quality",
-    choices=("fast", "lattice", "lattice_contact", "paper"),
+    choices=("fast", "lattice", "lattice_contact", "lattice_curve", "paper"),
     default="lattice_contact",
-    help="CAE tet seeding preset (lattice_contact: surface+short-edge for self-contact)",
+    help="CAE tet seeding preset (lattice_curve: force d/N seeds on curved struts)",
 )
 _parser.add_argument(
     "--cae-rods-per-diameter",
@@ -87,7 +98,35 @@ _parser.add_argument(
     default="",
     help="Reuse existing CAE mesh INP (skip abaqus cae mesh step)",
 )
+_parser.add_argument(
+    "--heal-step-before-cae",
+    action="store_true",
+    help="Gmsh OCC healShapes on STEP before CAE mesh (best mass-preserving preset)",
+)
+_parser.add_argument(
+    "--heal-step-on-mesh-fail",
+    action="store_true",
+    help="On CAE mesh failure, retry with Gmsh-healed STEP presets",
+)
 _parser.add_argument("--cae-part-name", type=str, default="LATTICE")
+_parser.add_argument(
+    "--cae-element-type",
+    choices=("C3D4", "C3D10", "C3D10M"),
+    default="C3D4",
+    help="Solid element type for CAE tet mesh and compression INP",
+)
+_parser.add_argument(
+    "--slug-mode",
+    choices=("long", "short"),
+    default="long",
+    help="long=hu_bai_* legacy slug; short=q05_c10m_s05r4_el_s78 style",
+)
+_parser.add_argument(
+    "--short-slug",
+    type=str,
+    default="",
+    help="Override auto short slug when --slug-mode short",
+)
 _parser.add_argument("--strain", type=float, default=None)
 _parser.add_argument(
     "--profile",
@@ -153,13 +192,20 @@ _parser.add_argument(
 _parser.add_argument(
     "--no-mass-scaling",
     action="store_true",
-    help="Omit *Fixed Mass Scaling from INP (paper fixed dt without scaling)",
+    help="Omit *Fixed Mass Scaling from INP (mass scaling 原文未给出)",
 )
 _parser.add_argument("--restart-interval", type=int, default=None)
 _parser.add_argument(
     "--material-model",
-    choices=("paper", "hyperelastic", "elastic_plastic"),
+    choices=("paper", "hyperelastic", "elastic_plastic", "elastic", "marlow", "polynomial"),
     default=None,
+    help="marlow/polynomial = Fig.2.5 WPD uniaxial; polynomial = test data input (Mooney-Rivlin fit); paper = Neo-Hooke; elastic = Fig.3.3 trend trials",
+)
+_parser.add_argument(
+    "--tpu-fig25-json",
+    type=str,
+    default="data/hu_bai_tpu_fig25_tensile_traced.json",
+    help="Traced Fig.2.5 tensile curve for --material-model marlow or polynomial",
 )
 _parser.add_argument(
     "--mesh-on-server",
@@ -180,10 +226,7 @@ _parser.add_argument(
 _parser.add_argument(
     "--remote-root",
     type=str,
-    default=os.environ.get(
-        "HU_BAI_REMOTE_ROOT",
-        "/home/art/Documents/Lattice/LWY/HuBaiLab",
-    ),
+    default=os.environ.get("HU_BAI_REMOTE_ROOT", HUBAI_REMOTE_ROOT),
     help="Repo root on remote server",
 )
 _args = _parser.parse_args()
@@ -206,6 +249,8 @@ NX = NY = NZ = int(_args.cells)
 CAE_SEED = float(_args.cae_seed)
 CAE_MESH_QUALITY = str(_args.cae_mesh_quality)
 CAE_RODS_PER_DIAMETER = float(_args.cae_rods_per_diameter)
+CAE_ELEMENT_TYPE = str(_args.cae_element_type).upper()
+SLUG_MODE = str(_args.slug_mode).lower()
 
 E_MODULUS = HU_BAI_E_MODULUS_MPA
 POISSON = HU_BAI_POISSON
@@ -218,13 +263,29 @@ MATERIAL_KIND = _args.material_model
 if MATERIAL_KIND is None:
     MATERIAL_KIND = "paper" if PROFILE == "paper" else "elastic_plastic"
 USE_HYPERELASTIC = MATERIAL_KIND in ("paper", "hyperelastic")
-INP_MATERIAL_MODEL = "hyperelastic" if USE_HYPERELASTIC else "elastic"
+if MATERIAL_KIND == "marlow":
+    INP_MATERIAL_MODEL = "marlow"
+    TPU_UNIAXIAL = load_tpu_fig25_uniaxial(_args.tpu_fig25_json)
+elif MATERIAL_KIND == "polynomial":
+    INP_MATERIAL_MODEL = "polynomial"
+    TPU_UNIAXIAL = load_tpu_fig25_uniaxial(_args.tpu_fig25_json)
+elif USE_HYPERELASTIC:
+    INP_MATERIAL_MODEL = "hyperelastic"
+    TPU_UNIAXIAL = None
+else:
+    INP_MATERIAL_MODEL = "elastic"
+    TPU_UNIAXIAL = None
+PLASTIC_YIELD = (
+    None
+    if USE_HYPERELASTIC or MATERIAL_KIND in ("elastic", "marlow", "polynomial")
+    else YIELD_MPA
+)
 
 if PROFILE == "paper":
     TARGET_STRAIN = HU_BAI_TARGET_ENGINEERING_STRAIN
     LOAD_RATE_MM_MIN = HU_BAI_LOAD_RATE_MM_MIN
     if CAE_SEED > HU_BAI_MESH_MM + 1e-9:
-        print(f"  [WARN] paper mesh is 0.6 mm; consider --cae-seed {HU_BAI_MESH_MM}", flush=True)
+        print(f"  [WARN] §2.4.1 mesh size is 0.6 mm; consider --cae-seed {HU_BAI_MESH_MM}", flush=True)
 elif _args.strain is not None:
     TARGET_STRAIN = float(_args.strain)
 elif IS_FAST80:
@@ -264,7 +325,7 @@ HOLD_FRACTION = (
 )
 EXPLICIT_DT_MODE = str(_args.explicit_dt_mode)
 if PROFILE == "paper" and EXPLICIT_DT_MODE in ("automatic", "auto", "adaptive"):
-    print("  [paper] forcing explicit_dt_mode=fixed (quasi-static KE/IE < 5%)", flush=True)
+    print("  [paper profile] forcing explicit_dt_mode=fixed (KE/IE<5% per §2.4.1)", flush=True)
     EXPLICIT_DT_MODE = "fixed"
 CASE_SUFFIX = CASE_SUFFIX_RAW or f"cae_tet{CAE_SEED:g}mm{int(round(TARGET_STRAIN * 100))}p_{int(LOAD_RATE_MM_MIN)}mmin"
 STROKE_TAG = "f"
@@ -306,7 +367,18 @@ if xt_path:
 
 variant = gen.variant_name.lower()
 _slug_base = f"hu_bai_{variant}_L{int(L)}_{NX}x{NY}x{NZ}_solid_cad_{STROKE_TAG}"
-slug = f"{_slug_base}_{CASE_SUFFIX}"
+if SLUG_MODE == "short":
+    slug = (_args.short_slug.strip() or build_paperbox_short_slug(
+        period_factor=Q,
+        element_type=CAE_ELEMENT_TYPE,
+        seed_mm=CAE_SEED,
+        rods_per_diameter=CAE_RODS_PER_DIAMETER,
+        material_model=MATERIAL_KIND or "elastic",
+        target_strain=TARGET_STRAIN,
+        contact_settle=bool(_args.contact_settle),
+    ))
+else:
+    slug = f"{_slug_base}_{CASE_SUFFIX}"
 export_dir = os.path.join(EXPORT_ROOT, slug)
 job_dir = os.path.join(ABAQUS_JOBS, slug)
 post_dir = os.path.join(ABAQUS_POST, slug)
@@ -379,6 +451,9 @@ export_nodes(nodes, paths["nodes_csv"])
 export_beams(beams, paths["beams_csv"])
 
 cae_mesh_inp = _args.cae_mesh_inp.strip()
+MESH_STEP_USED = step_path
+STEP_HEAL_REPORT: dict | None = None
+
 if cae_mesh_inp:
     if not os.path.isabs(cae_mesh_inp):
         cae_mesh_inp = os.path.join(_ROOT, cae_mesh_inp)
@@ -388,39 +463,106 @@ if cae_mesh_inp:
     MESH_LOCATION = "reuse"
 else:
     cae_mesh_inp = paths["cae_mesh_inp"]
-    print(
-        f"  CAE TET mesh STEP @ seed={CAE_SEED} mm "
-        f"(quality={CAE_MESH_QUALITY}) ...",
-        flush=True,
-    )
-    MESH_LOCATION = run_cae_mesh(
-        _ROOT,
-        step_path,
-        cae_mesh_inp,
-        CAE_SEED,
-        _args.cae_part_name,
-        mesh_on_server=MESH_ON_SERVER,
-        remote_host=_args.remote_host.strip(),
-        remote_root=_args.remote_root.strip(),
-        mesh_mode="tet",
-        mesh_quality=CAE_MESH_QUALITY,
-        rod_diameter_mm=ROD_D,
-        rods_per_diameter=CAE_RODS_PER_DIAMETER,
-        virtual_topology=bool(_args.cae_virtual_topology),
-    )
+
+    def _invoke_cae_mesh(mesh_step: str) -> str:
+        print(
+            f"  CAE TET mesh STEP @ seed={CAE_SEED} mm "
+            f"(quality={CAE_MESH_QUALITY}) ...",
+            flush=True,
+        )
+        print(f"  mesh STEP: {mesh_step}", flush=True)
+        loc = run_cae_mesh(
+            _ROOT,
+            mesh_step,
+            cae_mesh_inp,
+            CAE_SEED,
+            _args.cae_part_name,
+            mesh_on_server=MESH_ON_SERVER,
+            remote_host=_args.remote_host.strip(),
+            remote_root=_args.remote_root.strip(),
+            mesh_mode="tet",
+            mesh_quality=CAE_MESH_QUALITY,
+            rod_diameter_mm=ROD_D,
+            rods_per_diameter=CAE_RODS_PER_DIAMETER,
+            virtual_topology=bool(_args.cae_virtual_topology),
+            element_type=CAE_ELEMENT_TYPE,
+        )
+        if not os.path.isfile(cae_mesh_inp):
+            raise FileNotFoundError(f"CAE mesh INP not written: {cae_mesh_inp}")
+        return loc
+
+    mesh_step = step_path
+    step_heal_report: dict = {"original_step": step_path, "attempts": []}
+    if _args.heal_step_before_cae:
+        print("  Gmsh heal STEP before CAE mesh ...", flush=True)
+        mesh_step, heal_pick = heal_step_for_cae(
+            step_path,
+            export_dir,
+            basename=f"{slug}_cad_heal",
+        )
+        step_heal_report.update(heal_pick)
+
+    mesh_exc: BaseException | None = None
+    try:
+        MESH_LOCATION = _invoke_cae_mesh(mesh_step)
+        MESH_STEP_USED = mesh_step
+    except (subprocess.CalledProcessError, FileNotFoundError, RuntimeError) as exc:
+        mesh_exc = exc
+        if not _args.heal_step_on_mesh_fail:
+            raise
+        print(f"  CAE mesh failed ({exc!s}), trying Gmsh heal presets ...", flush=True)
+        tried = {mesh_step}
+        mesh_ok = False
+        for preset in HEAL_PRESETS:
+            label = str(preset["label"])
+            healed = os.path.join(export_dir, f"{slug}_cad_heal_{label}.step")
+            if healed in tried:
+                continue
+            try:
+                rep = heal_step_once(
+                    step_path,
+                    healed,
+                    distance_tol=float(preset["distance_tol"]),
+                    fix_small=bool(preset.get("fix_small", True)),
+                )
+                rep["preset"] = label
+                step_heal_report["attempts"].append(rep)
+            except Exception as heal_exc:
+                print(f"  heal FAIL preset={label}: {heal_exc}", flush=True)
+                step_heal_report["attempts"].append(
+                    {"preset": label, "error": str(heal_exc)},
+                )
+                continue
+            tried.add(healed)
+            try:
+                print(f"  retry CAE mesh preset={label} -> {healed}", flush=True)
+                MESH_LOCATION = _invoke_cae_mesh(healed)
+                MESH_STEP_USED = healed
+                step_heal_report["preset_used"] = label
+                step_heal_report["healed_step"] = healed
+                step_heal_report["used_heal"] = True
+                mesh_ok = True
+                break
+            except (subprocess.CalledProcessError, FileNotFoundError, RuntimeError) as retry_exc:
+                print(f"  CAE mesh still failed preset={label}: {retry_exc!s}", flush=True)
+        if not mesh_ok:
+            raise RuntimeError(
+                "CAE mesh failed on original STEP and all Gmsh heal presets"
+            ) from mesh_exc
+
+    if step_heal_report.get("attempts") or step_heal_report.get("used_heal"):
+        STEP_HEAL_REPORT = step_heal_report
     print(f"  CAE mesh location: {MESH_LOCATION}", flush=True)
-    if not os.path.isfile(cae_mesh_inp):
-        raise FileNotFoundError(f"CAE mesh INP not written: {cae_mesh_inp}")
 
 mesh_nodes, mesh_elements = parse_cae_mesh_inp(
     cae_mesh_inp,
     part_name=_args.cae_part_name,
-    element_type="C3D4",
+    element_type=CAE_ELEMENT_TYPE,
 )
 elsets = {"solid": [int(e[0]) for e in mesh_elements]}
 pre_mesh = (mesh_nodes, mesh_elements, elsets)
 print(
-    f"  Parsed CAE mesh: {len(mesh_nodes)} nodes, {len(mesh_elements)} C3D4",
+    f"  Parsed CAE mesh: {len(mesh_nodes)} nodes, {len(mesh_elements)} {CAE_ELEMENT_TYPE}",
     flush=True,
 )
 
@@ -429,13 +571,14 @@ stats = export_inp(
     beams,
     paths["compression_inp"],
     polylines=polylines,
-    element_type="C3D4",
+    element_type=CAE_ELEMENT_TYPE,
     material_model=INP_MATERIAL_MODEL,
     material_name="TPU",
     c10=TPU_C10,
     elastic_e=E_MODULUS,
     elastic_nu=POISSON,
-    plastic_yield=None if USE_HYPERELASTIC else YIELD_MPA,
+    plastic_yield=PLASTIC_YIELD,
+    uniaxial_test_data=TPU_UNIAXIAL,
     density=DENSITY_ABQ,
     compression=compression,
     geom_tag=geom_tag,
@@ -464,8 +607,7 @@ meta = CompressionMeta.from_export_stats(
     r_support=gen.r_strut,
     r_vertical=gen.r_strut,
 )
-meta.reference_area_mm2 = NX * L * NY * L
-meta.reference_height_mm = NZ * L
+# from_export_stats sets reference area/height for top_down compression.
 meta.plate_fixed_ref_node_id = int(
     stats.get("fixed_plate_ref_node_id", stats.get("plate_fixed_ref_node_id", 0)) or 0
 )
@@ -473,6 +615,24 @@ save_compression_meta(meta, paths["meta_json"])
 
 manifest = {
     "slug": slug,
+    "slug_mode": SLUG_MODE,
+    "legacy_case_suffix": CASE_SUFFIX if SLUG_MODE == "long" else None,
+    "slug_descriptor": (
+        paperbox_slug_descriptor(
+            short_slug=slug,
+            period_factor=Q,
+            element_type=CAE_ELEMENT_TYPE,
+            seed_mm=CAE_SEED,
+            rods_per_diameter=CAE_RODS_PER_DIAMETER,
+            mesh_quality=CAE_MESH_QUALITY,
+            material_model=MATERIAL_KIND or "elastic",
+            target_strain=TARGET_STRAIN,
+            variant_name=gen.variant_name,
+            cad_step=MESH_STEP_USED,
+        )
+        if SLUG_MODE == "short"
+        else None
+    ),
     "profile": PROFILE,
     "stroke": "full",
     "stroke_tag": STROKE_TAG,
@@ -487,6 +647,7 @@ manifest = {
     "case_manifest": paths["case_manifest"],
     "meta_json": paths["meta_json"],
     "cad_step": step_path,
+    "cad_step_meshed": MESH_STEP_USED,
     "cad_xt": xt_path,
     "cad_verified_root": str(CAD_VERIFIED_ROOT),
     "cad_source": "verified",
@@ -503,13 +664,18 @@ manifest = {
         "block_cells": [NX, NY, NZ],
     },
     "material": {
+        "model": MATERIAL_KIND,
         "E_MPa": E_MODULUS,
         "nu": POISSON,
         "yield_MPa": YIELD_MPA,
         "density_kg_m3": DENSITY_KG_M3,
+        "neo_hooke_C10_MPa": TPU_C10 if USE_HYPERELASTIC else None,
+        "fig25_json": _args.tpu_fig25_json if MATERIAL_KIND in ("marlow", "polynomial") else None,
+        "fig25_n_points": len(TPU_UNIAXIAL) if TPU_UNIAXIAL else None,
+        "hyperelastic_fit": "polynomial_order1_testdata" if MATERIAL_KIND == "polynomial" else None,
     },
     "mesh": {
-        "element": "C3D4",
+        "element": CAE_ELEMENT_TYPE,
         "method": "cae_tet",
         "source": "abaqus_cae_tet_free",
         "cae_seed_mm": CAE_SEED,
@@ -517,11 +683,13 @@ manifest = {
         "cae_virtual_topology": bool(_args.cae_virtual_topology),
         "cae_rods_per_diameter": CAE_RODS_PER_DIAMETER,
         "cae_part_name": _args.cae_part_name,
+        "cae_element_type": CAE_ELEMENT_TYPE,
         "mesh_location": MESH_LOCATION,
         "remote_host": _args.remote_host if MESH_ON_SERVER else None,
         "remote_root": _args.remote_root if MESH_ON_SERVER else None,
         "node_count": stats.get("node_count"),
         "element_count": stats.get("element_count"),
+        "step_heal": STEP_HEAL_REPORT,
     },
     "loading": {
         "compression_displacement_mm": COMPRESSION_DISP,

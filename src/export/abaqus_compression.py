@@ -8,19 +8,30 @@ from typing import Iterable, TextIO
 import numpy as np
 import re
 
-# Hu & Bai (2024) §2.4 — quasi-static compression (Fig. 2.6 / 3.3)
-HU_BAI_LOAD_RATE_MM_MIN = 5.0
-HU_BAI_TARGET_ENGINEERING_STRAIN = 0.70
-HU_BAI_FRICTION = 0.1
-HU_BAI_EXPLICIT_DT = 1.0e-4
-HU_BAI_EXPLICIT_MASS_SCALING = 50.0
-HU_BAI_AMPLITUDE_HOLD_FRACTION = 0.05
-# TPU matrix (§2.3.2 tensile / §2.4.1 simulation): E=25 MPa, nu=0.47, rho=1.135 g/cm³
-HU_BAI_E_MODULUS_MPA = 25.0
-HU_BAI_POISSON = 0.47
-HU_BAI_YIELD_MPA = 4.69
-HU_BAI_DENSITY_KG_M3 = 1135.0
-HU_BAI_MESH_MM = 0.6
+# Hu & Bai (2024) thesis — values explicitly stated in the text:
+#   §2.1  geometry: 4×4×4 cells, L=20 mm, rod d=2 mm, Q∈{0,0.5,1,1.5}
+#   §2.3.2 tensile test: E=25 MPa, yield=4.69 MPa, ρ=1.135 g/cm³
+#   §2.4.1 compression FE: same ρ/E/ν; rigid top/bottom plates; bottom fixed, top
+#       vertical-only; μ=0.1 + normal hard contact; C3D4 mesh 0.6 mm; example step
+#       duration 0.64 s; quasi-static when KE/IE < 5% (Fig. 2.6)
+#   §2.4.2 compression test: crosshead 5 mm/min; stop at densification (no fixed ε)
+#
+# Not stated in thesis (repo defaults — do not cite as “原文”):
+#   target strain, Explicit Δt, mass scaling, amplitude hold, material model type
+#   (Neo-Hooke / elastic-plastic), rod self-contact, STORE OFFSETS, ContactSettle,
+#   gmsh/CAE mesh path, step time from stroke÷rate, fast/fast80 profiles, etc.
+
+HU_BAI_LOAD_RATE_MM_MIN = 5.0  # §2.4.2 experiment only; §2.4.1 FE rate unknown
+HU_BAI_TARGET_ENGINEERING_STRAIN = 0.70  # 原文未给出；本仓库 paper profile 默认
+HU_BAI_FRICTION = 0.1  # §2.4.1
+HU_BAI_EXPLICIT_DT = 1.0e-4  # 原文未给出
+HU_BAI_EXPLICIT_MASS_SCALING = 50.0  # 原文未给出
+HU_BAI_AMPLITUDE_HOLD_FRACTION = 0.05  # 原文未给出
+HU_BAI_E_MODULUS_MPA = 25.0  # §2.3.2 tensile; §2.4.1 compression FE
+HU_BAI_POISSON = 0.47  # §2.4.1
+HU_BAI_YIELD_MPA = 4.69  # §2.3.2 tensile only; §2.4.1 FE未写屈服/塑性
+HU_BAI_DENSITY_KG_M3 = 1135.0  # §2.3.2 / §2.4.1
+HU_BAI_MESH_MM = 0.6  # §2.4.1 C3D4 global size
 
 
 def hu_bai_neo_hooke_c10(e_mpa: float = HU_BAI_E_MODULUS_MPA, nu: float = HU_BAI_POISSON) -> float:
@@ -32,14 +43,14 @@ def hu_bai_neo_hooke_c10(e_mpa: float = HU_BAI_E_MODULUS_MPA, nu: float = HU_BAI
 def hu_bai_density_abq(kg_m3: float = HU_BAI_DENSITY_KG_M3) -> float:
     """Abaqus mm–tonne–s density from kg/m³."""
     return float(kg_m3) * 1.0e-12
-# Fig.3.3 fast80: 80% strain @ 1.2 mm; 5 mm/min quasi-static, dt=5e-4, hold 5%
+# fast80: repo profile for Fig. 3.3 axis range (ε≈0.8); mesh/dt/hold 原文未给出
 HU_BAI_FAST80_TARGET_STRAIN = 0.80
 HU_BAI_FAST80_MESH_MM = 1.2
 HU_BAI_FAST80_EXPLICIT_DT = 5.0e-4
 # Explicit *Restart NUMBER INTERVAL = time-slice count in the step (NOT increment count).
 EXPLICIT_RESTART_MAX_NUMBER_INTERVAL = 50
 EXPLICIT_RESTART_DEFAULT_NUMBER_INTERVAL = 8
-# Fig.2.6 explicit validation only (not 5 mm/min strain rate)
+# §2.4.1 example FE step duration (Fig. 2.6); not full stroke at 5 mm/min
 HU_BAI_FIG26_STEP_TIME_S = 0.64
 
 
@@ -79,7 +90,7 @@ def hu_bai_quasi_static_step_time(
     *,
     load_rate_mm_min: float = HU_BAI_LOAD_RATE_MM_MIN,
 ) -> float:
-    """Step duration [s] for constant crosshead rate (paper: 5 mm/min)."""
+    """Step duration [s] for constant crosshead rate (§2.4.2 experiment uses 5 mm/min)."""
     rate_mm_s = float(load_rate_mm_min) / 60.0
     if rate_mm_s <= 0.0:
         raise ValueError("load_rate_mm_min must be positive")
@@ -92,7 +103,7 @@ def hu_bai_compression_displacement(
     *,
     target_strain: float = HU_BAI_TARGET_ENGINEERING_STRAIN,
 ) -> float:
-    """Prescribed plate stroke [mm] for engineering strain target."""
+    """Prescribed plate stroke [mm] for engineering strain target (Z-axis compression)."""
     return float(target_strain) * float(nz) * float(cell_size)
 
 
@@ -148,7 +159,7 @@ class CompressionSettings:
     bottom_node_z_band: float | None = None
     # bottom_up：是否在顶面加固定刚体板（双压板试验，CAE 可视化更直观）
     passive_counter_plate: bool | None = None
-    # top_down：底面固定刚体板 + 面接触（Hu & Bai 2024 Fig.2.6）
+    # top_down：底面固定刚体板 + 面接触（§2.4.1 Fig. 2.6 边界条件）
     fixed_bottom_plate: bool = False
 
     analysis: str = "explicit"
@@ -271,6 +282,10 @@ class CompressionSettings:
     def is_bottom_up(self) -> bool:
         return self.loading_direction.lower() in ("bottom_up", "up", "from_bottom")
 
+    def compression_dof(self) -> int:
+        """Abaqus translational DOF for prescribed compression (Z)."""
+        return 3
+
     def use_passive_counter_plate(self) -> bool:
         if self.passive_counter_plate is not None:
             return bool(self.passive_counter_plate)
@@ -310,7 +325,7 @@ class CompressionSettings:
         return self.resolved_top_node_z_band()
 
     def signed_compression_displacement(self) -> float:
-        """Plate / coupled-node U3 target (negative = down, positive = up)."""
+        """Plate displacement target on compression DOF (U3)."""
         if self.is_bottom_up():
             return self.compression_displacement
         return -self.compression_displacement
@@ -557,6 +572,16 @@ def collect_c3d8_bottom_element_faces(
     return bottom_faces
 
 
+def iter_linear_tet_corners(
+    mesh_elements: Iterable[tuple[int, ...]],
+) -> Iterable[tuple[int, int, int, int, int]]:
+    """Yield (eid, n1..n4) corner nodes from C3D4 or C3D10M connectivity."""
+    for row in mesh_elements:
+        if len(row) < 5:
+            continue
+        yield int(row[0]), int(row[1]), int(row[2]), int(row[3]), int(row[4])
+
+
 def collect_c3d4_bottom_element_faces(
     mesh_nodes: Iterable[tuple[int, float, float, float]],
     mesh_elements: Iterable[tuple[int, int, int, int, int]],
@@ -575,7 +600,7 @@ def collect_c3d4_bottom_element_faces(
     z_cut = z_min + z_band
     bottom_faces: list[tuple[int, str]] = []
 
-    for eid, n1, n2, n3, n4 in mesh_elements:
+    for eid, n1, n2, n3, n4 in iter_linear_tet_corners(mesh_elements):
         nids = (n1, n2, n3, n4)
         elem_center = sum(coords[n] for n in nids) / 4.0
         for label, corners in _C3D4_FACE_CORNERS.items():
@@ -615,7 +640,7 @@ def collect_c3d4_top_element_faces(
     z_cut = z_max - z_band
     top_faces: list[tuple[int, str]] = []
 
-    for eid, n1, n2, n3, n4 in mesh_elements:
+    for eid, n1, n2, n3, n4 in iter_linear_tet_corners(mesh_elements):
         nids = (n1, n2, n3, n4)
         elem_center = sum(coords[n] for n in nids) / 4.0
         for label, corners in _C3D4_FACE_CORNERS.items():
@@ -646,7 +671,7 @@ def collect_c3d4_exterior_faces(
         return []
 
     exterior: list[tuple[int, str]] = []
-    for eid, n1, n2, n3, n4 in mesh_elements:
+    for eid, n1, n2, n3, n4 in iter_linear_tet_corners(mesh_elements):
         nids = (n1, n2, n3, n4)
         elem_center = sum(coords[n] for n in nids) / 4.0
         for label, corners in _C3D4_FACE_CORNERS.items():
@@ -900,7 +925,7 @@ def write_plate_pair_general_contact(
 
     *Contact Pair + type=SURFACE TO SURFACE is Standard-only and rejects C3D8R
     element-based slave surfaces. General contact inclusions between named
-    lattice/plate surfaces matches Fig. 2.6 without rod self-contact.
+    lattice/plate surfaces (§2.4.1 Fig. 2.6; rod self-contact 原文未写).
     """
     if not surface_pairs:
         return
@@ -958,6 +983,7 @@ def write_compression_sections(
     disp = settings.signed_compression_displacement()
     t_total = settings.step_time
     plate_thk = settings.plate_thickness
+    comp_dof = settings.compression_dof()
 
     fixed_nset = "TOP_FIX" if bottom_up else "BOTTOM_FIX"
     load_face_surf = "LATTICE_BOTTOM" if bottom_up else "LATTICE_TOP"
@@ -967,8 +993,6 @@ def write_compression_sections(
     plate_face = "SPOS" if bottom_up else "SNEG"
     plate_label = "底板" if bottom_up else "顶板"
     load_end_label = "底面" if bottom_up else "顶面"
-    use_counter = bottom_up and bool(counter_plate_elem_ids) and counter_ref_node_id is not None
-
     use_counter = bottom_up and bool(counter_plate_elem_ids) and counter_ref_node_id is not None
     use_fixed_bottom = settings.use_fixed_bottom_plate() and bool(fixed_plate_elem_ids) and fixed_ref_node_id is not None
 
@@ -1015,7 +1039,7 @@ PLATE, {plate_face}
             f"""*Shell Section, elset=PLATE_FIXED, material=PLATE-STEEL
 {plate_thk:.12g}
 *Rigid Body, elset=PLATE_FIXED, ref node={int(fixed_ref_node_id)}
-** --- 底面固定刚体板（Fig.2.6 RP2 ENCASTRE）---
+** --- 底面固定刚体板（§2.4.1 Fig. 2.6 底端完全固定）---
 *Surface, type=ELEMENT, name=PLATE_FIXED_TOP
 PLATE_FIXED, SPOS
 """
@@ -1111,7 +1135,7 @@ LATTICE_TOP_NODES,
         else (
             f"PLATE_FIXED_REF, 1, 6, 0.\n"
             if use_fixed_bottom
-            else f"{fixed_nset}, 1, 3, 0.\n"
+            else f"{fixed_nset}, 1, {comp_dof}, 0.\n"
         )
     )
     f.write(
@@ -1148,12 +1172,12 @@ LATTICE_BOTTOM, PLATE_FIXED_TOP
 
     if mode == "direct_top":
         compression_bc = f"""*Boundary, type=DISPLACEMENT, op=MOD, amplitude={amp}
-{load_node_nset}, 3, 3, {disp:.12g}
-PLATE_REF, 3, 3, {disp:.12g}
+{load_node_nset}, {comp_dof}, {comp_dof}, {disp:.12g}
+PLATE_REF, {comp_dof}, {comp_dof}, {disp:.12g}
 """
     else:
         compression_bc = f"""*Boundary, type=DISPLACEMENT, op=MOD, amplitude={amp}
-PLATE_REF, 3, 3, {disp:.12g}
+PLATE_REF, {comp_dof}, {comp_dof}, {disp:.12g}
 """
 
     def _write_step_outputs(step_time: float, *, full: bool) -> None:
@@ -1225,12 +1249,12 @@ RF, U
 """
         )
         t_hold = max(0.0, min(0.5, settings.amplitude_hold_fraction)) * t_compress
+        hold_mid = f"{t_hold:.12g}, 0.\n" if t_hold > 1e-9 else ""
         f.write(
             f"""** 位移幅值（STEP TIME；压缩步内 ramp）
 *Amplitude, name={amp}, time=STEP TIME
 0., 0.
-{t_hold:.12g}, 0.
-{t_compress:.12g}, 1.
+{hold_mid}{t_compress:.12g}, 1.
 
 *Step, name={settings.step_name}, nlgeom=YES
 """
@@ -1260,12 +1284,12 @@ RF, U
         return
 
     t_hold = max(0.0, min(0.5, settings.amplitude_hold_fraction)) * t_total
+    hold_mid = f"{t_hold:.12g}, 0.\n" if t_hold > 1e-9 else ""
     f.write(
         f"""** 位移幅值（每行一对 time,value；不可写 3 对在一行）
 *Amplitude, name={amp}, time=TOTAL TIME
 0., 0.
-{t_hold:.12g}, 0.
-{t_total:.12g}, 1.
+{hold_mid}{t_total:.12g}, 1.
 
 *Step, name={settings.step_name}, nlgeom=YES
 """

@@ -134,7 +134,7 @@ def main() -> int:
     parser.add_argument(
         "--paper-style",
         action="store_true",
-        help="Axis labels matching Hu & Bai thesis Fig. 3.3 (应变 / 应力 MPa)",
+        help="Chinese axis labels for Fig. 3.3 style plots (应变 / 应力 MPa)",
     )
     parser.add_argument(
         "--no-show",

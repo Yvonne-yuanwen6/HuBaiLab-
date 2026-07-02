@@ -23,7 +23,7 @@ if ($SlugQueue.Count -eq 0) { $SlugQueue = @($Slug) }
 
 $RemoteWatch = [bool]$RemoteHost -and [bool]$RemoteRoot
 if ($RemoteHost -xor $RemoteRoot) {
-    throw "Use -RemoteHost and -RemoteRoot together (e.g. art@172.20.200.93 and /home/art/.../HuBaiLab)."
+    throw "Use -RemoteHost and -RemoteRoot together (e.g. art@172.20.200.93 and /media/art/file/XiangLang/Lattice/LWY/HuBaiLab)."
 }
 
 function Sync-RemoteJobFiles {
@@ -81,7 +81,9 @@ function Parse-StaLine {
         return [PSCustomObject]@{
             Kind = 'inc'
             Inc = [int]$Matches[1]
-            SimS = [double]$Matches[3]
+            # Column 2 = current-step time; column 3 = total time (includes restart history).
+            SimS = [double]$Matches[2]
+            TotalS = [double]$Matches[3]
             Wall = [string]$Matches[4]
             Ke = [double]$Matches[7]
             Ie = [double]$Matches[8]
@@ -91,6 +93,8 @@ function Parse-StaLine {
 }
 
 function Get-JobStatus {
+    # .lck is authoritative while Abaqus holds the job open.
+    if (Test-Path $Lck) { return 'RUNNING' }
     if ($RemoteWatch -and (Test-Path $Sta)) {
         $t = Get-Content $Sta -Raw -ErrorAction SilentlyContinue
         if ($t -match 'THE ANALYSIS HAS COMPLETED SUCCESSFULLY') { return 'COMPLETED' }
@@ -102,7 +106,7 @@ function Get-JobStatus {
         if ($t -match 'THE ANALYSIS HAS NOT BEEN COMPLETED') { return 'FAILED' }
         if ($t -match 'deformation speed/wave speed') { return 'FAILED' }
     }
-    if ((Test-Path $Lck) -or ((-not $RemoteWatch) -and (Get-Process explicit -ErrorAction SilentlyContinue))) {
+    if ((-not $RemoteWatch) -and (Get-Process explicit -ErrorAction SilentlyContinue)) {
         return 'RUNNING'
     }
     if (Test-Path $Sta) { return 'STOPPED' }
@@ -135,6 +139,8 @@ while ($queueIdx -lt $SlugQueue.Count) {
 
     $stepTime = $StepTimeS
     $targetStrain = $TargetStrain
+    $strainBase = 0.0
+    $continueTag = ''
     if ($UseMeta -or $stepTime -le 0) {
         $meta = Resolve-JobMeta -JobSlug $Slug
         if ($meta) {
@@ -142,11 +148,20 @@ while ($queueIdx -lt $SlugQueue.Count) {
             if ($meta.reference_height_mm -gt 0) {
                 $targetStrain = [double]$meta.compression_displacement / [double]$meta.reference_height_mm
             }
+            if ($meta.restart_continue) {
+                $rc = $meta.restart_continue
+                $strainBase = [double]$rc.source_strain
+                $targetStrain = [double]$rc.target_strain
+                $continueTag = " continue from $($rc.source_slug) @ $([int](100*$strainBase))%"
+            } elseif ($meta.loading -and $meta.loading.continue_source_strain) {
+                $strainBase = [double]$meta.loading.continue_source_strain
+                $continueTag = " continue from $([int](100*$strainBase))%"
+            }
         }
     }
     if ($stepTime -le 0) { $stepTime = 480 }
 
-    Write-Host "--- $Slug (step=${stepTime}s, strain~$([int]($targetStrain*100))%) ---" -ForegroundColor Cyan
+    Write-Host "--- $Slug (step=${stepTime}s, strain~$([int]($targetStrain*100))%$continueTag) ---" -ForegroundColor Cyan
     Write-Host "  sta: $Sta"
     Write-Host ""
 
@@ -155,6 +170,7 @@ while ($true) {
     $status = Get-JobStatus
     $now = Get-Date -Format 'HH:mm:ss'
     $simS = 0.0
+    $totalS = 0.0
     $ke = $null
     $ie = $null
     $wallSec = 0
@@ -171,6 +187,7 @@ while ($true) {
                 if ($p.SimS -gt $simS) { $simS = $p.SimS }
             } elseif ($p.Kind -eq 'inc') {
                 $simS = $p.SimS
+                $totalS = $p.TotalS
                 $ke = $p.Ke
                 $ie = $p.Ie
                 $ts = [TimeSpan]::Parse($p.Wall)
@@ -180,7 +197,8 @@ while ($true) {
     }
 
     $pct = if ($stepTime -gt 0) { [math]::Min(100, 100 * $simS / $stepTime) } else { 0 }
-    $strain = $targetStrain * $simS / $stepTime
+    $deltaStrain = [math]::Max(0.0, $targetStrain - $strainBase)
+    $strain = $strainBase + $deltaStrain * $simS / $stepTime
     $barLen = 40
     $filled = [int][math]::Floor($barLen * $pct / 100)
     $bar = ('#' * $filled).PadRight($barLen, '-')
@@ -194,8 +212,9 @@ while ($true) {
         default { 'Gray' }
     }
 
+    $totalNote = if ($totalS -gt ($simS + 1.0)) { "  total=${totalS:F1}s" } else { '' }
     Write-Host ("[{0}] {1}" -f $now, $status) -ForegroundColor $color
-    Write-Host ("  [{0}] {1,5:F1}%  sim {2,7:F1}/{3} s  strain ~{4,5:F1}%  wall {5}" -f $bar, $pct, $simS, $stepTime, ($strain*100), ($(if($wallSec){[TimeSpan]::FromSeconds($wallSec).ToString('hh\:mm\:ss')}else{'--:--:--'})))
+    Write-Host ("  [{0}] {1,5:F1}%  step {2,7:F1}/{3} s{4}  strain ~{5,5:F1}%  wall {6}" -f $bar, $pct, $simS, $stepTime, $totalNote, ($strain*100), ($(if($wallSec){[TimeSpan]::FromSeconds($wallSec).ToString('hh\:mm\:ss')}else{'--:--:--'})))
     if ($frameInfo) { Write-Host "  $frameInfo" }
     if ($null -ne $ke) {
         $tail = if ($null -eq $explicitN) { "ETA~$eta" } else { "explicit_procs=$explicitN  ETA~$eta" }

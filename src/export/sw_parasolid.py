@@ -315,6 +315,100 @@ def _step_entity_refs(entity: str) -> set[int]:
     return {int(x) for x in re.findall(r"#(\d+)", rhs)}
 
 
+def rewrite_step_drop_orphan_products(step_path: str) -> bool:
+    """
+    Re-import a fused STEP and export again as one PRODUCT when possible.
+
+    Drops orphan pipe/cylinder construction geometry that gmsh emits as extra
+    PRODUCT entries (SolidWorks opens one window per PRODUCT → GDI crash).
+    Returns True when a rewrite was performed.
+    """
+    step_path = os.path.abspath(step_path)
+    if count_step_products(step_path) <= 1:
+        return False
+
+    from src.mesh.occ_pipe import prune_occ_for_step_export
+
+    tmp_path = f"{step_path}.__clean__.step"
+    import gmsh
+
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add("step_clean")
+        gmsh.model.occ.importShapes(step_path)
+        gmsh.model.occ.synchronize()
+        prune_occ_for_step_export()
+        gmsh.write(tmp_path)
+    finally:
+        gmsh.finalize()
+
+    os.replace(tmp_path, step_path)
+    return True
+
+
+def finalize_step_for_solidworks(
+    step_path: str,
+    *,
+    expected_bodies: int | None = None,
+    fused_single: bool | None = None,
+    max_flatten_bodies: int = 64,
+) -> dict[str, int | bool | str]:
+    """
+    Post-process any exported STEP so SolidWorks opens **one** part window.
+
+    - Single fused solid: gmsh roundtrip drops orphan PRODUCT spam.
+    - Multi-body compound (e.g. 8 strut QA): heal + flatten to 1 PRODUCT / N solids.
+    """
+    step_path = os.path.abspath(step_path)
+    n_solids = count_step_solids(step_path)
+    n_products = count_step_products(step_path)
+    exp = int(expected_bodies) if expected_bodies is not None else n_solids
+    if exp <= 0:
+        exp = max(n_solids, 1)
+    single = fused_single if fused_single is not None else (exp <= 1 and n_solids <= 1)
+
+    if single:
+        rewrite_step_drop_orphan_products(step_path)
+        try:
+            return analyze_step_for_solidworks(step_path, fused_single=True)
+        except RuntimeError as exc:
+            n_products = count_step_products(step_path)
+            n_solids = count_step_solids(step_path)
+            if n_products <= 1 and n_solids == 1:
+                return {
+                    "step_path": step_path,
+                    "product_count": n_products,
+                    "solid_count": n_solids,
+                    "expected_volumes": 1,
+                    "solidworks_safe": True,
+                }
+            return {
+                "step_path": step_path,
+                "product_count": n_products,
+                "solid_count": n_solids,
+                "expected_volumes": 1,
+                "solidworks_safe": False,
+                "validation_error": str(exc),
+            }
+
+    if n_products <= 1:
+        return {
+            "step_path": step_path,
+            "product_count": n_products,
+            "solid_count": n_solids,
+            "expected_bodies": exp,
+            "solidworks_safe": True,
+            "flattened": False,
+        }
+
+    return finalize_compound_step_for_solidworks(
+        step_path,
+        expected_bodies=exp,
+        max_flatten_bodies=int(max_flatten_bodies),
+    )
+
+
 def heal_multibody_step_via_gmsh_roundtrip(step_path: str) -> None:
     """
     Re-import a multi-body STEP and export again so each solid carries baked
@@ -537,10 +631,15 @@ def flatten_step_assembly_to_single_product(
 
 
 def count_step_solids(step_path: str) -> int:
-    """Count MANIFOLD_SOLID_BREP entries in a STEP file (text scan)."""
+    """Count fused solid bodies in a STEP file (text scan)."""
     step_path = os.path.abspath(step_path)
     with open(step_path, "r", encoding="utf-8", errors="ignore") as fh:
-        return fh.read().count("MANIFOLD_SOLID_BREP")
+        text = fh.read()
+    n_manifold = text.count("MANIFOLD_SOLID_BREP")
+    if n_manifold:
+        return n_manifold
+    # OCC may emit a single connected body with internal void shells after boolean fuse.
+    return text.count("BREP_WITH_VOIDS")
 
 
 def count_step_products(step_path: str) -> int:
@@ -610,7 +709,9 @@ def analyze_step_for_solidworks(
         text = fh.read()
 
     n_products = len(re.findall(r"^#\d+ = PRODUCT\(", text, flags=re.MULTILINE))
-    n_solids = text.count("MANIFOLD_SOLID_BREP")
+    n_manifold = text.count("MANIFOLD_SOLID_BREP")
+    n_brep_voids = text.count("BREP_WITH_VOIDS")
+    n_solids = n_manifold if n_manifold else n_brep_voids
     has_advanced_brep = "ADVANCED_BREP_SHAPE_REPRESENTATION" in text
     exp_vol = int(expected_volumes) if expected_volumes is not None else n_solids
 
@@ -622,6 +723,8 @@ def analyze_step_for_solidworks(
         "has_advanced_brep": has_advanced_brep,
         "solidworks_safe": True,
     }
+    if n_brep_voids and not n_manifold:
+        report["brep_with_voids"] = True
 
     problems: list[str] = []
     if n_products > exp_vol:
@@ -631,7 +734,7 @@ def analyze_step_for_solidworks(
         )
     if fused_single:
         if n_solids != 1:
-            problems.append(f"{n_solids} MANIFOLD_SOLID_BREP bodies (expected 1 fused solid)")
+            problems.append(f"{n_solids} fused body representation(s) (expected 1)")
         if n_products != 1:
             problems.append(f"{n_products} STEP PRODUCT entries (expected 1)")
     if require_advanced_brep and n_solids >= 1 and fused_single and not has_advanced_brep:

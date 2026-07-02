@@ -1,5 +1,5 @@
 """
-Hu & Bai 2024 — BCC / SFBLS 3D wireframe preview (Fig. 3.3).
+Hu & Bai 2024 — BCC / SFBLS 3D wireframe preview (Fig. 3.3 structures).
 
   py -3 scripts/preview_hu_bai_sfbls.py --all-q --cells 1
   py -3 scripts/preview_hu_bai_sfbls.py --Q 0.5 --cells 1
@@ -21,7 +21,7 @@ from src.paths import PREVIEWS_ROOT
 from src.visualization.plot_lattice import plot_lattice
 
 _parser = argparse.ArgumentParser(description="Hu & Bai SFBLS 3D wireframe preview")
-_parser.add_argument("--Q", type=float, default=None, help="Period factor; default all Fig.3.3 Q values")
+_parser.add_argument("--Q", type=float, default=None, help="Period factor; default Q from §2.1")
 _parser.add_argument("--cells", type=int, default=1, help="Cells per axis (1=unit cell)")
 _parser.add_argument("--n-segments", type=int, default=16, help="Polyline segments per strut")
 _parser.add_argument("--Af", type=float, default=2.0)
