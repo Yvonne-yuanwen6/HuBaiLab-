@@ -2,7 +2,12 @@
 __pycache__/
 *.py[cod]
 .venv/
+.cache/
 *.egg-info/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
 
 # IDE
 .vscode/
@@ -23,6 +28,16 @@ output/**/*
 *.stt
 *.log
 *.abq
+abaqus*.rec
+abaqus.rpy*
+ABQcae*.exception
+cae_hex_export.inp
+temp-*.sat
+
+# 一次性调试 / 探测脚本
+scripts/_tmp_*
+scripts/_debug_*
+scripts/linux/_tmp_*
 
 # 大文件（不纳入 Git，请打包分享）
 *.stl

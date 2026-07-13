@@ -20,7 +20,7 @@ AUTO_FUSE_Q_PROFILES: dict[float, dict[str, Any]] = {
         "label": "BCC (Q=0)",
         "auto_fuse_enabled": False,
         "recommended_route": "run_sfbls_sw_stepwise_4x4x4_pipeline.ps1 -Q 0",
-        "notes": "ON HOLD: use SW stepwise. See docs/cad_fuse_routes.md.",
+        "notes": "ON HOLD: use SW stepwise. See docs/CAD融合路线与已知问题.md.",
         "known_issues": [
             "legacy export_sw inter-cell: stale dimtag after pairwise stall (tag 12 crash)",
             "array_auto_fuse safe path: iz0 OK but 4x4x4 often stalls/exits silently on iz1+",

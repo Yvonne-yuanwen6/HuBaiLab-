@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import tempfile
 from collections import defaultdict
 from typing import Iterable
 
@@ -12,6 +11,7 @@ import numpy as np
 from src.export.export_sw import _segment_trimesh_cylinder, _union_all_meshes, _union_meshes_tree
 from src.mesh.junction_mesh import collect_solid_junction_radii, effective_solid_radius
 from src.mesh.solid_profiles import SOLID_SKIP_BEAM_TYPES, polyline_mesh_profile
+from src.paths import hubai_temp_directory
 
 
 def _node_lookup(nodes: list) -> dict[int, tuple[float, float, float]]:
@@ -472,7 +472,7 @@ def step_to_trimesh_surface(
             )
         gmsh.model.mesh.generate(2)
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with hubai_temp_directory(prefix="gmsh_shell_") as tmp:
             stl_path = os.path.join(tmp, "shell.stl")
             gmsh.write(stl_path)
             loaded = trimesh.load(stl_path)
@@ -528,7 +528,7 @@ def mesh_union_gmsh_tets(
     """
     import gmsh
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with hubai_temp_directory(prefix="gmsh_union_") as tmp:
         stl_path = os.path.join(tmp, "union.stl")
         union_mesh.export(stl_path)
 

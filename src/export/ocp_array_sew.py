@@ -28,6 +28,7 @@ from src.export.unitcell_box_cut import (
     unitcell_octant_corner_signs,
     unitcell_octant_corners_mm,
 )
+from src.util.work_guard import default_ocp_array_timeout_sec, run_module_with_timeout
 
 # Symmetric pad on inter-cell RVE faces (same thickness as centre bisector overlap).
 PERIODIC_FACE_OVERLAP_MM = OCTANT_CENTER_OVERLAP_MM
@@ -945,8 +946,65 @@ def export_ocp_array_sew(
     periodic_axes: tuple[str, ...] = ("x",),
     method: str = "cell_glue",
     glue_fuzzy_mm: float = 0.05,
+    timeout_sec: float | None = None,
+    max_cells: int = 64,
 ) -> dict[str, Any]:
-    """Build nx×ny Q1 octant struts, sew/glue to one solid, export STEP."""
+    """Build nx×ny Q1 octant struts, sew/glue to one solid, export STEP.
+
+    OCP boolean/sew can hang without bound; by default runs in a child process
+    with a wall-clock limit (see ``src.util.work_guard``).
+    """
+    n_cells = int(nx) * int(ny)
+    if n_cells > int(max_cells):
+        raise ValueError(
+            f"OCP array sew: {nx}x{ny}={n_cells} cells exceeds max_cells={max_cells}"
+        )
+    wall = (
+        float(timeout_sec)
+        if timeout_sec is not None
+        else default_ocp_array_timeout_sec(nx=int(nx), ny=int(ny), method=method)
+    )
+    kwargs = {
+        "path": path,
+        "nx": nx,
+        "ny": ny,
+        "iz": iz,
+        "nz_total": nz_total,
+        "cell_size_mm": cell_size_mm,
+        "sew_tolerance_mm": sew_tolerance_mm,
+        "center_overlap_mm": center_overlap_mm,
+        "periodic_overlap_mm": periodic_overlap_mm,
+        "periodic_axes": periodic_axes,
+        "method": method,
+        "glue_fuzzy_mm": glue_fuzzy_mm,
+    }
+    label = f"ocp_array_sew {nx}x{ny} {method}"
+    print(f"  Wall timeout: {wall:g}s (max_cells={max_cells})", flush=True)
+    return run_module_with_timeout(
+        module_name=__name__,
+        func_name="_export_ocp_array_sew_impl",
+        kwargs=kwargs,
+        timeout_sec=wall,
+        label=label,
+    )
+
+
+def _export_ocp_array_sew_impl(
+    path: str,
+    *,
+    nx: int,
+    ny: int,
+    iz: int = 0,
+    nz_total: int = 1,
+    cell_size_mm: float = 20.0,
+    sew_tolerance_mm: float = 0.05,
+    center_overlap_mm: float = OCTANT_CENTER_OVERLAP_MM,
+    periodic_overlap_mm: float = PERIODIC_FACE_OVERLAP_MM,
+    periodic_axes: tuple[str, ...] = ("x",),
+    method: str = "cell_glue",
+    glue_fuzzy_mm: float = 0.05,
+) -> dict[str, Any]:
+    """Internal implementation (may run in a timeout-guarded child process)."""
     path = os.path.abspath(path)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     n_cells = int(nx) * int(ny)

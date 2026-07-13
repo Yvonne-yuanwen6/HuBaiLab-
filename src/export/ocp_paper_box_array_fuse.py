@@ -255,9 +255,11 @@ def _ocp_fuse_zslab_cells(
     )
 
 
-def _ocp_write_fused_step(shape: Any, path: str) -> dict[str, Any]:
+def _ocp_write_fused_step(shape: Any, path: str, *, skip_gmsh_heal: bool = False) -> dict[str, Any]:
     export_shape = ocp_heal_fused_solid(shape)
-    readback = ocp_write_step_via_gmsh_brep_heal(export_shape, path)
+    readback = ocp_write_step_via_gmsh_brep_heal(
+        export_shape, path, skip_gmsh_heal=skip_gmsh_heal
+    )
     step_report = _rewrite_and_analyze_fused_step(
         path,
         prior={
@@ -585,6 +587,7 @@ def export_ocp_paper_box_array_from_zslabs(
     fuzzy_mm: float = DEFAULT_OCP_INTER_ROW_FUZZY_MM,
     progress_label: str = "ocp-inter-slab",
     fuse_mode: str = DEFAULT_OCP_INTER_CELL_FUSE_MODE,
+    skip_gmsh_heal: bool = False,
 ) -> dict[str, Any]:
     """Merge fused z-slab STEPs → one array solid (GlueShift batch or sequential)."""
     zslab_steps = [os.path.abspath(p) for p in zslab_steps]
@@ -621,7 +624,7 @@ def export_ocp_paper_box_array_from_zslabs(
             f"OCP array merge mass {fused_mass:.1f} < 85% of {expected:.1f} mm³"
         )
 
-    step_report = _ocp_write_fused_step(fused, path)
+    step_report = _ocp_write_fused_step(fused, path, skip_gmsh_heal=skip_gmsh_heal)
     return {
         "step_path": path,
         "zslab_inputs": zslab_steps,
@@ -630,6 +633,71 @@ def export_ocp_paper_box_array_from_zslabs(
         "step_solidworks_safe": step_report.get("solidworks_safe"),
         "merged_mass_mm3": fused_mass,
         "method": "ocp_paper_box_zslab_merge",
+        "glue": glue,
+    }
+
+
+def export_ocp_paper_box_array_ladder_from_zslabs(
+    zslab_steps: list[str],
+    path: str,
+    *,
+    glue: GlueMode = DEFAULT_OCP_INTER_ROW_GLUE,
+    fuzzy_mm: float = DEFAULT_OCP_INTER_ROW_FUZZY_MM,
+    progress_label: str = "ocp-inter-slab-ladder",
+    skip_gmsh_heal: bool = True,
+) -> dict[str, Any]:
+    """Merge z-slabs as (iz0+iz1) + (iz2+iz3), then fuse the two halves."""
+    zslab_steps = [os.path.abspath(p) for p in zslab_steps]
+    path = os.path.abspath(path)
+    if len(zslab_steps) != 4:
+        raise ValueError("ladder merge expects exactly 4 z-slabs")
+    for p in zslab_steps:
+        if not os.path.isfile(p):
+            raise FileNotFoundError(f"Missing z-slab STEP: {p}")
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    print(f"  OCP ladder inter-slab merge: 2+2 -> 1...", flush=True)
+    shapes = [ocp_read_step_shape(p) for p in zslab_steps]
+    slab_masses = [ocp_mass(s) for s in shapes]
+    ref = sum(slab_masses) / max(1, len(slab_masses))
+
+    half01 = _ocp_fuse_group_sequential(
+        shapes[0:2],
+        glue=glue,
+        fuzzy_mm=fuzzy_mm,
+        label=f"{progress_label}-half01",
+        ref_mass_per_piece=ref,
+    )
+    half23 = _ocp_fuse_group_sequential(
+        shapes[2:4],
+        glue=glue,
+        fuzzy_mm=fuzzy_mm,
+        label=f"{progress_label}-half23",
+        ref_mass_per_piece=ref,
+    )
+    fused = _ocp_fuse_group_sequential(
+        [half01, half23],
+        glue=glue,
+        fuzzy_mm=fuzzy_mm,
+        label=f"{progress_label}-final",
+        ref_mass_per_piece=ref * 2.0,
+    )
+    fused_mass = ocp_mass(fused)
+    expected = sum(slab_masses)
+    if fused_mass < 0.85 * expected:
+        raise RuntimeError(
+            f"OCP ladder merge mass {fused_mass:.1f} < 85% of {expected:.1f} mm³"
+        )
+
+    step_report = _ocp_write_fused_step(fused, path, skip_gmsh_heal=skip_gmsh_heal)
+    return {
+        "step_path": path,
+        "zslab_inputs": zslab_steps,
+        "fused_volume_count": int(step_report.get("solid_count", 0)),
+        "step_product_count": step_report.get("product_count"),
+        "step_solidworks_safe": step_report.get("solidworks_safe"),
+        "merged_mass_mm3": fused_mass,
+        "method": "ocp_paper_box_zslab_ladder_merge",
         "glue": glue,
     }
 

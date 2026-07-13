@@ -59,10 +59,11 @@ def _write_tpu_material(
         data = list(uniaxial_test_data or [])
         if len(data) < 3:
             raise ValueError("marlow material requires >=3 uniaxial test data points")
-        f.write("*Hyperelastic, marlow\n")
+        # Abaqus *Uniaxial Test Data: nominal stress (MPa), nominal strain.
+        f.write(f"*Hyperelastic, marlow, poisson={float(elastic_nu)}\n")
         f.write("*Uniaxial Test Data\n")
         for e, s in data:
-            f.write(f"{float(e)}, {float(s)}\n")
+            f.write(f"{float(s)}, {float(e)}\n")
     elif mat in ("polynomial", "hyperelastic_polynomial", "hyperelastic_testdata_polynomial"):
         data = list(uniaxial_test_data or [])
         if len(data) < 3:

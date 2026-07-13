@@ -3,6 +3,8 @@
 #   $env:HU_BAI_REMOTE_HOST = "art@172.20.200.93"
 #   $env:HU_BAI_REMOTE_ROOT = "/media/art/file/XiangLang/Lattice/LWY/HuBaiLab"
 
+. (Join-Path $PSScriptRoot "local_config.ps1")
+
 if (-not $env:HU_BAI_REMOTE_HOST) {
     $env:HU_BAI_REMOTE_HOST = "art@172.20.200.93"
 }

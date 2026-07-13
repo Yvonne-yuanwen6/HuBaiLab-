@@ -171,6 +171,68 @@ def ocp_write_step(shape: Any, path: str) -> None:
         raise RuntimeError(f"STEP write failed for {path} (status={status})")
 
 
+def _gmsh_brep_to_step_once(
+    brep_path: str,
+    abs_path: str,
+    *,
+    route_name: str,
+    heal_mm: float | None,
+) -> tuple[str, float | None]:
+    """Import BREP in a fresh gmsh session, optional heal, write STEP."""
+    import gmsh
+
+    from src.mesh.occ_pipe import prune_occ_for_step_export
+
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add(route_name)
+        gmsh.model.occ.importShapes(brep_path)
+        gmsh.model.occ.synchronize()
+        n_vol = len(gmsh.model.getEntities(3))
+        print(f"  gmsh export [{route_name}]: BREP import -> {n_vol} volume(s)", flush=True)
+        if n_vol > 1:
+            tags = [t[1] for t in gmsh.model.getEntities(3)]
+            gmsh.model.occ.fuse([(3, tags[0])], [(3, t) for t in tags[1:]])
+            gmsh.model.occ.synchronize()
+            n_vol = len(gmsh.model.getEntities(3))
+            print(f"  gmsh export [{route_name}]: after fuse -> {n_vol} volume(s)", flush=True)
+        gmsh.model.occ.removeAllDuplicates()
+        gmsh.model.occ.synchronize()
+
+        if heal_mm is not None:
+            print(
+                f"  gmsh export [{route_name}]: healShapes tol={float(heal_mm):g} mm...",
+                flush=True,
+            )
+            gmsh.model.occ.healShapes(
+                tolerance=float(heal_mm),
+                fixDegenerated=True,
+                fixSmallEdges=True,
+                fixSmallFaces=True,
+                sewFaces=True,
+                makeSolids=True,
+            )
+            gmsh.model.occ.synchronize()
+            n_vol = len(gmsh.model.getEntities(3))
+            print(f"  gmsh export [{route_name}]: after heal -> {n_vol} volume(s)", flush=True)
+
+        if n_vol > 1:
+            tags = [t[1] for t in gmsh.model.getEntities(3)]
+            gmsh.model.occ.fuse([(3, tags[0])], [(3, t) for t in tags[1:]])
+            gmsh.model.occ.synchronize()
+            n_vol = len(gmsh.model.getEntities(3))
+        if n_vol != 1:
+            raise RuntimeError(f"left {n_vol} volume(s), expected 1")
+
+        prune_occ_for_step_export()
+        print(f"  gmsh export [{route_name}]: writing STEP...", flush=True)
+        gmsh.write(abs_path)
+    finally:
+        gmsh.finalize()
+    return route_name, heal_mm
+
+
 def ocp_write_step_via_gmsh_brep_heal(
     shape: Any,
     path: str,
@@ -183,105 +245,77 @@ def ocp_write_step_via_gmsh_brep_heal(
 
     Direct OCP STEP write can split internal glue seams into a second shell;
     BREP -> gmsh healShapes -> STEP fixes this (see ``scripts/_tmp_ocp_step_heal_probe.py``).
+
+    When default heal destroys geometry (0 volumes), fall back to import-only,
+    finer heal, then direct OCP STEP.
     """
-    import gmsh
     from OCP.BRepTools import BRepTools
 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     abs_path = os.path.abspath(path)
     brep_path = abs_path + ".brep"
-    healed = False
+    errors: list[str] = []
     try:
         print(f"  gmsh export: writing BREP...", flush=True)
         if not BRepTools.Write_s(shape, brep_path):
             raise RuntimeError(f"BREP write failed: {brep_path}")
-        gmsh.initialize()
-        try:
-            gmsh.option.setNumber("General.Terminal", 0)
-            gmsh.model.add("ocp_brep_heal")
-            gmsh.model.occ.importShapes(brep_path)
-            gmsh.model.occ.synchronize()
-            volumes = gmsh.model.getEntities(3)
-            n_vol = len(volumes)
-            print(f"  gmsh export: BREP import -> {n_vol} volume(s)", flush=True)
-            if n_vol > 1:
-                tags = [t[1] for t in volumes]
-                gmsh.model.occ.fuse([(3, tags[0])], [(3, t) for t in tags[1:]])
-                gmsh.model.occ.synchronize()
-                volumes = gmsh.model.getEntities(3)
-                n_vol = len(volumes)
-                print(f"  gmsh export: after fuse -> {n_vol} volume(s)", flush=True)
-            gmsh.model.occ.removeAllDuplicates()
-            gmsh.model.occ.synchronize()
 
-            def _import_brep() -> int:
-                gmsh.model.occ.importShapes(brep_path)
-                gmsh.model.occ.synchronize()
-                return len(gmsh.model.getEntities(3))
-
+        gmsh_routes: list[tuple[str, float | None]] = [
+            ("brep_gmsh_heal", float(heal_mm)),
+            ("brep_gmsh_import_only", None),
+            ("brep_gmsh_heal_fine", 0.01),
+        ]
+        for route_name, tol in gmsh_routes:
             try:
-                print(f"  gmsh export: healShapes tol={heal_mm:g} mm...", flush=True)
-                gmsh.model.occ.healShapes(
-                    tolerance=float(heal_mm),
-                    fixDegenerated=True,
-                    fixSmallEdges=True,
-                    fixSmallFaces=True,
-                    sewFaces=True,
-                    makeSolids=True,
+                export_route, used_heal = _gmsh_brep_to_step_once(
+                    brep_path,
+                    abs_path,
+                    route_name=route_name,
+                    heal_mm=tol,
                 )
-                gmsh.model.occ.synchronize()
-                healed = True
+                step_bytes = os.path.getsize(abs_path) if os.path.isfile(abs_path) else 0
+                if step_bytes < 1024:
+                    raise RuntimeError(f"STEP too small ({step_bytes} B)")
+                if fast_readback and step_bytes > 5_000_000:
+                    readback = {
+                        "solids": 1,
+                        "step_path": abs_path,
+                        "step_bytes": step_bytes,
+                        "readback_skipped": True,
+                    }
+                else:
+                    readback = ocp_readback_step(abs_path, fast=fast_readback)
+                readback["export_route"] = export_route
+                readback["heal_mm"] = float(used_heal) if used_heal is not None else None
+                readback["step_bytes"] = step_bytes
+                return readback
             except Exception as exc:
-                print(
-                    f"  gmsh export: healShapes failed ({exc}); re-import BREP",
-                    flush=True,
-                )
-                gmsh.model.remove()
-                gmsh.model.add("ocp_brep_heal_retry")
-                n_vol = _import_brep()
-                print(f"  gmsh export: re-import -> {n_vol} volume(s)", flush=True)
+                msg = f"{route_name}: {exc}"
+                print(f"  gmsh export: FAIL {msg}", flush=True)
+                errors.append(msg)
+                if os.path.isfile(abs_path):
+                    try:
+                        os.remove(abs_path)
+                    except OSError:
+                        pass
 
-            volumes = gmsh.model.getEntities(3)
-            n_vol = len(volumes)
-            if n_vol > 1:
-                tags = [t[1] for t in volumes]
-                gmsh.model.occ.fuse([(3, tags[0])], [(3, t) for t in tags[1:]])
-                gmsh.model.occ.synchronize()
-                volumes = gmsh.model.getEntities(3)
-                n_vol = len(volumes)
-            if n_vol != 1:
-                raise RuntimeError(
-                    f"gmsh export left {n_vol} volume(s), expected 1 "
-                    f"(heal={'ok' if healed else 'skipped'})"
-                )
-            from src.mesh.occ_pipe import prune_occ_for_step_export
-
-            prune_occ_for_step_export()
-            print(f"  gmsh export: writing STEP...", flush=True)
-            gmsh.write(abs_path)
-        finally:
-            gmsh.finalize()
+        print("  gmsh export: trying OCP direct STEP...", flush=True)
+        ocp_write_step(shape, abs_path)
+        step_bytes = os.path.getsize(abs_path) if os.path.isfile(abs_path) else 0
+        if step_bytes < 1024:
+            raise RuntimeError(f"OCP direct STEP too small ({step_bytes} B): {abs_path}")
+        readback = ocp_readback_step(abs_path, fast=fast_readback)
+        readback["export_route"] = "ocp_direct"
+        readback["heal_mm"] = None
+        readback["step_bytes"] = step_bytes
+        return readback
     finally:
         if os.path.isfile(brep_path):
             os.remove(brep_path)
 
-    step_bytes = os.path.getsize(abs_path) if os.path.isfile(abs_path) else 0
-    if step_bytes < 1024:
-        raise RuntimeError(f"gmsh STEP too small ({step_bytes} B): {abs_path}")
-
-    if fast_readback and step_bytes > 5_000_000:
-        readback = {
-            "solids": 1,
-            "step_path": abs_path,
-            "step_bytes": step_bytes,
-            "readback_skipped": True,
-        }
-    else:
-        readback = ocp_readback_step(abs_path, fast=fast_readback)
-    readback["export_route"] = "brep_gmsh_heal" if healed else "brep_gmsh_import_only"
-    readback["heal_mm"] = float(heal_mm)
-    readback["step_bytes"] = step_bytes
-    return readback
+    raise RuntimeError(
+        "all STEP export routes failed:\n  " + "\n  ".join(errors)
+    )
 
 
 def _as_np_points(path_pts: tuple) -> list[np.ndarray]:

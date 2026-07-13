@@ -3965,7 +3965,7 @@ def export_lattice_xt(
     if fuse and fused_n > 1:
         stats["xt_error"] = (
             f"Fused STEP has {fused_n} solids (expected 1). Fix STEP before X_T; "
-            "see docs/hu_bai_abaqus_cad_import.md"
+            "see docs/Abaqus_CAD实体压缩说明.md"
         )
         stats["xt_manual"] = True
         return stats

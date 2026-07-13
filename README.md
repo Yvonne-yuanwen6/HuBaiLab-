@@ -26,7 +26,7 @@ HuBaiLab/
 │   ├── postprocess/                 # 压缩曲线元数据
 │   └── validation/                  # 穿透风险检查
 ├── scripts/                         # 运行入口（见下表）
-├── docs/hu_bai_abaqus_cad_import.md # Abaqus / SW 导入详解
+├── docs/Abaqus_CAD实体压缩说明.md # Abaqus / SW 导入详解
 ├── output/                          # 运行结果（含示例算例，见 output/README.md）
 │   ├── cad/                         # 融合 STEP
 │   ├── export/{slug}/               # INP / manifest
@@ -69,7 +69,7 @@ py -3 -m venv .venv
 
 **paper box-cut（论文 Fig.2.6，无节点球）** — 推荐用于 Abaqus `paper_box` 与 CAE 网格。
 
-**Q=1 当前状态（2026-06）**：仅 **OCP 单胞** 验收通过；**4×4×4 阵列尚未成功**。详见 [docs/unitcell_fusion_strategies.md](docs/unitcell_fusion_strategies.md)。
+**Q=1 当前状态（2026-06）**：仅 **OCP 单胞** 验收通过；**4×4×4 阵列尚未成功**。详见 [docs/单胞融合策略.md](docs/单胞融合策略.md)。
 
 ```bash
 # Q=1 单胞（OCP，当前成功路线）
@@ -85,7 +85,7 @@ Q=0 / Q=0.5 / Q=1.5 仍用 gmsh：
 py -3 scripts/export_unitcell_paper_box_cut.py --Q 0.5
 ```
 
-**各 Q 单胞融合策略**（pipe sweep + 虚拟 L³ 切割，无中心球）见 **[docs/unitcell_fusion_strategies.md](docs/unitcell_fusion_strategies.md)**：
+**各 Q 单胞融合策略**（pipe sweep + 虚拟 L³ 切割，无中心球）见 **[docs/单胞融合策略.md](docs/单胞融合策略.md)**：
 
 | Q | 策略摘要 | 状态 |
 |---|----------|------|
@@ -160,7 +160,7 @@ py -3 scripts/run_hu_bai_paper_box_4x4x4_array_fuse.py --Q 1.0
 
 目标输出：`output/cad/_paper_box_array_q1p0_ocp/hu_bai_sfbls_af2q1_L20_4x4x4_paper_box_array.step`（或 gmsh 目录 `_paper_box_array_q1p0/`）
 
-**截至 2026-06：Q=1 的 4×4×4 尚未验收**（`vol=1`、`step_solidworks_safe=True`）。详见 [docs/unitcell_fusion_strategies.md](docs/unitcell_fusion_strategies.md#444-阵列融合paper_box--q1-进行中)。
+**截至 2026-06：Q=1 的 4×4×4 尚未验收**（`vol=1`、`step_solidworks_safe=True`）。详见 [docs/单胞融合策略.md](docs/单胞融合策略.md#444-阵列融合paper_box--q1-进行中)。
 
 ### 1. 生成 4×4×4 融合 STEP（legacy BCC / solid_array）
 
@@ -301,7 +301,7 @@ powershell -File scripts/run_bcc_q1_4x4x4_fast80.ps1 -SkipQ1   # 仅 BCC fast80
 | **SFBLS Q=1.0 单胞（paper_box，OCP）** | `output/cad/_ocp_glue_pilot/unitcell_af2q1_L20_ocp_stub_sequential-glue-shift.step` | `_tmp_ocp_glue_fuse_pilot.py` / `run_ocp_glue_fuse_pilot.sh`：octant 切杆 + **OCP GlueShift** | `vol=1`，无节点球，SW 单窗口 |
 | SFBLS Q=1.0，4×4×4（paper_box） | `output/cad/_paper_box_array_q1p0_ocp/`（目标） | `run_ocp_q1_4x4x4_array_fuse.sh` 或 gmsh `run_hu_bai_paper_box_4x4x4_array_fuse.py` | **❌ 尚未验收** |
 | SFBLS Q=1.0，4×4×4（legacy SW） | `output/cad/verified/hu_bai_sfbls_af2q1_L20_4x4x4_solid_merged.STEP` | `run_sfbls_sw_stepwise_4x4x4_pipeline.ps1`：16 体 compound → SW → Z 复制 → 4 体 SW 合并 | 已用于 fast80 网格导出（**非** paper_box 几何） |
-| **BCC Q=0，4×4×4**（进行中） | `output/cad/_stepwise_q0/` → `verified/…_solid_merged.STEP` | **同上 SW 步进** `-Q 0`；16 体已生成，待 SW 合并 | OCC 自动融合暂停，见 `docs/cad_fuse_routes.md` |
+| **BCC Q=0，4×4×4**（进行中） | `output/cad/_stepwise_q0/` → `verified/…_solid_merged.STEP` | **同上 SW 步进** `-Q 0`；16 体已生成，待 SW 合并 | OCC 自动融合暂停，见 `docs/CAD融合路线与已知问题.md` |
 
 > **manual/ 旧文件已清理**：此前 `output/cad/manual/` 下的 z-slab / merged STEP 为 Frenet 圆片堆叠（错误扫掠），已全部删除。请用修复后的扫掠重新生成：
 >
@@ -328,9 +328,9 @@ Fig. 3.3 目标批量（3×3×3 SFBLS Q=0.5/1/1.5 fast80）见 `scripts/submit_h
 | `export_line_from_unitcell_seed.py` | 由单胞种子平移生成 N-cell 线阵列 |
 | `export_zslab_layer_from_column.py` | 4×4 z 层化合物 / 行融合 |
 | `run_hu_bai_bcc_unitcell_array_step_fuse.py` | 单胞 OCC 阵列融合 STEP（legacy；BCC 推荐 `run_hu_bai_array_auto_fuse.py`） |
-| `run_hu_bai_array_auto_fuse.py` | BCC OCC 自动阵列融合（**暂停/门控禁用**；问题见 `docs/cad_fuse_routes.md`） |
-| `docs/unitcell_fusion_strategies.md` | **单胞 paper box-cut 各 Q 融合策略**（Q=1：OCP 单胞 ✅，4×4×4 进行中） |
-| `docs/cad_fuse_routes.md` | CAD 融合路线、BCC OCC 已知问题与 SW 步进说明 |
+| `run_hu_bai_array_auto_fuse.py` | BCC OCC 自动阵列融合（**暂停/门控禁用**；问题见 `docs/CAD融合路线与已知问题.md`） |
+| `docs/单胞融合策略.md` | **单胞 paper box-cut 各 Q 融合策略**（Q=1：OCP 单胞 ✅，4×4×4 进行中） |
+| `docs/CAD融合路线与已知问题.md` | CAD 融合路线、BCC OCC 已知问题与 SW 步进说明 |
 | `export_unitcell_paper_box_cut.py` | **paper_box 单胞 STEP**（Q=0/0.5/1/1.5） |
 | `export_single_strut_paper_box_cut.py` | Q=1 单杆 1/8 octant 切 QA |
 | `run_hu_bai_paper_box_4x4x4_array_fuse.py` | **paper_box 4×4×4** gmsh 分层阵列（Q=1 尚未验收） |
@@ -503,9 +503,29 @@ Git 仓库中**只保留 `output/` 目录骨架**（`output/README.md` + 各子�
 Compress-Archive -Path D:\HuBaiLab\output\* -DestinationPath HuBaiLab_output.zip
 ```
 
+## Web UI（Abaqus 仿真）
+
+浏览器操作 paper_box 压缩全流程，详见 **[`docs/Abaqus_WebUI使用说明.md`](docs/Abaqus_WebUI使用说明.md)**（**§2 启动方式**、页面、工作流、API、排错）。
+
+快速启动（开发模式，完整步骤见文档 §2）：
+
+```powershell
+# 终端 1 — API（仓库根 D:\HuBaiLab）
+cd D:\HuBaiLab
+$env:PYTHONPATH = "D:\HuBaiLab"
+python -m uvicorn api.main:app --reload --port 8000
+
+# 终端 2 — 前端
+cd D:\HuBaiLab\frontend
+npm run dev
+```
+
+浏览器打开 **http://localhost:5173**（须同时保持 API 与前端两个进程运行）。
+
 ## 更多说明
 
-- Abaqus / SolidWorks 导入与排错：[`docs/hu_bai_abaqus_cad_import.md`](docs/hu_bai_abaqus_cad_import.md)
+- **Abaqus Web UI 使用说明**：[`docs/Abaqus_WebUI使用说明.md`](docs/Abaqus_WebUI使用说明.md)
+- Abaqus / SolidWorks 导入与排错：[`docs/Abaqus_CAD实体压缩说明.md`](docs/Abaqus_CAD实体压缩说明.md)
 - 本仓库为 LatticeLab 的 Hu & Bai 子集；完整晶格工具见主仓库
 
 ## 许可

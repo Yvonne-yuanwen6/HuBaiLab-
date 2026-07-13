@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 
@@ -34,6 +35,35 @@ def main() -> int:
     p.add_argument("--Af", type=float, default=2.0)
     p.add_argument("--L", type=float, default=20.0, help="Unit cell edge length [mm]")
     p.add_argument("--rod-d", type=float, default=2.0, help="Rod diameter [mm]")
+    p.add_argument(
+        "--solid-profile",
+        choices=("circle", "ellipse"),
+        default="circle",
+        help="Strut cross-section profile",
+    )
+    p.add_argument(
+        "--ellipse-minor-ratio",
+        type=float,
+        default=0.6,
+        help="Ellipse minor/major radius ratio (ellipse profile only)",
+    )
+    p.add_argument(
+        "--ellipse-align",
+        choices=("minor", "major"),
+        default="minor",
+        help="Ellipse axis aligned to compression direction",
+    )
+    p.add_argument(
+        "--compression-axis",
+        choices=("x", "y", "z"),
+        default="z",
+        help="Compression axis for ellipse alignment",
+    )
+    p.add_argument(
+        "--target-area-pi",
+        action="store_true",
+        help="Match circle d=2 mm area (pi mm^2); scale ellipse from nominal 2:1.2 ratio",
+    )
     p.add_argument("--n-segments", type=int, default=24)
     p.add_argument(
         "--both-end-extension",
@@ -48,16 +78,48 @@ def main() -> int:
     out_dir = args.out_dir or os.path.join(str(CAD_ROOT), "_unitcell_paper_box_cut")
     os.makedirs(out_dir, exist_ok=True)
 
+    rod_d = float(args.rod_d)
+    ellipse_minor_ratio = float(args.ellipse_minor_ratio)
+    if args.target_area_pi:
+        if str(args.solid_profile).lower() != "ellipse":
+            raise ValueError("--target-area-pi requires --solid-profile ellipse")
+        aspect = 2.0 / 1.2
+        d_ell_minor = math.sqrt(4.0 * math.pi / math.pi / aspect)
+        d_ell_major = aspect * d_ell_minor
+        rod_d = d_ell_major
+        ellipse_minor_ratio = d_ell_minor / d_ell_major
+        print(
+            f"  target area pi mm^2: ellipse d_major={d_ell_major:.4f} "
+            f"d_minor={d_ell_minor:.4f} mm (circle reference d=2.0 mm)",
+            flush=True,
+        )
+
+    comp_axis = {
+        "x": (1.0, 0.0, 0.0),
+        "y": (0.0, 1.0, 0.0),
+        "z": (0.0, 0.0, 1.0),
+    }[str(args.compression_axis).lower()]
+    profile_tag = ""
+    if str(args.solid_profile).lower() == "ellipse":
+        profile_tag = "_ellipse_ellmin" if args.ellipse_align == "minor" else "_ellipse_ellmaj"
+        if args.target_area_pi:
+            profile_tag += "_eqarea"
+
     manifest: dict = {
         "out_dir": os.path.abspath(out_dir),
         "cell_size_mm": float(args.L),
+        "solid_profile": str(args.solid_profile),
+        "ellipse_minor_ratio": ellipse_minor_ratio,
+        "ellipse_align": str(args.ellipse_align),
+        "compression_axis": str(args.compression_axis),
+        "target_area_pi": bool(args.target_area_pi),
         "cells": [],
     }
 
     for q in args.Q:
         gen = HuBaiLatticeGenerator(
             cell_size=float(args.L),
-            rod_diameter=float(args.rod_d),
+            rod_diameter=rod_d,
             amplitude=float(args.Af),
             period_factor=float(q),
             n_segments=max(3, int(args.n_segments)),
@@ -66,9 +128,12 @@ def main() -> int:
         nodes, beams, polylines = gen.get_data(copy=True)
         slug = gen.variant_name.lower()
         if args.both_end_extension and is_q1_period(float(q)):
-            out_step = os.path.join(out_dir, f"unitcell_{slug}_paper_box_both_ext.step")
+            out_step = os.path.join(
+                out_dir,
+                f"unitcell_{slug}_paper_box_both_ext{profile_tag}.step",
+            )
         else:
-            out_step = os.path.join(out_dir, f"unitcell_{slug}_paper_box.step")
+            out_step = os.path.join(out_dir, f"unitcell_{slug}_paper_box{profile_tag}.step")
         print(f"Q={q} ({gen.variant_name}) -> {out_step}", flush=True)
         try:
             report = export_unitcell_step_paper_box_cut(
@@ -82,6 +147,10 @@ def main() -> int:
                 both_end_extension=args.both_end_extension,
                 centre_extension_mm=args.centre_extension_mm,
                 corner_extension_mm=args.corner_extension_mm,
+                solid_profile=str(args.solid_profile),
+                ellipse_minor_ratio=ellipse_minor_ratio,
+                compression_axis=comp_axis,
+                ellipse_align_to_compression=str(args.ellipse_align),
             )
         except RuntimeError as exc:
             if not os.path.isfile(out_step):

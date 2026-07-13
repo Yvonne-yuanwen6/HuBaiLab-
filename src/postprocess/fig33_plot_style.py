@@ -66,16 +66,93 @@ def load_fig33_reference() -> dict[str, Any]:
         return json.load(f)
 
 
-def configure_matplotlib_chinese() -> None:
+def _register_cjk_font_from_paths() -> None:
+    """Register CJK fonts from common Linux/Windows paths (matplotlib cache may omit them)."""
+    import glob
+    from pathlib import Path
+
+    from matplotlib import font_manager
+
+    patterns = (
+        "/usr/share/fonts/**/NotoSansCJK*.ttc",
+        "/usr/share/fonts/**/NotoSansSC*.otf",
+        "/usr/share/fonts/**/wqy-microhei*.ttc",
+        "/usr/share/fonts/**/WenQuanYi*.ttc",
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/simsun.ttc",
+    )
+    seen: set[str] = set()
+    for pattern in patterns:
+        for path in sorted(glob.glob(pattern, recursive=True)):
+            if not Path(path).is_file() or path in seen:
+                continue
+            seen.add(path)
+            try:
+                font_manager.fontManager.addfont(path)
+            except Exception:
+                continue
+
+
+def _pick_cjk_font_name() -> str | None:
+    from matplotlib import font_manager
+
+    _register_cjk_font_from_paths()
+
+    preferred = (
+        "Noto Sans CJK SC",
+        "Noto Sans CJK TC",
+        "Noto Sans CJK JP",
+        "Noto Sans CJK HK",
+        "WenQuanYi Micro Hei",
+        "WenQuanYi Zen Hei",
+        "Source Han Sans SC",
+        "Source Han Sans CN",
+        "Microsoft YaHei",
+        "SimHei",
+        "PingFang SC",
+        "Arial Unicode MS",
+        "STHeiti",
+        "Heiti SC",
+    )
+    available = {f.name for f in font_manager.fontManager.ttflist}
+    for name in preferred:
+        if name in available:
+            return name
+    for f in font_manager.fontManager.ttflist:
+        n = f.name
+        if any(k in n for k in ("CJK SC", "CJK TC", "WenQuanYi", "Noto Sans CJK", "Micro Hei")):
+            return n
+    return None
+
+
+def configure_matplotlib_chinese() -> str | None:
+    """Configure matplotlib for Chinese labels (Linux Noto/WQY + Windows YaHei)."""
     import matplotlib.pyplot as plt
+
+    chosen = _pick_cjk_font_name()
+    sans: list[str] = []
+    if chosen:
+        sans.append(chosen)
+    for name in (
+        "Noto Sans CJK SC",
+        "WenQuanYi Micro Hei",
+        "Microsoft YaHei",
+        "SimHei",
+        "Arial Unicode MS",
+    ):
+        if name not in sans:
+            sans.append(name)
+    sans.append("DejaVu Sans")
 
     plt.rcParams.update(
         {
-            "font.sans-serif": ["Microsoft YaHei", "SimHei", "Arial Unicode MS", "DejaVu Sans"],
+            "font.sans-serif": sans,
             "axes.unicode_minus": False,
             "font.size": 11,
         }
     )
+    return chosen
 
 
 FIG33_PAPER_YMAX_MPA = 0.04

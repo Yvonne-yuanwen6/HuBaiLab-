@@ -20,8 +20,14 @@ MAX_RESUBMIT="${Q05_IMPROVE_MAX_RESUBMIT:-2}"
 
 BASE="hu_bai_sfbls_af2q0p5_L20_4x4x4_solid_cad_f_cae_tet0p6mm80_5mmin_paperbox"
 VARIANTS=(fig33_v2_paper fig33_v2_ep paperbox_settle5p fig33_v2_paper_dt1e4)
+DISABLED="${Q05_IMPROVE_DISABLED_VARIANTS:-output/logs/q05_fig33_improve_disabled_variants.txt}"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
+
+variant_disabled() {
+  local suffix="$1"
+  [[ -f "$DISABLED" ]] && grep -qxF "$suffix" "$DISABLED" 2>/dev/null
+}
 
 slug_for() { echo "${BASE}_${1}"; }
 
@@ -130,6 +136,9 @@ while true; do
   running_slug=""
   for entry in "${VARIANT_ARGS[@]}"; do
     parse_variant_entry "$entry"
+    if variant_disabled "$suffix"; then
+      continue
+    fi
     slug="$(slug_for "$suffix")"
     if job_completed "$slug"; then
       continue
@@ -162,6 +171,7 @@ while true; do
     pending=0
     for entry in "${VARIANT_ARGS[@]}"; do
       parse_variant_entry "$entry"
+      variant_disabled "$suffix" && continue
       job_completed "$(slug_for "$suffix")" || pending=$((pending + 1))
     done
     if [[ "$pending" -gt 0 ]]; then

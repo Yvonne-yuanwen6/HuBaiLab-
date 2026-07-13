@@ -1,0 +1,3 @@
+# COMSOL batch prefs for HuBaiLab Java API jobs (headless server).
+# Allows STEP import, model save, and recovery writes from batch Java classes.
+security.external.filepermission=full

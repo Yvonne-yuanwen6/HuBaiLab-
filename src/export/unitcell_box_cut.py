@@ -38,13 +38,13 @@ Q1_CENTRE_TRIM_RADIUS_SCALE = 1.50
 MIN_CUT_MERGE_MASS_RATIO = 0.85
 MIN_FUSED_SEED_CUT_MASS_MM3 = 300.0
 # Q=1: pipe-first fuse at centre fails; use per-strut 1/8 octant box-cut +
-# sequential pairwise fuse (see docs/unitcell_fusion_strategies.md).
+# sequential pairwise fuse (see docs/单胞融合策略.md).
 # Total overlap thickness at each x/y/z=0 bisector during OCC cut/fuse (mm).
 # Applied symmetrically: each octant extends ±overlap/2 about the bisector so
 # eight nominal virtual cubes stay centred on x/y/z=0 (outer faces ±L/2).
 OCTANT_CENTER_OVERLAP_MM = 0.02
 # Per-strut sequential fuse order (0-based strut indices). Strut 8 ``(+,+,+)`` must
-# not be fused last — see docs/unitcell_fusion_strategies.md.
+# not be fused last — see docs/单胞融合策略.md.
 OCTANT_SEQUENTIAL_FUSE_ORDER = (0, 1, 2, 3, 4, 5, 7, 6)
 # Extend centre-end path before pipe sweep so the cell centre is interior to the
 # solid (end cap sits in adjacent octants and is removed by the 1/8 box cut).
@@ -119,18 +119,28 @@ def extend_pipe_path_past_corner(
     return tuple(extended)
 
 
+def _pipe_sweep_nominal_radius(part: tuple) -> float:
+    """Major sweep radius for path extensions and centre-weld sizing."""
+    kind = part[0]
+    if kind == "pipe":
+        return float(part[2])
+    if kind == "pipe_ellipse":
+        return float(part[2])
+    raise ValueError(f"unsupported pipe sweep kind: {kind!r}")
+
+
 def pipe_part_with_centre_path_extension(
     part: tuple[str, tuple, float],
     extension_mm: float,
-) -> tuple[str, tuple, float]:
-    kind, path_pts, radius = part
-    if kind != "pipe" or float(extension_mm) <= 0.0:
+) -> tuple:
+    kind = part[0]
+    if kind not in ("pipe", "pipe_ellipse") or float(extension_mm) <= 0.0:
         return part
-    return (
-        kind,
-        extend_pipe_path_past_cell_centre(path_pts, extension_mm),
-        radius,
-    )
+    path_pts = part[1]
+    new_path = extend_pipe_path_past_cell_centre(path_pts, extension_mm)
+    if kind == "pipe":
+        return (kind, new_path, part[2])
+    return (kind, new_path, part[2], part[3], part[4], part[5])
 
 
 def pipe_part_with_both_end_path_extension(
@@ -138,10 +148,10 @@ def pipe_part_with_both_end_path_extension(
     centre_extension_mm: float,
     *,
     corner_extension_mm: float | None = None,
-) -> tuple[str, tuple, float]:
+) -> tuple:
     """Extend pipe path at cell centre and corner before sweep."""
-    kind, path_pts, radius = part
-    if kind != "pipe":
+    kind = part[0]
+    if kind not in ("pipe", "pipe_ellipse"):
         return part
     centre_ext = float(centre_extension_mm)
     corner_ext = (
@@ -149,12 +159,14 @@ def pipe_part_with_both_end_path_extension(
         if corner_extension_mm is not None
         else centre_ext
     )
-    path = path_pts
+    path = part[1]
     if centre_ext > 0.0:
         path = extend_pipe_path_past_cell_centre(path, centre_ext)
     if corner_ext > 0.0:
         path = extend_pipe_path_past_corner(path, corner_ext)
-    return (kind, path, radius)
+    if kind == "pipe":
+        return (kind, path, part[2])
+    return (kind, path, part[2], part[3], part[4], part[5])
 
 
 def pipe_parts_with_centre_path_extension(
@@ -165,7 +177,7 @@ def pipe_parts_with_centre_path_extension(
     """Extend every pipe path at the cell centre; return parts and extension used."""
     if not pipe_parts:
         return pipe_parts, 0.0
-    sample_radius = float(pipe_parts[0][2])
+    sample_radius = _pipe_sweep_nominal_radius(pipe_parts[0])
     ext = (
         float(extension_mm)
         if extension_mm is not None
@@ -183,7 +195,7 @@ def pipe_parts_with_both_end_path_extension(
     """Extend every pipe path at centre and corner; return parts and extensions used."""
     if not pipe_parts:
         return pipe_parts, 0.0, 0.0
-    sample_radius = float(pipe_parts[0][2])
+    sample_radius = _pipe_sweep_nominal_radius(pipe_parts[0])
     centre_ext = (
         float(centre_extension_mm)
         if centre_extension_mm is not None
@@ -925,7 +937,8 @@ def _occ_weld_pipe_tags_at_centre(
 
     welded: list[tuple[int, int]] = []
     for idx, (pipe_tag, part) in enumerate(zip(pipe_tags, pipe_parts), start=1):
-        path_pts, radius = part[1], float(part[2])
+        path_pts = part[1]
+        radius = _pipe_sweep_nominal_radius(part)
         x0, y0, z0 = map(float, path_pts[0])
         centre_r = radius * float(centre_radius_scale)
         centre = _occ_volume_dimtag(gmsh.model.occ.addSphere(x0, y0, z0, centre_r))
@@ -1495,7 +1508,7 @@ def _occ_paper_box_fuse_then_cut(
         cell_size_mm,
         progress_label=f"{progress_label}-box-cut",
     )
-    rod_radius = float(pipe_parts[0][2])
+    rod_radius = _pipe_sweep_nominal_radius(pipe_parts[0])
     merged_vol = _occ_trim_centre_junction_ball(
         cut_vol,
         rod_radius,
@@ -1649,9 +1662,11 @@ def _occ_paper_box_octant_cut_both_ext(
 
     import tempfile
 
+    from src.paths import hubai_temp_dir
+
     pipe_ref_mass = 0.0
     step_paths: list[str] = []
-    tmp_dir = tempfile.mkdtemp(prefix="both_ext_octant_")
+    tmp_dir = hubai_temp_dir(prefix="both_ext_octant_")
     try:
         n = len(extended)
         for idx, part in enumerate(extended, start=1):
@@ -1847,7 +1862,7 @@ def _occ_paper_box_centre_weld_cut(
         cell_size_mm,
         progress_label=f"{progress_label}-trim",
     )
-    rod_radius = float(pipe_parts[0][2])
+    rod_radius = _pipe_sweep_nominal_radius(pipe_parts[0])
     merged_vol = _occ_trim_centre_junction_ball(
         merged_vol,
         rod_radius,
@@ -2473,6 +2488,10 @@ def export_unitcell_step_paper_box_cut(
     both_ext_compound: bool = False,
     rod_diameter_mm: float = 2.0,
     amplitude_mm: float = 2.0,
+    solid_profile: str = "circle",
+    ellipse_minor_ratio: float = 0.6,
+    compression_axis: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    ellipse_align_to_compression: str = "minor",
 ) -> dict[str, Any]:
     """
     Export one fused unit-cell STEP using paper-style virtual hexahedron cutting.
@@ -2499,8 +2518,12 @@ def export_unitcell_step_paper_box_cut(
         junction_spheres=False,
         trim_for_junctions=False,
         polyline_sweep="pipe",
+        solid_profile=solid_profile,
+        ellipse_minor_ratio=ellipse_minor_ratio,
+        compression_axis=compression_axis,
+        ellipse_align_to_compression=ellipse_align_to_compression,
     )
-    pipe_parts = [p for p in pipe_parts_only if p[0] == "pipe"]
+    pipe_parts = [p for p in pipe_parts_only if p[0] in ("pipe", "pipe_ellipse")]
     pipe_count = len(pipe_parts)
     if pipe_count == 0:
         raise ValueError("No pipe primitives for paper box-cut export.")

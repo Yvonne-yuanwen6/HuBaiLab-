@@ -27,6 +27,7 @@ EVAL="scripts/evaluate_paperbox_q05_trend.py"
 CPUS="${Q05_IMPROVE_CPUS:-48}"
 MEM="${Q05_IMPROVE_MEMORY_MB:-262144}"
 POLL_SEC="${Q05_IMPROVE_POLL_SEC:-120}"
+DISABLED="${Q05_IMPROVE_DISABLED_VARIANTS:-output/logs/q05_fig33_improve_disabled_variants.txt}"
 
 exec 9>"$LOCK"
 if ! flock -n 9; then
@@ -35,6 +36,11 @@ if ! flock -n 9; then
 fi
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
+
+variant_disabled() {
+  local suffix="$1"
+  [[ -f "$DISABLED" ]] && grep -qxF "$suffix" "$DISABLED" 2>/dev/null
+}
 
 slug_for() {
   echo "hu_bai_sfbls_af2q0p5_L20_4x4x4_solid_cad_f_cae_tet0p6mm80_5mmin_paperbox_${1}"
@@ -96,6 +102,11 @@ run_variant() {
   shift
   local slug
   slug="$(slug_for "$suffix")"
+
+  if variant_disabled "$suffix"; then
+    log "SKIP disabled $suffix slug=$slug"
+    return 0
+  fi
 
   if job_completed "$slug"; then
     log "SKIP completed $suffix slug=$slug"
@@ -179,6 +190,10 @@ python3 -c "
 import json, datetime, os
 from pathlib import Path
 variants = ['fig33_v2_paper', 'fig33_v2_ep', 'paperbox_settle5p', 'fig33_v2_paper_dt1e4']
+disabled_path = Path('output/logs/q05_fig33_improve_disabled_variants.txt')
+disabled = set()
+if disabled_path.is_file():
+    disabled = {ln.strip() for ln in disabled_path.read_text(encoding='utf-8').splitlines() if ln.strip() and not ln.startswith('#')}
 base = 'hu_bai_sfbls_af2q0p5_L20_4x4x4_solid_cad_f_cae_tet0p6mm80_5mmin_paperbox'
 rows = []
 for v in variants:
@@ -186,8 +201,8 @@ for v in variants:
     sta = Path(f'output/jobs/{slug}/{slug}.sta')
     csv = Path(f'output/post/{slug}/{slug}_stress_strain.csv')
     done = sta.is_file() and 'COMPLETED SUCCESSFULLY' in sta.read_text(encoding='utf-8', errors='ignore')
-    rows.append({'suffix': v, 'slug': slug, 'completed': done, 'csv_ready': csv.is_file()})
-out = {'variants': rows, 'all_ready': all(r['csv_ready'] for r in rows), 'updated_at': datetime.datetime.now().isoformat(timespec='seconds')}
+    rows.append({'suffix': v, 'slug': slug, 'completed': done, 'csv_ready': csv.is_file(), 'disabled': v in disabled})
+out = {'variants': rows, 'disabled_variants': sorted(disabled), 'all_ready': all(r['csv_ready'] or r['disabled'] for r in rows), 'updated_at': datetime.datetime.now().isoformat(timespec='seconds')}
 Path('output/logs/q05_fig33_improve_ready.json').write_text(json.dumps(out, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 print('Wrote output/logs/q05_fig33_improve_ready.json')
 " >> "$LOG" 2>&1

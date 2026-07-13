@@ -34,7 +34,16 @@ function Sync-RemoteJobFiles {
     New-Item -ItemType Directory -Force -Path $jobDir, $exportDir | Out-Null
     $remoteJob = "$RemoteRoot/output/jobs/$JobSlug"
     scp "${RemoteHost}:${remoteJob}/${JobSlug}.sta" $jobDir 2>$null | Out-Null
-    scp "${RemoteHost}:${remoteJob}/${JobSlug}.lck" $jobDir 2>$null | Out-Null
+    $lckLocal = Join-Path $jobDir "${JobSlug}.lck"
+    $remoteLck = "$RemoteRoot/output/jobs/$JobSlug/${JobSlug}.lck"
+    $remoteHasLck = ssh $RemoteHost "test -f '$remoteLck' && echo 1 || echo 0" 2>$null
+    if ($remoteHasLck -eq '1') {
+        scp "${RemoteHost}:${remoteJob}/${JobSlug}.lck" $jobDir 2>$null | Out-Null
+    } elseif ($remoteHasLck -eq '0') {
+        if (Test-Path $lckLocal) { Remove-Item -Force $lckLocal }
+    } else {
+        scp "${RemoteHost}:${remoteJob}/${JobSlug}.lck" $jobDir 2>$null | Out-Null
+    }
     scp "${RemoteHost}:$RemoteRoot/output/export/${JobSlug}/${JobSlug}_meta.json" $exportDir 2>$null | Out-Null
 }
 

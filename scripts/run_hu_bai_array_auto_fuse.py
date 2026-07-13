@@ -7,7 +7,7 @@ OCC auto-fuse array STEP (experimental; BCC Q=0 currently DISABLED — use SW st
 BCC / SFBLS 4x4x4 production route:
   powershell -File scripts/run_sfbls_sw_stepwise_4x4x4_pipeline.ps1 -Q 0 -Stage 2
 
-Known OCC issues: docs/cad_fuse_routes.md
+Known OCC issues: docs/CAD融合路线与已知问题.md
 """
 
 from __future__ import annotations

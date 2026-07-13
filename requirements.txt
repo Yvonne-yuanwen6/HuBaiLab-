@@ -3,4 +3,9 @@ matplotlib>=3.8
 gmsh>=4.12
 trimesh>=4.0
 manifold3d>=3.0
+mph>=1.2
+jpype1>=1.4,<1.6
 pywin32>=306; sys_platform == "win32"
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pydantic>=2.0
