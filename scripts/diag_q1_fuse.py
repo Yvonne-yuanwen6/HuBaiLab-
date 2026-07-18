@@ -125,7 +125,7 @@ def build_unitcell(strategy: str, *, sweep: str = "pipe") -> str | None:
         nodes,
         beams,
         polylines=polys,
-        junction_spheres=True,
+        junction_spheres=False,
         trim_for_junctions=False,
         polyline_sweep=sweep,
     )

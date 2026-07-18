@@ -20,12 +20,14 @@ RODS_PER_DIAMETER="3.0"
 MERGE_SOLIDS=0
 VIRTUAL_TOPOLOGY=0
 SEED_PART_ONLY=0
+IGNORE_INVALID=0
 
 usage() {
   echo "Usage: $0 --step STEP --out OUT [--seed MM] [--mesh-mode tet|hex]"
   echo "       [--mesh-quality fast|lattice|lattice_contact|lattice_curve|paper|coarse] [--rod-diameter MM]"
   echo "       [--rods-per-diameter N] [--part-name NAME] [--element-type C3D4|C3D10|C3D10M]"
-  echo "       [--virtual-topology] [--seed-part-only] [--vtopo-small-face MM2] [--vtopo-short-edge MM]"
+  echo "       [--virtual-topology] [--seed-part-only] [--ignore-invalid]"
+  echo "       [--vtopo-small-face MM2] [--vtopo-short-edge MM]"
   exit 1
 }
 
@@ -43,6 +45,7 @@ while [[ $# -gt 0 ]]; do
     --merge-solids) MERGE_SOLIDS=1; shift ;;
     --virtual-topology) VIRTUAL_TOPOLOGY=1; shift ;;
     --seed-part-only) SEED_PART_ONLY=1; shift ;;
+    --ignore-invalid) IGNORE_INVALID=1; shift ;;
     --vtopo-small-face) export HU_BAI_VTOPO_SMALL_FACE="$2"; shift 2 ;;
     --vtopo-short-edge) export HU_BAI_VTOPO_SHORT_EDGE="$2"; shift 2 ;;
     -h|--help) usage ;;
@@ -83,10 +86,11 @@ export HU_BAI_ELEM_TYPE="$ELEM_TYPE"
 if [[ "$MERGE_SOLIDS" -eq 1 ]]; then export HU_BAI_MERGE_SOLIDS=1; else unset HU_BAI_MERGE_SOLIDS; fi
 if [[ "$VIRTUAL_TOPOLOGY" -eq 1 ]]; then export HU_BAI_VIRTUAL_TOPOLOGY=1; else unset HU_BAI_VIRTUAL_TOPOLOGY; fi
 if [[ "$SEED_PART_ONLY" -eq 1 ]]; then export HU_BAI_SEED_PART_ONLY=1; else unset HU_BAI_SEED_PART_ONLY; fi
+if [[ "$IGNORE_INVALID" -eq 1 ]]; then export HU_BAI_IGNORE_INVALID=1; else unset HU_BAI_IGNORE_INVALID; fi
 
 echo "=== CAE mesh (Linux) ==="
 echo "  STEP: $STEP"
-echo "  seed: ${SEED} mm  mode: $MESH_MODE  quality: $MESH_QUALITY  elem: $ELEM_TYPE  part: $PART_NAME  vtopo: $VIRTUAL_TOPOLOGY"
+echo "  seed: ${SEED} mm  mode: $MESH_MODE  quality: $MESH_QUALITY  elem: $ELEM_TYPE  part: $PART_NAME  vtopo: $VIRTUAL_TOPOLOGY  ignoreInvalid: $IGNORE_INVALID"
 echo "  OUT:  $OUT"
 
 cd "$ROOT"

@@ -35,8 +35,11 @@ from src.generator.hu_bai_bcc import is_q1_period, q1_paper_orientation_label
 # Weld sphere must be ≥~1.70× rod radius for batch merge; trim subtracts excess ball.
 Q1_CENTRE_WELD_RADIUS_SCALE = 1.70
 Q1_CENTRE_TRIM_RADIUS_SCALE = 1.50
-MIN_CUT_MERGE_MASS_RATIO = 0.85
-MIN_FUSED_SEED_CUT_MASS_MM3 = 300.0
+# Lose one of eight struts (~12.5%) must fail. Old 0.85 allowed silent single-rod drops.
+MIN_CUT_MERGE_MASS_RATIO = 0.95
+# Pipe-first intra-fuse can lose a few % to boolean topology without dropping a strut
+# (e.g. Q=0.5 ≈0.95). Still fails if ~1 strut missing (~0.875).
+PIPE_FIRST_INTRA_FUSE_MIN_MASS_RATIO = 0.90
 # Q=1: pipe-first fuse at centre fails; use per-strut 1/8 octant box-cut +
 # sequential pairwise fuse (see docs/单胞融合策略.md).
 # Total overlap thickness at each x/y/z=0 bisector during OCC cut/fuse (mm).
@@ -1020,135 +1023,6 @@ def _occ_build_per_strut_box_cuts(
     return cut_vols, pipe_ref_mass, cut_mass
 
 
-def _export_paper_box_via_fused_seed_step(
-    nodes: list,
-    beams: list,
-    path: str,
-    *,
-    polylines: list[dict] | None,
-    cell_size_mm: float,
-    pipe_count: int,
-    n_segments_hint: int,
-) -> dict[str, Any]:
-    """
-    Fuse in an isolated gmsh session (seed QA path), then box-cut in another.
-
-    Avoids OCC entity loss when pipe-only fuse fails in the same session (Q=1).
-    """
-    from src.export.export_sw import export_lattice_step_occ
-
-    tmp_fused = os.path.join(
-        os.path.dirname(path) or ".",
-        f".__{os.path.splitext(os.path.basename(path))[0]}_fused_seed.step",
-    )
-    print(
-        "  Paper box-cut: isolated junction-sphere fuse "
-        f"(n_segments={n_segments_hint})...",
-        flush=True,
-    )
-    fuse_report = export_lattice_step_occ(
-        nodes,
-        beams,
-        tmp_fused,
-        polylines=polylines,
-        junction_spheres=True,
-        fuse=True,
-    )
-    fused_vol = int(fuse_report.get("fused_volume_count") or 0)
-    fused_bytes = os.path.getsize(tmp_fused) if os.path.isfile(tmp_fused) else 0
-    if fused_vol != 1 or fused_bytes < 50_000:
-        raise RuntimeError(
-            f"isolated fuse unusable: vol={fused_vol} size={fused_bytes} B "
-            f"(try lower --n-segments, e.g. 24 for Q=1)"
-        )
-
-    import gmsh
-
-    fuse_strategy = "import fused seed + RVE box intersect"
-    method = "gmsh_occ_fused_seed_box_cut"
-    pre_mass = 0.0
-    post_mass = 0.0
-    bbox: tuple[float, float, float, float, float, float]
-    step_report: dict[str, Any] = {}
-    fused_volume_count = 0
-    gmsh.initialize()
-    try:
-        gmsh.option.setNumber("General.Terminal", 0)
-        gmsh.model.add(os.path.splitext(os.path.basename(path))[0] or "unitcell_box_cut")
-        gmsh.model.occ.importShapes(os.path.abspath(tmp_fused))
-        gmsh.model.occ.synchronize()
-        fused_vols = _occ_list_volume_dimtags()
-        if len(fused_vols) != 1:
-            raise RuntimeError(
-                f"fused-seed import: expected 1 volume, got {len(fused_vols)}"
-            )
-        _configure_occ_for_fuse()
-        pre_mass = float(gmsh.model.occ.getMass(3, int(fused_vols[0][1])))
-        cut_vol = _occ_intersect_volumes_with_box(
-            fused_vols,
-            cell_size_mm,
-            progress_label="fused-seed-box-cut",
-        )
-        post_mass = float(gmsh.model.occ.getMass(3, int(cut_vol[1])))
-        if post_mass < MIN_FUSED_SEED_CUT_MASS_MM3:
-            raise RuntimeError(
-                f"fused-seed cut mass {post_mass:.1f} mm3 too low "
-                f"(incomplete OCC fuse; need ≥ {MIN_FUSED_SEED_CUT_MASS_MM3:.0f} mm3)"
-            )
-        bbox = _bbox_mm(cut_vol)
-        step_report = _finalize_occ_step_write(path, fuse=True, validate_step=False)
-        fused_volume_count = int(step_report.get("solid_count", 0))
-    finally:
-        gmsh.finalize()
-        try:
-            os.remove(tmp_fused)
-        except OSError:
-            pass
-
-    step_report = _postprocess_written_step(
-        path,
-        step_report,
-        fused_single=True,
-        max_flatten_bodies=1,
-    )
-    fused_volume_count = int(step_report.get("solid_count", fused_volume_count))
-
-    tol = max(0.5, 0.05 * float(cell_size_mm))
-    h = 0.5 * float(cell_size_mm)
-    overshoot = max(
-        (-h) - bbox[0],
-        bbox[1] - h,
-        (-h) - bbox[2],
-        bbox[3] - h,
-        (-h) - bbox[4],
-        bbox[5] - h,
-    )
-    expected = unitcell_box_bounds_mm(cell_size_mm)
-    mass_ratio_after_cut = post_mass / pre_mass if pre_mass > 0.0 else None
-
-    return {
-        "step_path": path,
-        "pipe_count": pipe_count,
-        "cell_size_mm": float(cell_size_mm),
-        "fused_volume_count": fused_volume_count,
-        "step_product_count": step_report.get("product_count"),
-        "step_solidworks_safe": step_report.get("solidworks_safe"),
-        "fuse_strategy": fuse_strategy,
-        "mass_mm3_before_cut": pre_mass,
-        "mass_mm3_after_cut": post_mass,
-        "mass_ratio_after_cut": mass_ratio_after_cut,
-        "bbox_mm": bbox,
-        "bbox_expected_mm": expected,
-        "bbox_overshoot_mm": overshoot,
-        "bbox_overshoot_tolerance_mm": tol,
-        "bbox_within_rve": overshoot <= tol,
-        "node_count": len(nodes),
-        "beam_count": len(beams),
-        "polyline_count": len(polylines or []),
-        "method": method,
-    }
-
-
 def _occ_batch_merge_box_cut_struts(
     cut_vols: list[tuple[int, int]],
     *,
@@ -1197,7 +1071,7 @@ def _occ_merge_box_cut_struts(
     import gmsh
 
     errors: list[str] = []
-    min_mass = 0.85 * float(cut_mass) if cut_mass > 0.0 else 0.0
+    min_mass = MIN_CUT_MERGE_MASS_RATIO * float(cut_mass) if cut_mass > 0.0 else 0.0
 
     def _keep_one(vol: tuple[int, int]) -> tuple[int, int]:
         mass = float(gmsh.model.occ.getMass(3, int(vol[1])))
@@ -2144,7 +2018,7 @@ def _try_q1_paper_box_cut_path(
     cell_size_mm: float,
     expected: tuple[float, float, float, float, float, float],
     allow_compound_fallback: bool = True,
-    both_end_extension: bool = False,
+    both_end_extension: bool = True,
     centre_extension_mm: float | None = None,
     corner_extension_mm: float | None = None,
     both_ext_compound: bool = False,
@@ -2482,7 +2356,7 @@ def export_unitcell_step_paper_box_cut(
     n_segments_hint: int = 24,
     period_factor: float | None = None,
     q1_mode: str = "auto",
-    both_end_extension: bool = False,
+    both_end_extension: bool = True,
     centre_extension_mm: float | None = None,
     corner_extension_mm: float | None = None,
     both_ext_compound: bool = False,
@@ -2531,11 +2405,15 @@ def export_unitcell_step_paper_box_cut(
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     expected = unitcell_box_bounds_mm(cell_size_mm)
     q1 = period_factor is not None and is_q1_period(period_factor)
+    # Ellipse pipe-first routinely drops rods while still clearing the old 0.80/0.85
+    # mass gates; force the Q=1 octant sequential recipe for all Q.
+    force_octant = str(solid_profile or "circle").strip().lower() == "ellipse"
+    use_octant = bool(q1 or force_octant)
     q1_mode_norm = str(q1_mode or "auto").strip().lower()
     if q1_mode_norm not in ("auto", "fuse", "compound"):
         raise ValueError(f"q1_mode must be auto|fuse|compound, got {q1_mode!r}")
 
-    if q1:
+    if use_octant:
         if q1_mode_norm == "compound":
             return _export_q1_octant_compound_step(
                 pipe_parts,
@@ -2567,7 +2445,34 @@ def export_unitcell_step_paper_box_cut(
             period_factor=period_factor,
         )
         if q1_report is not None:
+            from src.export.sw_parasolid import recenter_step_bbox_to_origin
+
+            recenter = recenter_step_bbox_to_origin(path)
+            if recenter.get("shifted"):
+                print(
+                    f"  recenter 1x1 bbox mid → origin: "
+                    f"dx={float(recenter['dx']):+.4f} dy={float(recenter['dy']):+.4f} "
+                    f"dz={float(recenter['dz']):+.4f} mm",
+                    flush=True,
+                )
+            q1_report = dict(q1_report)
+            q1_report["bbox_recenter"] = recenter
+            q1_report["both_end_extension"] = bool(both_end_extension)
             return q1_report
+        if force_octant and not q1:
+            # Ellipse Q≠1: per-strut merge can hang for hours on OCC (seen Q=1.5).
+            # Fail fast here so the batch ladder can try OCP / dedicated attempts.
+            raise RuntimeError(
+                "Paper box-cut: ellipse octant failed "
+                f"(period_factor={period_factor}); skip hang-prone per-strut "
+                "(batch will try OCP / other strategies)."
+            )
+        if q1:
+            print(
+                "  Paper box-cut: Q=1 octant path failed; "
+                "falling back to per-strut box-cut...",
+                flush=True,
+            )
 
     pipe_first_ok = False
     fuse_strategy = ""
@@ -2579,7 +2484,8 @@ def export_unitcell_step_paper_box_cut(
     step_report: dict[str, Any] = {}
     fused_volume_count = 0
 
-    if not q1:
+    # Skip pipe-first when octant was required (ellipse / Q=1): it drops rods.
+    if not use_octant:
         gmsh.initialize()
         try:
             gmsh.option.setNumber("General.Terminal", 0)
@@ -2602,7 +2508,11 @@ def export_unitcell_step_paper_box_cut(
                 progress_label="intra-fuse",
             )
             pre_mass = _occ_volumes_mass(fused_vols)
-            if pipe_ref_mass > 0.0 and pre_mass < 0.80 * pipe_ref_mass:
+            # Softer than merge gate: catch missing struts, allow small OCC loss.
+            if (
+                pipe_ref_mass > 0.0
+                and pre_mass < PIPE_FIRST_INTRA_FUSE_MIN_MASS_RATIO * pipe_ref_mass
+            ):
                 raise RuntimeError(
                     f"intra-fuse mass ratio {pre_mass / pipe_ref_mass:.2f} "
                     f"({pre_mass:.1f}/{pipe_ref_mass:.1f} mm3)"
@@ -2628,27 +2538,42 @@ def export_unitcell_step_paper_box_cut(
             gmsh.finalize()
 
     if not pipe_first_ok:
-        if not q1:
-            try:
-                return _export_paper_box_via_fused_seed_step(
-                    nodes,
-                    beams,
-                    path,
-                    polylines=polylines,
-                    cell_size_mm=cell_size_mm,
-                    pipe_count=pipe_count,
-                    n_segments_hint=n_segments_hint,
-                )
-            except Exception as fused_exc:
-                print(
-                    f"  Paper box-cut: isolated fused-seed failed ({fused_exc}); "
-                    "per-strut box-cut fallback...",
-                    flush=True,
-                )
-        else:
-            raise RuntimeError(
-                "Paper box-cut: Q=1 octant sequential fuse and compound export both failed."
+        print(
+            "  Paper box-cut: → per-strut box-cut "
+            f"(q1={q1}, ellipse_force_octant={force_octant})...",
+            flush=True,
+        )
+        gmsh.initialize()
+        try:
+            gmsh.option.setNumber("General.Terminal", 0)
+            gmsh.model.add(
+                os.path.splitext(os.path.basename(path))[0] or "unitcell_per_strut"
             )
+            _configure_occ_for_fuse()
+            cut_result = _occ_paper_box_per_strut_cut(
+                pipe_parts,
+                cell_size_mm,
+                progress_label="per-strut-box-cut",
+            )
+            cut_vol = cut_result["vol"]
+            step_report = _finalize_occ_step_write(path, fuse=True, validate_step=False)
+            fused_volume_count = int(step_report.get("solid_count", 0))
+            return _paper_box_report_from_cut_vol(
+                path=path,
+                nodes=nodes,
+                beams=beams,
+                polylines=polylines,
+                pipe_count=pipe_count,
+                cell_size_mm=cell_size_mm,
+                expected=expected,
+                cut_result=cut_result,
+                method="gmsh_occ_per_strut_pipe_box_cut",
+                step_report=step_report,
+                fused_volume_count=fused_volume_count,
+                cut_vol=cut_vol,
+            )
+        finally:
+            gmsh.finalize()
 
     step_report = _postprocess_written_step(
         path,
@@ -2657,6 +2582,27 @@ def export_unitcell_step_paper_box_cut(
         max_flatten_bodies=1,
     )
     fused_volume_count = int(step_report.get("solid_count", fused_volume_count))
+
+    from src.export.sw_parasolid import recenter_step_bbox_to_origin
+
+    recenter = recenter_step_bbox_to_origin(path)
+    if recenter.get("shifted"):
+        print(
+            f"  recenter 1x1 COM → origin: "
+            f"dx={float(recenter['dx']):+.4f} dy={float(recenter['dy']):+.4f} "
+            f"dz={float(recenter['dz']):+.4f} mm",
+            flush=True,
+        )
+        bb = recenter.get("bbox_mm") or {}
+        if isinstance(bb, dict) and "x" in bb and "y" in bb and "z" in bb:
+            bbox = (
+                float(bb["x"][0]),
+                float(bb["x"][1]),
+                float(bb["y"][0]),
+                float(bb["y"][1]),
+                float(bb["z"][0]),
+                float(bb["z"][1]),
+            )
 
     tol = max(0.5, 0.05 * float(cell_size_mm))
     h = 0.5 * float(cell_size_mm)
@@ -2687,6 +2633,7 @@ def export_unitcell_step_paper_box_cut(
         "bbox_overshoot_mm": overshoot,
         "bbox_overshoot_tolerance_mm": tol,
         "bbox_within_rve": bbox_ok,
+        "bbox_recenter": recenter,
         "node_count": len(nodes),
         "beam_count": len(beams),
         "polyline_count": len(polylines or []),

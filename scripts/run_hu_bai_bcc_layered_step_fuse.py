@@ -40,11 +40,6 @@ _parser.add_argument(
     help="Centerline samples per strut for pipe sweep (default 24)",
 )
 _parser.add_argument(
-    "--no-junction-spheres",
-    action="store_true",
-    help="Overlap struts at nodes (fewer OCC parts, faster fuse)",
-)
-_parser.add_argument(
     "--keep-layer-steps",
     action="store_true",
     help="Keep per-z-slab STEP files (*_layer0.step, ...)",
@@ -87,7 +82,7 @@ print(
 stats = export_lattice_step_occ_layered(
     layer_data,
     step_path,
-    junction_spheres=not _args.no_junction_spheres,
+    junction_spheres=False,
     keep_layer_steps=_args.keep_layer_steps,
 )
 

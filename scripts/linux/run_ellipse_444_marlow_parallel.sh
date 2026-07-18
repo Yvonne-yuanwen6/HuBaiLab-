@@ -13,6 +13,23 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 export PATH="${HOME}/APP/abaqus2022/Commands:/usr/bin:/bin:${PATH:-}"
 export PYTHONPATH="$ROOT"
+
+pick_python() {
+  if [[ -x "$ROOT/.venv/bin/python3" ]] && "$ROOT/.venv/bin/python3" -c 'import gmsh' 2>/dev/null; then
+    echo "$ROOT/.venv/bin/python3"
+  elif [[ -x /home/art/conda/bin/python3 ]] && /home/art/conda/bin/python3 -c 'import gmsh' 2>/dev/null; then
+    echo /home/art/conda/bin/python3
+  elif command -v python3 >/dev/null; then
+    echo python3
+  else
+    echo python3
+  fi
+}
+
+PY="$(pick_python)"
+if ! "$PY" -c 'import gmsh' 2>/dev/null; then
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARN gmsh not importable via $PY; Q>=1 heal may fail" >&2
+fi
 mkdir -p output/logs output/reports/ellipse_baseline
 
 LOG="output/logs/ellipse_444_baseline_parallel.log"
@@ -82,7 +99,7 @@ baseline_slug_for_entry() {
   local q align
   q="$(parse_entry "$1" q)"
   align="$(parse_entry "$1" align)"
-  python3 -c "
+  "$PY" -c "
 from src.generator.hu_bai_bcc import HuBaiLatticeGenerator as G
 q=float('$q')
 align='$align'
@@ -102,7 +119,7 @@ verified_name_for_entry() {
   local q align
   q="$(parse_entry "$1" q)"
   align="$(parse_entry "$1" align)"
-  python3 -c "
+  "$PY" -c "
 from src.generator.hu_bai_bcc import HuBaiLatticeGenerator as G
 q=float('$q')
 align='$align'
@@ -135,12 +152,81 @@ job_failed() {
   grep -qE 'NOT BEEN COMPLETED|SIGTERM|MPI_Abort|excessively distorted' "$sta" && ! job_completed "$slug"
 }
 
-job_running() {
+job_process_running() {
   local slug="$1"
-  [[ -f "$ROOT/output/jobs/${slug}/${slug}.lck" ]] && return 0
   pgrep -f "mpiexec.hydra.*${slug}" >/dev/null 2>&1 || \
   pgrep -f "/bin/explicit.*${slug}" >/dev/null 2>&1 || \
   pgrep -f "SMAPython.*-job ${slug}" >/dev/null 2>&1
+}
+
+clear_stale_lck() {
+  local slug="$1"
+  local lck="$ROOT/output/jobs/${slug}/${slug}.lck"
+  if [[ -f "$lck" ]] && ! job_process_running "$slug"; then
+    log_file_only "WARN stale lck cleared $slug (no live process)"
+    rm -f "$lck"
+  fi
+}
+
+job_running() {
+  local slug="$1"
+  if job_process_running "$slug"; then
+    return 0
+  fi
+  clear_stale_lck "$slug"
+  return 1
+}
+
+job_recoverable() {
+  local slug="$1"
+  local job_dir="$ROOT/output/jobs/${slug}"
+  [[ -f "$job_dir/${slug}.sta" ]] || return 1
+  job_completed "$slug" && return 1
+  [[ -f "$job_dir/${slug}.res" && -f "$job_dir/${slug}.stt" ]] || return 1
+  [[ -f "$ROOT/output/export/${slug}/${slug}.inp" ]] || return 1
+  return 0
+}
+
+heal_args_for_entry() {
+  # Gmsh heal-before collapsed Q>=1 ellipse volumes / made CAE invalid — do not use it.
+  # Keep heal-on-fail only for Q<1; Q>=1 uses ensure_q1_mesh_cascade instead.
+  local entry="$1" q
+  q="$(parse_entry "$entry" q)"
+  if "$PY" -c "import sys; sys.exit(0 if float('$q') >= 1.0 else 1)"; then
+    printf '%s\n' "--cae-virtual-topology"
+  else
+    printf '%s\n' "--heal-step-on-mesh-fail"
+  fi
+}
+
+mesh_cascade_for_q1() {
+  # Strategies ordered by speed / success likelihood for fragile ellipse BREP.
+  # All use original verified STEP (no Gmsh heal-before).
+  local step="$1" out="$2"
+  local -a tries=(
+    "--seed 0.8 --mesh-quality coarse --seed-part-only --ignore-invalid --virtual-topology --vtopo-short-edge 3.0 --vtopo-small-face 25"
+    "--seed 0.8 --mesh-quality fast --seed-part-only --ignore-invalid --virtual-topology --vtopo-short-edge 3.0 --vtopo-small-face 25"
+    "--seed 1.0 --mesh-quality coarse --seed-part-only --ignore-invalid"
+    "--seed 0.8 --mesh-quality lattice_contact --ignore-invalid --virtual-topology --vtopo-short-edge 2.0 --vtopo-small-face 15"
+    "--seed 0.6 --mesh-quality lattice_contact --ignore-invalid --virtual-topology"
+  )
+  local i=0 args
+  mkdir -p "$(dirname "$out")"
+  for args in "${tries[@]}"; do
+    i=$((i + 1))
+    log "Q1 mesh try#$i: $args"
+    rm -f "$out"
+    # shellcheck disable=SC2086
+    if bash scripts/linux/run_abaqus_cae_mesh.sh \
+      --step "$step" --out "$out" --mesh-mode tet --part-name LATTICE --element-type C3D4 \
+      --rod-diameter 2.0 --rods-per-diameter 3.0 \
+      $args >> "$LOG" 2>&1; then
+      log "Q1 mesh SUCCESS try#$i -> $out"
+      return 0
+    fi
+    log "Q1 mesh FAIL try#$i"
+  done
+  return 1
 }
 
 csv_ready() {
@@ -222,12 +308,42 @@ ensure_baseline_mesh() {
   cad="$(install_verified_cad "$entry")"
   log_file_only "BUILD baseline mesh $label slug=$baseline_slug"
 
-  local heal_args=()
-  if [[ "$align" == "ellmaj" ]]; then
-    heal_args=(--heal-step-on-mesh-fail)
+  # Q>=1 ellipse: direct CAE cascade (ignore-invalid + vtopo + coarser seed).
+  # Avoid Gmsh heal-before which produced 0 volumes / invalid BREP overnight.
+  if "$PY" -c "import sys; sys.exit(0 if float('$q') >= 1.0 else 1)"; then
+    log "Q1+ mesh cascade $label (no heal-before)"
+    if ! mesh_cascade_for_q1 "$cad" "$baseline_mesh"; then
+      log "ERROR baseline mesh cascade failed $label"
+      return 1
+    fi
+    # Build Neo-Hooke paperbox INP from successful mesh.
+    if [[ ! -f "output/export/${baseline_slug}/${baseline_slug}.inp" ]]; then
+      local heal_args=()
+      mapfile -t heal_args < <(heal_args_for_entry "$entry")
+      if ! "$PY" scripts/run_hu_bai_bcc_solid_cad_cae_tet_export.py \
+        --cells 4 --Q "$q" --profile fast \
+        --cad "$cad" \
+        --cae-seed 0.8 --cae-element-type C3D4 --cae-mesh-quality lattice_contact \
+        --cae-mesh-inp "$baseline_mesh" \
+        --mesh-locally \
+        --strain 0.80 --load-rate-mm-min 5 \
+        --explicit-dt 0.0005 --explicit-dt-mode automatic \
+        --case-suffix "$baseline_suffix" \
+        "${PAPERBASE_EXTRA[@]}" \
+        "${heal_args[@]}"; then
+        log "ERROR INP export after mesh failed $label"
+        return 1
+      fi
+    fi
+    log_file_only "baseline mesh ready $baseline_mesh"
+    echo "$baseline_mesh"
+    return 0
   fi
 
-  if ! python3 scripts/run_hu_bai_bcc_solid_cad_cae_tet_export.py \
+  local heal_args=()
+  mapfile -t heal_args < <(heal_args_for_entry "$entry")
+
+  if ! "$PY" scripts/run_hu_bai_bcc_solid_cad_cae_tet_export.py \
     --cells 4 --Q "$q" --profile fast \
     --cad "$cad" \
     --cae-seed 0.6 --cae-element-type C3D4 --cae-mesh-quality lattice_contact \
@@ -263,11 +379,13 @@ export_one() {
   cad="output/cad/verified/$(verified_name_for_entry "$entry")"
   [[ -f "$cad" ]] || cad="$(install_verified_cad "$entry")"
 
-  if [[ "$align" == "ellmaj" ]]; then
-    heal_args=(--heal-step-on-mesh-fail)
-  fi
+  mapfile -t heal_args < <(heal_args_for_entry "$entry")
 
-  rm -rf "output/jobs/${slug}"
+  if job_recoverable "$slug"; then
+    log_file_only "KEEP job dir for recover $label slug=$slug"
+  else
+    rm -rf "output/jobs/${slug}"
+  fi
 
   if [[ -f "$inp" ]]; then
     log "REUSE baseline INP (Neo-Hooke) $label slug=$slug"
@@ -284,7 +402,7 @@ export_one() {
 
   log "EXPORT $label Q=$q align=$align slug=$slug (Neo-Hooke paper + baseline mesh)"
   if [[ -f "$baseline_mesh" ]]; then
-    if ! python3 scripts/run_hu_bai_bcc_solid_cad_cae_tet_export.py \
+    if ! "$PY" scripts/run_hu_bai_bcc_solid_cad_cae_tet_export.py \
       --cells 4 --Q "$q" --profile fast \
       --cad "$cad" \
       --cae-seed 0.6 --cae-element-type C3D4 --cae-mesh-quality lattice_contact \
@@ -299,7 +417,7 @@ export_one() {
       return 1
     fi
   else
-    if ! python3 scripts/run_hu_bai_bcc_solid_cad_cae_tet_export.py \
+    if ! "$PY" scripts/run_hu_bai_bcc_solid_cad_cae_tet_export.py \
       --cells 4 --Q "$q" --profile fast \
       --cad "$cad" \
       --cae-seed 0.6 --cae-element-type C3D4 --cae-mesh-quality lattice_contact \
@@ -327,6 +445,32 @@ submit_one() {
     --background
 }
 
+submit_one_recover() {
+  local slug="$1"
+  clear_stale_lck "$slug"
+  log "SUBMIT recover $slug cpus=$CPUS mem=${MEM}MB"
+  bash scripts/linux/submit_job.sh \
+    --slug "$slug" \
+    --cpus "$CPUS" \
+    --memory-mb "$MEM" \
+    --skip-resource-check \
+    --recover \
+    --background
+}
+
+recover_one() {
+  local entry="$1"
+  local label slug
+  label="$(parse_entry "$entry" label)"
+  slug="$(slug_for_entry "$entry")"
+  log "RECOVER $label slug=$slug"
+  if [[ ! -f "output/export/${slug}/${slug}.inp" ]]; then
+    export_one "$entry" || return 1
+  fi
+  submit_one_recover "$slug"
+  log "RECOVERED $label slug=$slug"
+}
+
 kill_slug() {
   local slug="$1"
   ps aux | awk -v s="$slug" '/\/bin\/explicit/ && $0 ~ s {print $2}' | xargs -r kill -KILL 2>/dev/null || true
@@ -347,6 +491,11 @@ start_one() {
 
   if job_running "$slug"; then
     log "RESUME $label already running slug=$slug"
+    return 0
+  fi
+
+  if job_recoverable "$slug"; then
+    recover_one "$entry"
     return 0
   fi
 
@@ -379,7 +528,7 @@ declare -A STALL_SINCE
 declare -A RESUBMIT_COUNT
 
 init_state() {
-  python3 -c "
+  "$PY" -c "
 import json, datetime
 print(json.dumps({
   'policy': 'ellipse_444_baseline parallel (Neo-Hooke paper)',
@@ -395,7 +544,7 @@ print(json.dumps({
 }
 
 finish_state() {
-  python3 -c "
+  "$PY" -c "
 import json, datetime
 s=json.load(open('$STATE'))
 s['phase']='done'
@@ -405,7 +554,7 @@ json.dump(s, open('$STATE','w'), indent=2)
 }
 
 update_state_snapshot() {
-  python3 - <<PY
+  "$PY" - <<PY
 import json, datetime, sys
 from pathlib import Path
 
@@ -446,16 +595,45 @@ print(json.dumps({"all_done": all_done, "running": sum(1 for x in items if x["ru
 PY
 }
 
+# Soft preflight: drop queue rows whose CAD is not ready yet (do not abort the batch).
+# Note: bare `stat` on a symlink reports link length — use [[ -f ]] (follows target) here.
+QUEUE_READY=()
 for entry in "${QUEUE[@]}"; do
   cad="$(parse_entry "$entry" cad)"
-  [[ -f "$cad" ]] || { log "ERROR preflight missing CAD: $cad"; exit 1; }
+  label="$(parse_entry "$entry" label)"
+  if [[ -f "$cad" ]]; then
+    QUEUE_READY+=("$entry")
+  else
+    log "WARN preflight skip $label (CAD missing): $cad"
+  fi
 done
+if [[ "${#QUEUE_READY[@]}" -eq 0 ]]; then
+  log "ERROR preflight: no queue entry has CAD ready"
+  exit 1
+fi
+QUEUE=("${QUEUE_READY[@]}")
 
 QUEUE_FILE="output/logs/ellipse_444_baseline_queue.tsv"
 printf '%s\n' "${QUEUE[@]}" > "$QUEUE_FILE"
 
 log "=== ellipse_444_baseline start cpus=$CPUS mem_mb=$MEM max_parallel=$MAX_PARALLEL jobs=${#QUEUE[@]} material=paper(Neo-Hooke) ==="
 init_state
+
+log "=== preflight baseline meshes (avoid blocking supervisor during solves) ==="
+for entry in "${QUEUE[@]}"; do
+  label="$(parse_entry "$entry" label)"
+  slug="$(slug_for_entry "$entry")"
+  baseline_mesh="$(baseline_mesh_for_entry "$entry")"
+  inp="output/export/${slug}/${slug}.inp"
+  if [[ -f "$baseline_mesh" || -f "$inp" ]]; then
+    log_file_only "preflight skip $label (mesh or INP ready)"
+    continue
+  fi
+  if needs_work "$entry"; then
+    log "PREFLIGHT mesh $label slug=$slug"
+    ensure_baseline_mesh "$entry" >> "$LOG" 2>&1 || log "ERROR preflight mesh failed $label"
+  fi
+done
 
 while true; do
   running="$(count_running_queue)"
@@ -532,11 +710,16 @@ while true; do
         log "[$label] RUNNING sim=${sim}s ke=${ke} ${prog:+( $prog )}"
       fi
     elif [[ -f "$ROOT/output/jobs/${slug}/${slug}.sta" ]] && ! job_completed "$slug"; then
-      n="${RESUBMIT_COUNT[$slug]:-0}"
-      if [[ "$n" -lt 2 ]]; then
-        log "STOPPED $label slug=$slug (not running) — resubmit"
-        resubmit_one "$entry"
-        RESUBMIT_COUNT[$slug]=$((n + 1))
+      if job_recoverable "$slug"; then
+        log "STOPPED $label slug=$slug (not running) — recover"
+        recover_one "$entry"
+      else
+        n="${RESUBMIT_COUNT[$slug]:-0}"
+        if [[ "$n" -lt 2 ]]; then
+          log "STOPPED $label slug=$slug (not running) — resubmit"
+          resubmit_one "$entry"
+          RESUBMIT_COUNT[$slug]=$((n + 1))
+        fi
       fi
     fi
   done

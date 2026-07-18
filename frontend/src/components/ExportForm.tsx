@@ -13,7 +13,7 @@ import {
   message,
 } from "antd";
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api, pollTask } from "../api/client";
 import type { ExportSettings, VerifiedCad } from "../types";
 
@@ -21,6 +21,9 @@ const DEFAULT_SETTINGS: ExportSettings = {
   Q: 0,
   Af: 2,
   cells: 4,
+  cell_size: 20,
+  rod_diameter: 2,
+  structure: "bcc",
   cad_path: "",
   cae_seed_mm: 0.6,
   cae_mesh_quality: "lattice_contact",
@@ -32,7 +35,7 @@ const DEFAULT_SETTINGS: ExportSettings = {
   profile: "fast",
   strain: 0.8,
   load_rate_mm_min: 5,
-  material_model: "paper",
+  material_model: "neo_hooke",
   contact_store_offsets: true,
   contact_settle: true,
   case_suffix: "cae_tet0p6mm80_5mmin_paperbox",
@@ -57,7 +60,9 @@ export function ExportForm({ presets, cadFiles }: Props) {
   const [form] = Form.useForm<ExportSettings>();
   const [preview, setPreview] = useState<ExportSettings | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [meshing, setMeshing] = useState(false);
   const navigate = useNavigate();
+  const structure = Form.useWatch("structure", form);
 
   useEffect(() => {
     form.setFieldsValue(DEFAULT_SETTINGS);
@@ -73,16 +78,46 @@ export function ExportForm({ presets, cadFiles }: Props) {
     }
   };
 
-  const onValuesChange = (_: Partial<ExportSettings>, all: ExportSettings) => {
+  const onValuesChange = (changed: Partial<ExportSettings>, all: ExportSettings) => {
+    if (changed.structure === "bcc") {
+      form.setFieldsValue({ Q: 0 });
+      all = { ...all, Q: 0, structure: "bcc" };
+    } else if (changed.structure === "sfbls" && !(all.Q > 0)) {
+      form.setFieldsValue({ Q: 0.5 });
+      all = { ...all, Q: 0.5, structure: "sfbls" };
+    }
     void refreshPreview(all);
   };
 
   const applyPreset = (key: string) => {
     const preset = presets[key];
     if (!preset) return;
-    form.setFieldsValue({ ...DEFAULT_SETTINGS, ...preset });
-    void refreshPreview({ ...DEFAULT_SETTINGS, ...preset });
+    const merged = { ...DEFAULT_SETTINGS, ...preset };
+    if (!merged.structure) {
+      merged.structure = merged.Q > 0 ? "sfbls" : "bcc";
+    }
+    form.setFieldsValue(merged);
+    void refreshPreview(merged);
     message.success(`已加载预设：${key}`);
+  };
+
+  const pollUntilDone = (
+    taskId: string,
+    okMsg: string,
+    failMsg: string,
+    onDone?: (slug: string | null) => void,
+    setBusy?: (v: boolean) => void,
+  ) => {
+    pollTask(taskId, (t) => {
+      if (t.status === "done") {
+        message.success(okMsg);
+        onDone?.(t.slug);
+        setBusy?.(false);
+      } else if (t.status === "failed") {
+        message.error(t.error || failMsg);
+        setBusy?.(false);
+      }
+    });
   };
 
   const handleExport = async () => {
@@ -91,19 +126,31 @@ export function ExportForm({ presets, cadFiles }: Props) {
     try {
       const task = await api.export(values);
       message.info("导出任务已启动");
-      pollTask(task.task_id, (t) => {
-        if (t.status === "done") {
-          message.success("导出完成");
-          if (t.slug) navigate(`/monitor?slug=${encodeURIComponent(t.slug)}`);
-          setSubmitting(false);
-        } else if (t.status === "failed") {
-          message.error(t.error || "导出失败");
-          setSubmitting(false);
-        }
-      });
+      pollUntilDone(
+        task.task_id,
+        "导出完成",
+        "导出失败",
+        (slug) => {
+          if (slug) navigate(`/monitor?slug=${encodeURIComponent(slug)}`);
+        },
+        setSubmitting,
+      );
     } catch (e) {
       message.error(String(e));
       setSubmitting(false);
+    }
+  };
+
+  const handleMeshOnly = async () => {
+    const values = await form.validateFields();
+    setMeshing(true);
+    try {
+      const task = await api.mesh(values);
+      message.info("网格/导出任务已启动");
+      pollUntilDone(task.task_id, "网格任务完成", "网格任务失败", undefined, setMeshing);
+    } catch (e) {
+      message.error(String(e));
+      setMeshing(false);
     }
   };
 
@@ -133,13 +180,57 @@ export function ExportForm({ presets, cadFiles }: Props) {
         <Form form={form} layout="vertical" onValuesChange={onValuesChange}>
           {step === 0 && (
             <>
-              <Form.Item name="Q" label="周期因子 Q" rules={[{ required: true }]}>
-                <InputNumber min={0} max={2} step={0.5} style={{ width: "100%" }} />
+              <Form.Item name="structure" label="结构类型" rules={[{ required: true }]}>
+                <Select
+                  options={[
+                    { label: "BCC（Q = 0）", value: "bcc" },
+                    { label: "SFBLS（Q > 0）", value: "sfbls" },
+                  ]}
+                />
               </Form.Item>
+              <Form.Item
+                name="Q"
+                label="周期因子 Q"
+                rules={[{ required: true }]}
+                extra={structure === "bcc" ? "BCC 固定为 0" : "SFBLS 常用 0.5 / 1.0 / 1.5"}
+              >
+                <InputNumber
+                  min={0}
+                  max={2}
+                  step={0.5}
+                  disabled={structure === "bcc"}
+                  style={{ width: "100%" }}
+                />
+              </Form.Item>
+              <Row gutter={12}>
+                <Col span={8}>
+                  <Form.Item name="cell_size" label="单胞边长 L (mm)">
+                    <InputNumber min={5} max={50} step={1} style={{ width: "100%" }} />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name="rod_diameter" label="杆径 (mm)">
+                    <InputNumber min={0.5} max={8} step={0.1} style={{ width: "100%" }} />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name="Af" label="振幅 Af">
+                    <InputNumber min={0.5} max={8} step={0.1} style={{ width: "100%" }} />
+                  </Form.Item>
+                </Col>
+              </Row>
               <Form.Item name="cells" label="阵列 cells (N×N×N)">
                 <InputNumber min={1} max={8} style={{ width: "100%" }} />
               </Form.Item>
-              <Form.Item name="cad_path" label="verified STEP（可选，留空自动查找）">
+              <Form.Item
+                name="cad_path"
+                label="verified STEP（可选，留空自动查找）"
+                extra={
+                  <span>
+                    没有合适 STEP？前往 <Link to="/cad">CAD / STEP 生成</Link>
+                  </span>
+                }
+              >
                 <Select
                   allowClear
                   showSearch
@@ -174,6 +265,27 @@ export function ExportForm({ presets, cadFiles }: Props) {
               <Form.Item name="cae_virtual_topology" valuePropName="checked">
                 <Checkbox>Virtual Topology</Checkbox>
               </Form.Item>
+              <Form.Item name="mesh_on_server" valuePropName="checked">
+                <Checkbox
+                  onChange={(e) => {
+                    if (e.target.checked) form.setFieldsValue({ mesh_locally: false });
+                  }}
+                >
+                  CAE 网格在服务器运行（Windows 默认）
+                </Checkbox>
+              </Form.Item>
+              <Form.Item name="mesh_locally" valuePropName="checked">
+                <Checkbox
+                  onChange={(e) => {
+                    if (e.target.checked) form.setFieldsValue({ mesh_on_server: false });
+                  }}
+                >
+                  CAE 网格在本机运行
+                </Checkbox>
+              </Form.Item>
+              <Button loading={meshing} onClick={() => void handleMeshOnly()}>
+                仅启动网格/导出任务
+              </Button>
             </>
           )}
           {step === 2 && (
@@ -186,10 +298,11 @@ export function ExportForm({ presets, cadFiles }: Props) {
               </Form.Item>
               <Form.Item name="material_model" label="材料模型">
                 <Select
-                  options={["paper", "elastic", "marlow", "hyperelastic"].map((v) => ({
-                    label: v,
-                    value: v,
-                  }))}
+                  options={[
+                    { label: "Neo-Hooke", value: "neo_hooke" },
+                    { label: "elastic", value: "elastic" },
+                    { label: "marlow", value: "marlow" },
+                  ]}
                 />
               </Form.Item>
               <Form.Item name="contact_store_offsets" valuePropName="checked">
@@ -213,9 +326,6 @@ export function ExportForm({ presets, cadFiles }: Props) {
                   ]}
                 />
               </Form.Item>
-              <Form.Item name="mesh_on_server" valuePropName="checked">
-                <Checkbox>CAE 网格在服务器运行（Windows 默认）</Checkbox>
-              </Form.Item>
               <Form.Item name="submit_cpus" label="求解 CPU 数">
                 <InputNumber min={1} max={128} style={{ width: "100%" }} />
               </Form.Item>
@@ -232,7 +342,9 @@ export function ExportForm({ presets, cadFiles }: Props) {
                 <code>{preview?.slug_preview ?? "—"}</code>
               </Typography.Paragraph>
               <Typography.Paragraph type="secondary">
-                variant: {preview?.variant_name ?? "—"}
+                结构: {preview?.structure ?? structure ?? "—"} · variant:{" "}
+                {preview?.variant_name ?? "—"} · L={preview?.cell_size ?? "—"} mm · Ø=
+                {preview?.rod_diameter ?? "—"} mm
               </Typography.Paragraph>
             </Card>
           )}

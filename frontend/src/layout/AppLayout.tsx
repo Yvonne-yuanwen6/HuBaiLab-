@@ -4,7 +4,9 @@ import {
   DeleteOutlined,
   ExperimentOutlined,
   ExportOutlined,
+  BuildOutlined,
   MonitorOutlined,
+  OrderedListOutlined,
   UnorderedListOutlined,
 } from "@ant-design/icons";
 import { Link, Outlet, useLocation } from "react-router-dom";
@@ -14,7 +16,9 @@ const { Sider, Content, Header } = Layout;
 const items = [
   { key: "/", icon: <DashboardOutlined />, label: <Link to="/">仪表盘</Link> },
   { key: "/cases", icon: <UnorderedListOutlined />, label: <Link to="/cases">算例</Link> },
+  { key: "/cad", icon: <BuildOutlined />, label: <Link to="/cad">CAD / STEP</Link> },
   { key: "/export", icon: <ExportOutlined />, label: <Link to="/export">导出 INP</Link> },
+  { key: "/queue", icon: <OrderedListOutlined />, label: <Link to="/queue">仿真队列</Link> },
   { key: "/monitor", icon: <MonitorOutlined />, label: <Link to="/monitor">作业监控</Link> },
   { key: "/trash", icon: <DeleteOutlined />, label: <Link to="/trash">回收站</Link> },
   {
@@ -29,7 +33,9 @@ export function AppLayout() {
   const location = useLocation();
   const selected = (() => {
     if (location.pathname.startsWith("/cases")) return "/cases";
+    if (location.pathname.startsWith("/cad")) return "/cad";
     if (location.pathname.startsWith("/export")) return "/export";
+    if (location.pathname.startsWith("/queue")) return "/queue";
     if (location.pathname.startsWith("/monitor")) return "/monitor";
     if (location.pathname.startsWith("/trash")) return "/trash";
     return "/";

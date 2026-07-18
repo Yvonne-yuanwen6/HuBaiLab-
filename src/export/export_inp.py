@@ -93,6 +93,7 @@ def _write_tpu_material(
         for e, s in data:
             f.write(f"{float(s)}, {float(e)}\n")
     else:
+        # neo_hooke / paper / hyperelastic (legacy) → Neo-Hooke
         f.write(f"*Hyperelastic, neo Hooke\n{c10}, {tpu_d1}\n")
 
 # Default Neo-Hookean constants for TPU (Pa). Calibrate from tensile tests.
@@ -184,7 +185,7 @@ def export_inp_c3d4(
     c10: float = DEFAULT_TPU_C10,
     c01: float = DEFAULT_TPU_C01,
     density: float = DEFAULT_TPU_DENSITY,
-    material_model: str = "hyperelastic",
+    material_model: str = "neo_hooke",
     elastic_e: float = 1250.0,
     elastic_nu: float = 0.3,
     plastic_yield: float | None = None,

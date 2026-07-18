@@ -130,6 +130,17 @@ class ExportRequest(BaseModel):
     settings: dict[str, Any] = Field(default_factory=dict)
 
 
+class CadGenerateRequest(BaseModel):
+    Q: float = 0.0
+    cells: int = 4
+    L: float = 20.0
+    structure: str = "bcc"  # bcc | sfbls
+    backend: str = "ocp"  # ocp | gmsh
+    mode: str = "auto"  # auto | stepwise | auto_only
+    force: bool = False
+    ocp_fuse_mode: str = "hierarchical_batch"
+
+
 class SubmitRequest(BaseModel):
     target: str = "remote"
     cpus: int = 48
@@ -137,6 +148,41 @@ class SubmitRequest(BaseModel):
     recover: bool = False
     restart_from: str = ""
     background: bool = True
+
+
+class QueueAddRequest(BaseModel):
+    slugs: list[str] = Field(default_factory=list)
+    target: str = "remote"
+    cpus: int = 48
+    memory_mb: int = 262144
+
+
+class QueueReorderRequest(BaseModel):
+    ids: list[str] = Field(default_factory=list)
+
+
+class QueueMoveRequest(BaseModel):
+    direction: str = "up"  # up | down | top | bottom
+
+
+class QueueItem(BaseModel):
+    id: str
+    slug: str
+    cpus: int = 48
+    memory_mb: int = 262144
+    target: str = "remote"
+    status: str = "pending"
+    order: int = 0
+    created_at: str = ""
+    started_at: str | None = None
+    finished_at: str | None = None
+    error: str | None = None
+    task_id: str | None = None
+
+
+class QueueStateResponse(BaseModel):
+    running: bool = False
+    items: list[QueueItem] = Field(default_factory=list)
 
 
 class SyncRemoteRequest(BaseModel):

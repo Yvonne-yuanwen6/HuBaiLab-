@@ -32,11 +32,38 @@ FuseStrategy = Literal[
     "x_layer_glue_full",
 ]
 
-PipeBuildMode = Literal["centre_stub", "both_end_extension"]
+PipeBuildMode = Literal[
+    "centre_stub",
+    "both_end_extension",
+    # Tip-flat outer ends (corner path extension) + fuse-stable cell centre
+    # (chord stub / open-start). Proven for hard Q=1 circle cases where
+    # both_end_extension sequential/glue fuse fails (2026-07-17 probe).
+    "centre_stub_corner_ext",
+]
 EllipseSweepMode = Literal["frenet", "parallel_transport"]
 
 # Gmsh healShapes tolerance after BREP roundtrip (probe: 0.05 mm fixes STEP validity).
 OCP_BREP_GMSH_HEAL_MM = 0.05
+
+# parallel_transport puts an ellipse profile at every polyline knot → disk/wafer
+# ("圆片") struts. Paper-box / CAE path must stay on smooth frenet/CorrectedFrenet.
+_DISK_SWEEP_ENV = "HU_BAI_ALLOW_ELLIPSE_DISK_SWEEP"
+
+
+def require_smooth_ellipse_sweep(mode: str) -> str:
+    """Force smooth ellipse sweep unless emergency env override is set."""
+    m = str(mode or "frenet").strip().lower()
+    if m in ("", "frenet"):
+        return "frenet"
+    if m == "parallel_transport":
+        if os.environ.get(_DISK_SWEEP_ENV, "").strip().lower() in ("1", "true", "yes"):
+            return "parallel_transport"
+        raise ValueError(
+            "ellipse_sweep_mode=parallel_transport is blocked (produces disk/wafer struts). "
+            "Use frenet (smooth) only. To override temporarily: "
+            f"export {_DISK_SWEEP_ENV}=1"
+        )
+    raise ValueError(f"unknown ellipse_sweep_mode={mode!r}; expected frenet")
 
 
 def _require_ocp():
@@ -169,6 +196,9 @@ def ocp_write_step(shape: Any, path: str) -> None:
     status = writer.Write(os.path.abspath(path))
     if status != 1:
         raise RuntimeError(f"STEP write failed for {path} (status={status})")
+    from src.export.step_size_guard import check_step_file_size
+
+    check_step_file_size(path, raise_on_error=True)
 
 
 def _gmsh_brep_to_step_once(
@@ -239,6 +269,7 @@ def ocp_write_step_via_gmsh_brep_heal(
     *,
     heal_mm: float = OCP_BREP_GMSH_HEAL_MM,
     fast_readback: bool = True,
+    skip_gmsh_heal: bool = False,
 ) -> dict[str, Any]:
     """
     Export a valid single-shell STEP for SolidWorks.
@@ -248,6 +279,9 @@ def ocp_write_step_via_gmsh_brep_heal(
 
     When default heal destroys geometry (0 volumes), fall back to import-only,
     finer heal, then direct OCP STEP.
+
+    ``skip_gmsh_heal=True`` skips healShapes (used for fragile ellipse arrays where
+    heal collapses volumes) and tries import-only then direct OCP STEP.
     """
     from OCP.BRepTools import BRepTools
 
@@ -260,11 +294,16 @@ def ocp_write_step_via_gmsh_brep_heal(
         if not BRepTools.Write_s(shape, brep_path):
             raise RuntimeError(f"BREP write failed: {brep_path}")
 
-        gmsh_routes: list[tuple[str, float | None]] = [
-            ("brep_gmsh_heal", float(heal_mm)),
-            ("brep_gmsh_import_only", None),
-            ("brep_gmsh_heal_fine", 0.01),
-        ]
+        if skip_gmsh_heal:
+            gmsh_routes: list[tuple[str, float | None]] = [
+                ("brep_gmsh_import_only", None),
+            ]
+        else:
+            gmsh_routes = [
+                ("brep_gmsh_heal", float(heal_mm)),
+                ("brep_gmsh_import_only", None),
+                ("brep_gmsh_heal_fine", 0.01),
+            ]
         for route_name, tol in gmsh_routes:
             try:
                 export_route, used_heal = _gmsh_brep_to_step_once(
@@ -288,6 +327,10 @@ def ocp_write_step_via_gmsh_brep_heal(
                 readback["export_route"] = export_route
                 readback["heal_mm"] = float(used_heal) if used_heal is not None else None
                 readback["step_bytes"] = step_bytes
+                from src.export.step_size_guard import as_report_dict, check_step_file_size
+
+                size_ck = check_step_file_size(abs_path, raise_on_error=True)
+                readback["step_size_check"] = as_report_dict(size_ck)
                 return readback
             except Exception as exc:
                 msg = f"{route_name}: {exc}"
@@ -308,6 +351,11 @@ def ocp_write_step_via_gmsh_brep_heal(
         readback["export_route"] = "ocp_direct"
         readback["heal_mm"] = None
         readback["step_bytes"] = step_bytes
+        from src.export.step_size_guard import as_report_dict, check_step_file_size
+
+        # ocp_write_step already ran a size check; re-attach report for callers.
+        size_ck = check_step_file_size(abs_path, raise_on_error=True)
+        readback["step_size_check"] = as_report_dict(size_ck)
         return readback
     finally:
         if os.path.isfile(brep_path):
@@ -586,6 +634,62 @@ def ocp_pipe_with_centre_stub(path_pts: tuple, radius: float) -> Any:
     return ocp_fuse_pair(cyl, pipe, glue="off", fuzzy_mm=1e-3, label="centre-stub")
 
 
+def ocp_elliptic_pipe_with_centre_stub(
+    path_pts: tuple,
+    *,
+    major_radius: float,
+    minor_radius: float,
+    major_axis_hint: np.ndarray,
+    compression_axis: np.ndarray | None = None,
+    align_up_to: str = "minor",
+) -> Any:
+    """Elliptic chord prism at cell centre + open-start elliptic pipe."""
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism
+    from OCP.gp import gp_Vec
+
+    pts = _as_np_points(path_pts)
+    if len(pts) < 2:
+        raise ValueError("pipe path needs at least two points")
+    p0, p1 = pts[0], pts[1]
+    chord = p1 - p0
+    length = float(np.linalg.norm(chord))
+    if length < 1e-9:
+        return ocp_elliptic_pipe_along_points(
+            path_pts,
+            major_radius=float(major_radius),
+            minor_radius=float(minor_radius),
+            major_axis_hint=np.asarray(major_axis_hint, dtype=float),
+        )
+
+    e_z, e_x, _ = frames_along_polyline(pts)[0]
+    hint = np.asarray(major_axis_hint, dtype=float)
+    if compression_axis is not None:
+        from src.mesh.occ_pipe import _major_axis_from_up
+
+        hint = _major_axis_from_up(
+            e_z,
+            up=np.asarray(compression_axis, dtype=float),
+            fallback_x=e_x,
+            align_up_to=str(align_up_to),
+        )
+    wire = _profile_wire_ellipse_at_point(
+        p0, e_z, hint, float(major_radius), float(minor_radius)
+    )
+    face = BRepBuilderAPI_MakeFace(wire).Face()
+    stub = BRepPrimAPI_MakePrism(
+        face, gp_Vec(float(chord[0]), float(chord[1]), float(chord[2]))
+    ).Shape()
+    pipe = ocp_elliptic_pipe_along_points(
+        path_pts,
+        major_radius=float(major_radius),
+        minor_radius=float(minor_radius),
+        major_axis_hint=hint,
+        open_at_start=True,
+    )
+    return ocp_fuse_pair(stub, pipe, glue="off", fuzzy_mm=1e-3, label="elliptic-centre-stub")
+
+
 def _box_from_bounds(bounds: tuple[float, float, float, float, float, float]) -> Any:
     ocp = _require_ocp()
     xmin, xmax, ymin, ymax, zmin, zmax = map(float, bounds)
@@ -601,9 +705,11 @@ def ocp_clip_to_periodic_cell(
     shape: Any,
     center_xyz: tuple[float, float, float],
     cell_size: float,
+    *,
+    expand_mm: float = 0.0,
 ) -> Any:
-    """Clip one centred unit cell to its nominal [-L/2,L/2]^3 periodic box."""
-    h = 0.5 * float(cell_size)
+    """Clip one unit cell to its periodic box (optional expand for thin-rod overlap)."""
+    h = 0.5 * float(cell_size) + float(expand_mm)
     cx, cy, cz = (float(center_xyz[0]), float(center_xyz[1]), float(center_xyz[2]))
     box = _box_from_bounds(
         (cx - h, cx + h, cy - h, cy + h, cz - h, cz + h)
@@ -612,7 +718,8 @@ def ocp_clip_to_periodic_cell(
     mass = ocp_mass(clipped)
     if mass <= 0.0:
         raise RuntimeError(
-            f"periodic clip empty (center=({cx:g},{cy:g},{cz:g}), L={cell_size:g})"
+            f"periodic clip empty (center=({cx:g},{cy:g},{cz:g}), "
+            f"L={cell_size:g}, expand={expand_mm:g})"
         )
     return clipped
 
@@ -649,7 +756,11 @@ def _configure_bop_fuse(
     if fuzzy_mm > 0.0:
         op.SetFuzzyValue(float(fuzzy_mm))
     if simplify and hasattr(op, "SimplifyResult"):
-        op.SimplifyResult(True)
+        # Thin-rod / partially-built BOP: SimplifyResult can raise StdFail_NotDone.
+        try:
+            op.SimplifyResult(True)
+        except Exception:
+            pass
 
 
 def ocp_fuse_pair(
@@ -664,7 +775,12 @@ def ocp_fuse_pair(
     ocp = _require_ocp()
     op = ocp["BRepAlgoAPI_Fuse"](a, b)
     _configure_bop_fuse(op, glue=glue, fuzzy_mm=fuzzy_mm, simplify=simplify)
-    op.Build()
+    try:
+        op.Build()
+    except Exception as exc:
+        raise RuntimeError(
+            f"OCP fuse Build failed ({label}, glue={glue}, fuzzy={fuzzy_mm:g} mm): {exc}"
+        ) from exc
     if not op.IsDone():
         raise RuntimeError(
             f"OCP fuse failed ({label}, glue={glue}, fuzzy={fuzzy_mm:g} mm)"
@@ -728,6 +844,95 @@ def _order_octant_shapes(
     return [shapes[i] for i in order]
 
 
+def _ocp_count_solids(shape: Any) -> int:
+    from OCP.TopAbs import TopAbs_SOLID
+    from OCP.TopExp import TopExp_Explorer
+
+    exp = TopExp_Explorer(shape, TopAbs_SOLID)
+    n = 0
+    while exp.More():
+        n += 1
+        exp.Next()
+    return n
+
+
+def _ocp_explode_solids(shape: Any) -> list[Any]:
+    from OCP.TopAbs import TopAbs_SOLID
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS
+
+    exp = TopExp_Explorer(shape, TopAbs_SOLID)
+    solids: list[Any] = []
+    while exp.More():
+        solids.append(TopoDS.Solid_s(exp.Current()))
+        exp.Next()
+    return solids
+
+
+def _ensure_single_solid(
+    shape: Any,
+    *,
+    cut_mass: float,
+    fuzzy_mm: float,
+    label: str,
+    budget_s: float = 180.0,
+) -> Any:
+    """GlueShift/Full may return a multi-solid compound; remelt with glue=off."""
+    import time
+
+    n = _ocp_count_solids(shape)
+    if n <= 1:
+        return shape
+
+    solids = _ocp_explode_solids(shape)
+    deadline = time.monotonic() + float(budget_s)
+    print(
+        f"  {label}: glue result has {n} solid(s); boolean remelt "
+        f"(glue=off, budget={budget_s:.0f}s)...",
+        flush=True,
+    )
+    # Keep remelt short: few fuzzy rungs so unitcell ladder can advance.
+    fuzzies = sorted({float(fuzzy_mm), 0.05, 0.1, 0.2})
+    last_err: Exception | None = None
+    for fz in fuzzies:
+        if time.monotonic() > deadline:
+            raise RuntimeError(
+                f"{label}: remelt budget {budget_s:.0f}s exceeded "
+                f"(still { _ocp_count_solids(shape) if not solids else len(solids) } solid(s))"
+            )
+        try:
+            merged = _fuse_group_sequential(
+                solids,
+                cut_mass=cut_mass,
+                glue="off",
+                fuzzy_mm=float(fz),
+                label=f"{label}-rebool-f{fz:g}",
+                enforce_mass_growth=False,
+                deadline_monotonic=deadline,
+            )
+            n2 = _ocp_count_solids(merged)
+            if n2 == 1:
+                print(
+                    f"  {label}: remelt OK at fuzzy={fz:g} mm "
+                    f"(mass={ocp_mass(merged):.1f} mm3)",
+                    flush=True,
+                )
+                return merged
+            solids = _ocp_explode_solids(merged) or solids
+            print(
+                f"  {label}: remelt fuzzy={fz:g} still {n2} solid(s)",
+                flush=True,
+            )
+        except Exception as exc:
+            last_err = exc
+            print(f"  {label}: remelt fuzzy={fz:g} FAIL: {exc}", flush=True)
+    detail = f" ({last_err})" if last_err else ""
+    raise RuntimeError(
+        f"{label}: could not remelt glue compound to 1 solid "
+        f"(started with {n}){detail}"
+    )
+
+
 def _fuse_group_sequential(
     shapes: list[Any],
     *,
@@ -735,7 +940,11 @@ def _fuse_group_sequential(
     glue: GlueMode,
     fuzzy_mm: float,
     label: str,
+    enforce_mass_growth: bool = True,
+    deadline_monotonic: float | None = None,
 ) -> Any:
+    import time
+
     if not shapes:
         raise RuntimeError(f"{label}: no shapes")
     if len(shapes) == 1:
@@ -745,6 +954,10 @@ def _fuse_group_sequential(
     mean_piece = float(cut_mass) / max(1, len(shapes))
     min_step_delta = 0.25 * mean_piece
     for idx, shape in enumerate(shapes[1:], start=2):
+        if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
+            raise RuntimeError(
+                f"{label}: deadline exceeded at step {idx}/{len(shapes)}"
+            )
         prev_mass = ocp_mass(acc)
         piece_mass = ocp_mass(shape)
         acc = ocp_fuse_pair(
@@ -755,7 +968,7 @@ def _fuse_group_sequential(
             label=f"{label} step {idx}",
         )
         new_mass = ocp_mass(acc)
-        if new_mass < prev_mass + min_step_delta:
+        if enforce_mass_growth and piece_mass >= 1.0 and new_mass < prev_mass + min_step_delta:
             raise RuntimeError(
                 f"{label}: step {idx}/{len(shapes)} mass drop "
                 f"({new_mass:.1f} < {prev_mass + min_step_delta:.1f}; "
@@ -874,16 +1087,38 @@ def fuse_octant_shapes(
     else:
         raise ValueError(f"unknown fuse strategy: {strategy!r}")
 
+    # Glue modes frequently leave a multi-solid compound (thin rods);
+    # require a true single solid before STEP export / gmsh QC.
+    if strategy.startswith("sequential_glue") or strategy.startswith("batch_glue") or strategy.startswith("x_layer_glue"):
+        merged = _ensure_single_solid(
+            merged,
+            cut_mass=cut_mass,
+            fuzzy_mm=fuzzy_mm,
+            label=f"ocp-{strategy}",
+        )
+    elif _ocp_count_solids(merged) != 1:
+        merged = _ensure_single_solid(
+            merged,
+            cut_mass=cut_mass,
+            fuzzy_mm=fuzzy_mm,
+            label=f"ocp-{strategy}",
+        )
+
     merged_mass = ocp_mass(merged)
     if cut_mass > 0.0 and merged_mass < min_mass:
         raise RuntimeError(
             f"{strategy}: merged mass {merged_mass:.1f} mm3 < "
             f"{min_mass:.1f} mm3 ({MIN_CUT_MERGE_MASS_RATIO:.0%} of cut sum)"
         )
+    n_solids = _ocp_count_solids(merged)
+    if n_solids != 1:
+        raise RuntimeError(
+            f"{strategy}: expected 1 solid after fuse, got {n_solids}"
+        )
     ratio = merged_mass / cut_mass if cut_mass > 0.0 else 0.0
     print(
         f"  ocp fuse OK: strategy={strategy} mass={merged_mass:.1f} "
-        f"ratio={ratio:.3f}",
+        f"ratio={ratio:.3f} solids={n_solids}",
         flush=True,
     )
     return merged, desc
@@ -929,15 +1164,38 @@ def _ocp_pipe_solid_for_part(
         }
 
     corner = _canonical_corner_from_pipe_path(path_pts, cell_size_mm)
-    if pipe_mode == "centre_stub":
-        if kind == "pipe_ellipse":
+    auto_ext = octant_centre_path_extension_mm(float(radius))
+    corner_ext_only = (
+        float(corner_extension_mm)
+        if corner_extension_mm is not None
+        else auto_ext
+    )
+
+    if pipe_mode in ("centre_stub", "centre_stub_corner_ext"):
+        path_for_stub = path_pts
+        if pipe_mode == "centre_stub_corner_ext" and corner_ext_only > 0.0:
+            path_for_stub = extend_pipe_path_past_corner(path_pts, corner_ext_only)
+        if kind == "pipe":
+            return ocp_pipe_with_centre_stub(path_for_stub, float(radius)), corner
+        if pipe_mode == "centre_stub":
             raise ValueError("centre_stub not supported for elliptic pipes")
-        return ocp_pipe_with_centre_stub(path_pts, float(radius)), corner
+        # Ellipse hybrid: elliptic chord stub + open-start pipe (same idea as circle).
+        return (
+            ocp_elliptic_pipe_with_centre_stub(
+                path_for_stub,
+                major_radius=float(ellipse_kwargs["major_radius"]),
+                minor_radius=float(ellipse_kwargs["minor_radius"]),
+                major_axis_hint=ellipse_kwargs["major_axis_hint"],
+                compression_axis=ellipse_kwargs["compression_axis"],
+                align_up_to=str(ellipse_kwargs["align_up_to"]),
+            ),
+            corner,
+        )
 
     centre_ext = (
         float(centre_extension_mm)
         if centre_extension_mm is not None
-        else octant_centre_path_extension_mm(float(radius))
+        else auto_ext
     )
     corner_ext = (
         float(corner_extension_mm)
@@ -958,6 +1216,7 @@ def _ocp_pipe_solid_for_part(
     if corner_ext > 0.0:
         path = extend_pipe_path_past_corner(path, corner_ext)
     if ellipse_kwargs.get("sweep_mode") == "parallel_transport":
+        require_smooth_ellipse_sweep("parallel_transport")
         return (
             ocp_elliptic_pipe_parallel_transport(
                 path,
@@ -995,7 +1254,10 @@ def build_q1_octant_cut_shapes(
 
     ``pipe_mode=centre_stub`` — chord cylinder + open-start pipe (gmsh default).
     ``pipe_mode=both_end_extension`` — extend path at centre and corner before sweep.
+    ``pipe_mode=centre_stub_corner_ext`` — corner path extension + centre stub
+    (tip-flat outer ends; fuse-stable centre; preferred when both_end fuse fails).
     """
+    ellipse_sweep_mode = require_smooth_ellipse_sweep(ellipse_sweep_mode)  # type: ignore[assignment]
     corners = unitcell_octant_corners_mm(cell_size_mm)
     ox, oy, oz = (
         float(corner_offset_mm[0]),
@@ -1010,19 +1272,27 @@ def build_q1_octant_cut_shapes(
     corner_tol = max(1e-3, 1e-6 * float(cell_size_mm))
     cut_shapes: list[Any] = []
     pipe_ref_mass = 0.0
+    sample_r = float(pipe_parts[0][2])
+    auto_ext = octant_centre_path_extension_mm(sample_r)
     if pipe_mode == "both_end_extension":
-        sample_r = float(pipe_parts[0][2])
-        auto_ext = octant_centre_path_extension_mm(sample_r)
         print(
             f"  ocp octant cut: pipe_mode=both_end_extension "
             f"(centre={centre_extension_mm or auto_ext:g} mm "
             f"corner={corner_extension_mm or (centre_extension_mm or auto_ext):g} mm)",
             flush=True,
         )
+    elif pipe_mode == "centre_stub_corner_ext":
+        print(
+            f"  ocp octant cut: pipe_mode=centre_stub_corner_ext "
+            f"(corner={corner_extension_mm or auto_ext:g} mm + centre stub)",
+            flush=True,
+        )
     else:
         print("  ocp octant cut: pipe_mode=centre_stub", flush=True)
     if ellipse_sweep_mode == "parallel_transport":
-        print("  ocp octant cut: ellipse_sweep=parallel_transport", flush=True)
+        print("  ocp octant cut: ellipse_sweep=parallel_transport (OVERRIDE)", flush=True)
+    else:
+        print("  ocp octant cut: ellipse_sweep=frenet (smooth)", flush=True)
 
     for idx, part in enumerate(pipe_parts, start=1):
         corner = corners[idx - 1]
@@ -1075,6 +1345,7 @@ def export_q1_ocp_glue_unitcell(
     ellipse_sweep_mode: EllipseSweepMode = "frenet",
 ) -> dict[str, Any]:
     """Full Q=1 pilot: octant cuts + Glue fuse + STEP export."""
+    ellipse_sweep_mode = require_smooth_ellipse_sweep(ellipse_sweep_mode)  # type: ignore[assignment]
     cut_shapes, pipe_ref_mass, cut_mass = build_q1_octant_cut_shapes(
         pipe_parts,
         cell_size_mm,
@@ -1096,6 +1367,16 @@ def export_q1_ocp_glue_unitcell(
     export_shape = ocp_heal_fused_solid(merged)
     mem_healed = ocp_shape_topology(export_shape)
     step_readback = ocp_write_step_via_gmsh_brep_heal(export_shape, out_step)
+    from src.export.sw_parasolid import recenter_step_bbox_to_origin
+
+    recenter = recenter_step_bbox_to_origin(out_step)
+    if recenter.get("shifted"):
+        print(
+            f"  recenter 1x1 COM → origin: "
+            f"dx={float(recenter['dx']):+.4f} dy={float(recenter['dy']):+.4f} "
+            f"dz={float(recenter['dz']):+.4f} mm",
+            flush=True,
+        )
     return {
         "step_path": os.path.abspath(out_step),
         "method": "ocp_octant_glue_fuse",
@@ -1118,4 +1399,5 @@ def export_q1_ocp_glue_unitcell(
         "step_readback_topology": step_readback,
         "step_solid_ok": bool(step_readback.get("brep_valid")),
         "step_export_route": step_readback.get("export_route"),
+        "bbox_recenter": recenter,
     }

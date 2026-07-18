@@ -109,48 +109,50 @@ seed_ok() {
   local seed
   seed="$(seed_path_for_q "$q")"
   [[ -f "$seed" ]] || return 1
-  local vols
-  vols="$("$PY" -c "
+  "$PY" -c "
+import math, sys
+sys.path.insert(0, '$ROOT')
 from src.export.paper_box_array_fuse import _count_seed_volumes
-print(_count_seed_volumes('$seed'))
-")"
-  [[ "$vols" == "1" ]]
+from src.export.strut_corridor_check import assert_unitcell_struts_present
+seed = '$seed'
+if int(_count_seed_volumes(seed)) != 1:
+    raise SystemExit(1)
+aspect = 2.0 / 1.2
+d_min = math.sqrt(4.0 / aspect)
+d_maj = aspect * d_min
+assert_unitcell_struts_present(
+    seed,
+    cell_size_mm=20.0,
+    rod_diameter_mm=d_maj,
+    amplitude_mm=2.0,
+    period_factor=float('$q'),
+    n_segments=24,
+)
+" 2>/dev/null
 }
 
 export_seeds() {
   local q
   for q in $Q_LIST; do
     if [[ "$FORCE_SEEDS" != "1" ]] && seed_ok "$q"; then
-      log "skip seed Q=$q (already vol=1): $(seed_path_for_q "$q")"
+      log "skip seed Q=$q (vol=1 + 8 struts OK): $(seed_path_for_q "$q")"
       continue
     fi
-    if [[ "$q" == "1.0" || "$q" == "1" || "$q" == "1.5" ]]; then
-      log "=== export Q=$q elliptic seed (multi-route, align=${ELLIPSE_ALIGN}) ==="
-      rm -f "$(seed_path_for_q "$q")"
-      set +e
-      nice -n "$NICE_LEVEL" "$PY" scripts/export_q1_ellipse_paper_box_seed.py \
-        --Q "$q" \
-        --ellipse-align "$ELLIPSE_ALIGN" \
-        --out-dir "$SEED_DIR" \
-        $( [[ "$q" == "1.5" ]] && echo --skip-gmsh ) \
-        --out-step "$(seed_path_for_q "$q")" \
-        2>&1 | tee -a "$LOG"
-      q_rc=${PIPESTATUS[0]}
-      set -e
-      if [[ "$q_rc" -ne 0 ]]; then
-        log "WARN: Q=$q elliptic seed export failed (rc=$q_rc); will skip Q=$q array fuse"
-      fi
-      continue
-    fi
-    log "=== export Q=$q elliptic unitcell seed (gmsh, align=${ELLIPSE_ALIGN}) ==="
-    nice -n "$NICE_LEVEL" "$PY" scripts/export_unitcell_paper_box_cut.py \
+    log "=== export Q=$q elliptic seed (octant, align=${ELLIPSE_ALIGN}) ==="
+    rm -f "$(seed_path_for_q "$q")"
+    set +e
+    nice -n "$NICE_LEVEL" "$PY" scripts/export_q1_ellipse_paper_box_seed.py \
       --Q "$q" \
-      --solid-profile ellipse \
       --ellipse-align "$ELLIPSE_ALIGN" \
-      --compression-axis z \
-      --target-area-pi \
       --out-dir "$SEED_DIR" \
+      $( [[ "$q" == "1.5" ]] && echo --skip-gmsh ) \
+      --out-step "$(seed_path_for_q "$q")" \
       2>&1 | tee -a "$LOG"
+    q_rc=${PIPESTATUS[0]}
+    set -e
+    if [[ "$q_rc" -ne 0 ]]; then
+      log "WARN: Q=$q elliptic seed export failed (rc=$q_rc); will skip Q=$q array fuse"
+    fi
   done
 }
 

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from src.abaqus.job_status import is_job_completed
+from src.export.abaqus_compression import material_model_display_name
 from src.paths import export_dir_for_slug, job_dir_for_slug, post_dir_for_slug
 
 _WALLCLOCK_RE = re.compile(r"WALLCLOCK TIME \(SEC\)\s*=\s*(\d+)")
@@ -150,8 +151,9 @@ def build_settings_groups(
     groups.append(SettingGroup(title="网格", items=mesh_items))
 
     material = manifest.get("material") or {}
+    mat_raw = material.get("model") or slug_desc.get("material_model")
     mat_items = [
-        _item("model", "材料模型", material.get("model") or slug_desc.get("material_model")),
+        _item("model", "材料模型", material_model_display_name(mat_raw) or mat_raw),
         _item("E_MPa", "弹性模量 E (MPa)", material.get("E_MPa")),
         _item("nu", "泊松比 ν", material.get("nu")),
         _item("yield_MPa", "屈服强度 (MPa)", material.get("yield_MPa")),
@@ -256,7 +258,9 @@ def extract_case_tags(
             or meta.get("variant_name")
             or meta.get("variant"),
         ),
-        "material": _norm_tag_value(material.get("model") or slug_desc.get("material_model")),
+        "material": _norm_tag_value(
+            material_model_display_name(material.get("model") or slug_desc.get("material_model")),
+        ),
         "element_type": _norm_tag_value(
             mesh.get("cae_element_type") or mesh.get("element") or slug_desc.get("element_type"),
         ),

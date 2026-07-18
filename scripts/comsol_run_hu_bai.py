@@ -92,6 +92,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Use COMSOL hauto presets instead of Fig. 2.8 explicit hmax layered mesh",
     )
     parser.add_argument(
+        "--lattice-hauto",
+        type=int,
+        default=None,
+        help="Physics-controlled lattice autoMeshSize (default 4=Fine; try 5 if mesh fails)",
+    )
+    parser.add_argument(
+        "--fixture-hauto",
+        type=int,
+        default=None,
+        help="Physics-controlled fixture autoMeshSize (default 5=Normal)",
+    )
+    parser.add_argument(
         "--no-mesh",
         action="store_true",
         help="Build geometry + BCs + studies only; skip meshing (GUI inspection step)",
@@ -158,6 +170,8 @@ def main(argv: list[str] | None = None) -> int:
         nz=nz,
         mesh_mm=args.mesh_mm if args.mesh_mm is not None else defaults.mesh_mm,
         physics_controlled_mesh=args.physics_controlled_mesh or defaults.physics_controlled_mesh,
+        lattice_hauto=args.lattice_hauto if args.lattice_hauto is not None else defaults.lattice_hauto,
+        fixture_hauto=args.fixture_hauto if args.fixture_hauto is not None else defaults.fixture_hauto,
         skip_mesh=args.no_mesh,
         run_eigen=run_eigen,
         run_frequency=run_freq,
@@ -293,6 +307,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.in_process:
         solve_mph(mph_path, settings, comsol_bin=comsol_bin, cores=args.np, studies=studies)
         return 0
+
+    # Prefer a process that never held an MPh client during the long batch wait.
+    # (ClientWebSocket SIGSEGV while waiting has falsely failed completed batches.)
+    if not args.solve_only and not args.build_fixture_template:
+        print(
+            "  Note: for long batch solves, prefer separate "
+            "`--build-only` then `--solve-only` processes.",
+            flush=True,
+        )
 
     for i, study in enumerate(studies):
         solved_path = settings.job_dir() / f"{slug}_solved.mph"

@@ -77,7 +77,7 @@ def main() -> int:
         beams,
         out_step,
         polylines=polylines,
-        junction_spheres=True,
+        junction_spheres=False,
         fuse=not bool(args.no_fuse),
         polyline_sweep="pipe",
         cell_size=L,

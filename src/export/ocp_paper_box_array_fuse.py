@@ -135,32 +135,89 @@ def _ocp_fuse_group_sequential(
     label: str,
     ref_mass_per_piece: float,
 ) -> Any:
+    """Sequential cell/row fuse with empty-result fuzzy/glue climb (thin rods)."""
     if not shapes:
         raise RuntimeError(f"{label}: no shapes")
     if len(shapes) == 1:
         return shapes[0]
 
     acc = shapes[0]
-    min_step_delta = 0.20 * float(ref_mass_per_piece)
+    # Thin struts: adjacent paper-box cells have small overlap; allow more slack.
+    min_step_delta = 0.10 * float(ref_mass_per_piece)
+    glue_climb: tuple[GlueMode, ...] = (
+        (glue, "shift", "off") if glue == "full" else (glue, "off")
+        if glue == "shift"
+        else (glue,)
+    )
+    # Deduplicate while preserving order.
+    seen: set[str] = set()
+    glue_order: list[GlueMode] = []
+    for g in glue_climb:
+        if g not in seen:
+            seen.add(g)
+            glue_order.append(g)
+    fuzzy_rungs = sorted(
+        {
+            float(fuzzy_mm),
+            float(fuzzy_mm) * 2.0,
+            0.1,
+            0.2,
+            0.4,
+            0.8,
+        }
+    )
+
     for idx, shape in enumerate(shapes[1:], start=2):
         prev_mass = ocp_mass(acc)
-        acc = ocp_fuse_pair(
-            acc,
-            shape,
-            glue=glue,
-            fuzzy_mm=fuzzy_mm,
-            label=f"{label} {idx}/{len(shapes)}",
-        )
-        new_mass = ocp_mass(acc)
-        if new_mass < prev_mass + min_step_delta:
+        last_err: Exception | None = None
+        fused_ok = False
+        for g in glue_order:
+            for fz in fuzzy_rungs:
+                if g == glue and abs(fz - float(fuzzy_mm)) < 1e-12:
+                    pass  # try requested combo first (already first in lists)
+                elif fz + 1e-12 < float(fuzzy_mm) and g == glue:
+                    continue
+                try:
+                    candidate = ocp_fuse_pair(
+                        acc,
+                        shape,
+                        glue=g,
+                        fuzzy_mm=float(fz),
+                        label=f"{label} {idx}/{len(shapes)}",
+                    )
+                    new_mass = ocp_mass(candidate)
+                    if new_mass < prev_mass + min_step_delta:
+                        raise RuntimeError(
+                            f"{label}: fuse step {idx}/{len(shapes)} mass drop "
+                            f"({new_mass:.1f} < {prev_mass + min_step_delta:.1f} mm³) "
+                            f"(glue={g}, fuzzy={fz:g})"
+                        )
+                    if g != glue or abs(fz - float(fuzzy_mm)) > 1e-12:
+                        print(
+                            f"  {label}: climb OK at step {idx} "
+                            f"glue={g} fuzzy={fz:g} mm "
+                            f"(requested glue={glue} fuzzy={fuzzy_mm:g})",
+                            flush=True,
+                        )
+                    acc = candidate
+                    fused_ok = True
+                    print(
+                        f"  {label}: fused {idx}/{len(shapes)} "
+                        f"mass={new_mass:.1f} mm³",
+                        flush=True,
+                    )
+                    break
+                except Exception as exc:
+                    last_err = exc
+                    continue
+            if fused_ok:
+                break
+        if not fused_ok:
             raise RuntimeError(
-                f"{label}: fuse step {idx}/{len(shapes)} mass drop "
-                f"({new_mass:.1f} < {prev_mass + min_step_delta:.1f} mm³)"
+                f"{label}: could not fuse step {idx}/{len(shapes)} "
+                f"(tried glue={list(glue_order)} fuzzy={fuzzy_rungs})"
+                + (f": {last_err}" if last_err else "")
             )
-        print(
-            f"  {label}: fused {idx}/{len(shapes)} mass={new_mass:.1f} mm³",
-            flush=True,
-        )
     return acc
 
 
@@ -178,7 +235,7 @@ def _ocp_fuse_group_batch(
         return shapes[0]
 
     expected = ref_mass_per_piece * len(shapes)
-    min_mass = 0.85 * expected
+    min_mass = 0.95 * expected
     fused = ocp_fuse_batch(
         shapes,
         glue=glue,
@@ -189,7 +246,7 @@ def _ocp_fuse_group_batch(
     if fused_mass < min_mass:
         raise RuntimeError(
             f"{label}: batch fuse mass {fused_mass:.1f} mm³ "
-            f"< 85% of expected {expected:.1f} mm³ "
+            f"< 95% of expected {expected:.1f} mm³ "
             f"(glue={glue}, fuzzy={fuzzy_mm:g} mm)"
         )
     print(
@@ -345,17 +402,24 @@ def place_ocp_unitcell_grid(
     *,
     cell_size: float = 20.0,
     clip_to_periodic_box: bool = True,
+    clip_expand_mm: float = 0.0,
 ) -> list[Any]:
     """Place one unit-cell solid at each lattice offset (copy + translate only)."""
     shapes: list[Any] = []
     cell_l = float(cell_size)
+    expand = float(clip_expand_mm)
     for idx, (dx, dy, dz) in enumerate(offsets):
         if idx == 0 and abs(dx) < 1e-12 and abs(dy) < 1e-12 and abs(dz) < 1e-12:
             placed = seed_shape
         else:
             placed = ocp_translate_shape(seed_shape, dx, dy, dz)
         if clip_to_periodic_box:
-            placed = ocp_clip_to_periodic_cell(placed, (dx, dy, dz), cell_l)
+            placed = ocp_clip_to_periodic_cell(
+                placed,
+                (dx, dy, dz),
+                cell_l,
+                expand_mm=expand,
+            )
         shapes.append(placed)
     return shapes
 
@@ -420,7 +484,7 @@ def probe_ocp_two_cell_fuse(
         )
         fused_mass = ocp_mass(fused)
         ratio = fused_mass / expected if expected > 0 else 0.0
-        ok = fused_mass >= 0.85 * expected
+        ok = fused_mass >= 0.95 * expected
         return {
             "ok": ok,
             "glue": glue,
@@ -470,12 +534,17 @@ def export_ocp_paper_box_zslab_fuse(
     inter_row_fuzzy_mm: float = DEFAULT_OCP_INTER_ROW_FUZZY_MM,
     build_mode: str = "strut_cell_glue",
     periodic_overlap_mm: float = 0.02,
+    clip_to_periodic_box: bool = True,
 ) -> dict[str, Any]:
     """
     Fuse one nx×ny z-slab: load 1-volume seed → translate grid → row/inter-row fuse.
 
     The unit cell is **not** re-built per grid site; only copy+translate of the seed
     solid (same idea as gmsh ``_write_translated_unitcell_step_copy``).
+
+    ``periodic_overlap_mm`` expands the optional periodic clip box so clipped cells
+    keep a thin overlap for boolean fuse (needed for thin struts). Set
+    ``clip_to_periodic_box=False`` to keep paper-box overhangs instead.
     """
     seed_step = os.path.abspath(seed_step)
     path = os.path.abspath(path)
@@ -483,12 +552,15 @@ def export_ocp_paper_box_zslab_fuse(
     iz_i = int(iz)
     cell_l = float(cell_size)
     n_cells = nx_i * ny_i
+    overlap = max(0.0, float(periodic_overlap_mm))
+    do_clip = bool(clip_to_periodic_box)
 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     print(
         f"  OCP z-slab iz={iz_i}: {n_cells} cell(s) "
         f"({nx_i}x{ny_i}, L={cell_l:g} mm, fuse={inter_cell_fuse_mode}, "
-        f"row_glue={row_glue}, inter_row_glue={inter_row_glue})...",
+        f"row_glue={row_glue}, inter_row_glue={inter_row_glue}, "
+        f"clip={do_clip}, overlap={overlap:g} mm)...",
         flush=True,
     )
     print(f"  Seed STEP (load once, then translate): {seed_step}", flush=True)
@@ -523,7 +595,8 @@ def export_ocp_paper_box_zslab_fuse(
         seed_shape,
         offsets,
         cell_size=cell_l,
-        clip_to_periodic_box=True,
+        clip_to_periodic_box=do_clip,
+        clip_expand_mm=0.5 * overlap if do_clip else 0.0,
     )
 
     cell_mass = ocp_mass(cell_shapes[0])
@@ -547,10 +620,10 @@ def export_ocp_paper_box_zslab_fuse(
 
     fused_mass = ocp_mass(fused)
     expected_mass = cell_mass * n_cells
-    if fused_mass < 0.85 * expected_mass:
+    if fused_mass < 0.95 * expected_mass:
         raise RuntimeError(
             f"OCP z-slab iz={iz_i} mass {fused_mass:.1f} mm³ "
-            f"< 85% of expected {expected_mass:.1f} mm³"
+            f"< 95% of expected {expected_mass:.1f} mm³"
         )
 
     step_report = _ocp_write_fused_step(fused, path)
@@ -619,7 +692,7 @@ def export_ocp_paper_box_array_from_zslabs(
     )
     fused_mass = ocp_mass(fused)
     expected = sum(slab_masses)
-    if fused_mass < 0.85 * expected:
+    if fused_mass < 0.95 * expected:
         raise RuntimeError(
             f"OCP array merge mass {fused_mass:.1f} < 85% of {expected:.1f} mm³"
         )
@@ -684,7 +757,7 @@ def export_ocp_paper_box_array_ladder_from_zslabs(
     )
     fused_mass = ocp_mass(fused)
     expected = sum(slab_masses)
-    if fused_mass < 0.85 * expected:
+    if fused_mass < 0.95 * expected:
         raise RuntimeError(
             f"OCP ladder merge mass {fused_mass:.1f} < 85% of {expected:.1f} mm³"
         )
@@ -714,6 +787,13 @@ def export_ocp_paper_box_layered_array_fuse(
     force: bool = False,
     glue: GlueMode = DEFAULT_OCP_GLUE,
     fuzzy_mm: float = DEFAULT_OCP_FUZZY_MM,
+    inter_cell_fuse_mode: str = DEFAULT_OCP_INTER_CELL_FUSE_MODE,
+    row_glue: GlueMode = DEFAULT_OCP_ROW_GLUE,
+    row_fuzzy_mm: float = DEFAULT_OCP_ROW_FUZZY_MM,
+    inter_row_glue: GlueMode = DEFAULT_OCP_INTER_ROW_GLUE,
+    inter_row_fuzzy_mm: float = DEFAULT_OCP_INTER_ROW_FUZZY_MM,
+    periodic_overlap_mm: float = 0.02,
+    clip_to_periodic_box: bool = True,
 ) -> dict[str, Any]:
     """
     Layered 4×4×4: OCP fuse iz=0 → copy iz=1..3 → OCP merge z-slabs.
@@ -741,6 +821,13 @@ def export_ocp_paper_box_layered_array_fuse(
         "cells": [n, n, n],
         "glue": glue,
         "fuzzy_mm": float(fuzzy_mm),
+        "inter_cell_fuse_mode": str(inter_cell_fuse_mode),
+        "row_glue": row_glue,
+        "row_fuzzy_mm": float(row_fuzzy_mm),
+        "inter_row_glue": inter_row_glue,
+        "inter_row_fuzzy_mm": float(inter_row_fuzzy_mm),
+        "periodic_overlap_mm": float(periodic_overlap_mm),
+        "clip_to_periodic_box": bool(clip_to_periodic_box),
         "zslabs": [],
         "array_merge": None,
     }
@@ -760,6 +847,13 @@ def export_ocp_paper_box_layered_array_fuse(
             cell_size=cell_l,
             glue=glue,
             fuzzy_mm=fuzzy_mm,
+            inter_cell_fuse_mode=inter_cell_fuse_mode,
+            row_glue=row_glue,
+            row_fuzzy_mm=row_fuzzy_mm,
+            inter_row_glue=inter_row_glue,
+            inter_row_fuzzy_mm=inter_row_fuzzy_mm,
+            periodic_overlap_mm=float(periodic_overlap_mm),
+            clip_to_periodic_box=bool(clip_to_periodic_box),
         )
         manifest["zslabs"].append(iz0_report)
     else:
@@ -803,8 +897,9 @@ def export_ocp_paper_box_layered_array_fuse(
     merge_report = export_ocp_paper_box_array_from_zslabs(
         zslab_paths,
         array_step,
-        glue=glue,
-        fuzzy_mm=fuzzy_mm,
+        glue=inter_row_glue,
+        fuzzy_mm=inter_row_fuzzy_mm,
+        fuse_mode=inter_cell_fuse_mode,
         progress_label="ocp-paper-box-inter-slab",
     )
     manifest["array_merge"] = merge_report
@@ -817,10 +912,13 @@ def export_ocp_paper_box_layered_array_fuse(
 
 
 def resolve_paper_box_seed(q: float, seed: str = "") -> str:
-    """Prefer explicit seed; else OCP Q1 seed; else gmsh paper_box seed."""
+    """Prefer explicit seed; for Q=1 prefer OCP pilot seed; else gmsh paper_box seed."""
     if seed.strip():
         return os.path.abspath(seed.strip())
-    ocp = ocp_default_q1_seed_step()
-    if os.path.isfile(ocp):
-        return ocp
+    from src.generator.hu_bai_bcc import is_q1_period
+
+    if is_q1_period(q):
+        ocp = ocp_default_q1_seed_step()
+        if os.path.isfile(ocp):
+            return ocp
     return paper_box_seed_step(q)

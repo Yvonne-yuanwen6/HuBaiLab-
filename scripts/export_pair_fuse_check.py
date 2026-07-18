@@ -48,12 +48,16 @@ os.makedirs(out_dir, exist_ok=True)
 
 seed_step = _args.seed.strip() or os.path.join(
     str(CAD_ROOT),
-    "_unitcell_check",
-    f"unitcell_{gen.variant_name.lower()}_fused.step",
+    "_unitcell_paper_box_cut",
+    f"unitcell_{gen.variant_name.lower()}_paper_box.step",
 )
 seed_step = os.path.abspath(seed_step)
 if not os.path.isfile(seed_step):
-    raise SystemExit(f"[FAIL] Seed not found: {seed_step}")
+    raise SystemExit(
+        f"[FAIL] Seed not found: {seed_step}\n"
+        "Generate with: py -3 scripts/export_unitcell_paper_box_cut.py "
+        f"--Q {_args.Q}"
+    )
 
 cases = [
     ("col_y_2cell_compound", "y", False, "sequential"),
@@ -62,8 +66,12 @@ cases = [
 
 manifest_entries: list[dict] = []
 print(f"Pair fuse QA: {gen.variant_name}", flush=True)
-print(f"  Seed (from export_unitcell_seed_check): {seed_step}", flush=True)
-print("  If struts look wrong, re-run: py -3 scripts/export_unitcell_seed_check.py --Q 1.0", flush=True)
+print(f"  Seed (paper_box): {seed_step}", flush=True)
+print(
+    "  If struts look wrong, re-run: "
+    f"py -3 scripts/export_unitcell_paper_box_cut.py --Q {_args.Q}",
+    flush=True,
+)
 
 for slug, axis, do_fuse, strategy in cases:
     offsets: list[tuple[float, float, float]] = []

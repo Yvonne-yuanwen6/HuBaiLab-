@@ -72,6 +72,24 @@ _parser.add_argument(
     choices=("ocp", "gmsh"),
     help="Fuse backend: ocp (GlueShift, Q1 OCP seed) or gmsh (legacy)",
 )
+_parser.add_argument(
+    "--ocp-fuse-mode",
+    default="hierarchical_batch",
+    choices=("hierarchical_batch", "sequential"),
+    help="OCP inter-cell fuse mode (sequential is more robust for Q>=1 ellipse)",
+)
+_parser.add_argument(
+    "--ocp-row-fuzzy-mm",
+    type=float,
+    default=0.05,
+    help="OCP fuzzy tolerance for within-row cell fuse (mm)",
+)
+_parser.add_argument(
+    "--ocp-inter-row-fuzzy-mm",
+    type=float,
+    default=0.02,
+    help="OCP fuzzy tolerance for inter-row / inter-slab fuse (mm)",
+)
 _args = _parser.parse_args()
 
 modes = sum(bool(x) for x in (_args.auto_only, _args.stepwise_only))
@@ -226,6 +244,9 @@ else:
             nz=n,
             cell_size=L,
             force=_args.force,
+            inter_cell_fuse_mode=_args.ocp_fuse_mode,
+            row_fuzzy_mm=float(_args.ocp_row_fuzzy_mm),
+            inter_row_fuzzy_mm=float(_args.ocp_inter_row_fuzzy_mm),
         )
     else:
         layered = export_paper_box_layered_array_fuse(

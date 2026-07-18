@@ -30,7 +30,6 @@ _parser = argparse.ArgumentParser(description="Hu & Bai → one fused x-row STEP
 _parser.add_argument("--Q", type=float, default=0.0)
 _parser.add_argument("--Af", type=float, default=2.0)
 _parser.add_argument("--n-segments", type=int, default=24)
-_parser.add_argument("--no-junction-spheres", action="store_true")
 _parser.add_argument("--nx", type=int, default=4, help="Cells in this row")
 _parser.add_argument("--block-nx", type=int, default=4)
 _parser.add_argument("--block-ny", type=int, default=4)
@@ -78,7 +77,7 @@ stats = export_lattice_step_occ_row(
     block_nz=bnz,
     cell_size=L,
     polylines=polylines,
-    junction_spheres=not _args.no_junction_spheres,
+    junction_spheres=False,
 )
 
 report = analyze_step_for_solidworks(step_path, fused_single=True)

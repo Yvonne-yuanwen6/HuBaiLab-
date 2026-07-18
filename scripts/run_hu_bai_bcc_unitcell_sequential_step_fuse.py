@@ -39,7 +39,6 @@ _parser.add_argument("--Q", type=float, default=0.0, help="Period factor Q (0=BC
 _parser.add_argument("--Af", type=float, default=2.0, help="Sinusoidal amplitude A_f [mm]")
 _parser.add_argument("--cells", type=int, default=4, help="Cells per axis (paper: 4)")
 _parser.add_argument("--n-segments", type=int, default=24)
-_parser.add_argument("--no-junction-spheres", action="store_true")
 _parser.add_argument("--keep-work-dir", action="store_true")
 _parser.add_argument("--no-resume", action="store_true", help="Regenerate all intermediate STEPs")
 _parser.add_argument(
@@ -93,7 +92,7 @@ if _args.strategy == "translate":
         nz=n,
         cell_size=L,
         polylines=polylines,
-        junction_spheres=not _args.no_junction_spheres,
+        junction_spheres=False,
         keep_work_dir=_args.keep_work_dir,
         resume=not _args.no_resume,
         zslab_ref_path=zslab_ref,
@@ -108,7 +107,7 @@ else:
         nz=n,
         cell_size=L,
         polylines=polylines,
-        junction_spheres=not _args.no_junction_spheres,
+        junction_spheres=False,
         keep_work_dir=_args.keep_work_dir,
         resume=not _args.no_resume,
     )

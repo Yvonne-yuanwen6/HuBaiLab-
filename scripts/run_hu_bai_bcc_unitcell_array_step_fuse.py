@@ -39,11 +39,6 @@ _parser.add_argument(
     default=24,
     help="Centerline samples per strut for pipe sweep (default 24)",
 )
-_parser.add_argument(
-    "--no-junction-spheres",
-    action="store_true",
-    help="Overlap struts at nodes (fewer OCC parts, faster fuse)",
-)
 _args = _parser.parse_args()
 
 L = 20.0
@@ -82,7 +77,7 @@ stats = export_lattice_step_occ_unitcell_array(
     nz=n,
     cell_size=L,
     polylines=polylines,
-    junction_spheres=not _args.no_junction_spheres,
+    junction_spheres=False,
 )
 
 bbox = stats.get("bbox_mm") or {}

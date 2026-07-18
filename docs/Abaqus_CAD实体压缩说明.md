@@ -101,7 +101,7 @@ bash scripts/linux/run_paperbox_cae_tet_pipeline.sh --Q 0.5
 | 工程应变 | **80%**（64 mm / 80 mm 块高） |
 | 加载速率 | **5 mm/min**（步长 ≈ 768 s） |
 | Explicit dt | 上限 **5×10⁻⁴ s**，`automatic` |
-| 材料 | `paper`（Neo-Hooke TPU，仓库默认） |
+| 材料 | `neo_hooke`（Neo-Hooke TPU，仓库默认；旧名 `paper`/`hyperelastic` 仍兼容） |
 | 自接触 | `--contact-store-offsets` + `--contact-settle`（15% 步长，s0=0.02） |
 | 提交资源 | 48 核 / 256 GB（脚本默认，可按机时调整） |
 
@@ -241,6 +241,5 @@ GDI 句柄耗尽：关闭多余零件窗口，或 **绕过 SW** 直接用 verifi
 | **`coupling_nodes` 顶板** | 顶面节点运动学同步，CAE 里板悬空；仅调试，`contact_mode=pair` 为正式方案 |
 | **B31 梁单元 INP** | `run_hu_bai_bcc_export.py`；无线框实体网格，快速对照曲线 |
 | **CAE 六面体 C3D8R 试点** | `run_abaqus_cae_hex_mesh_pilot.ps1`；对 `_solid_merged` 批处理 `openStep` 曾得 `Parts: []`，未接入压缩流水线 |
-| **结点球 + pipe-first 单胞** | `export_unitcell_seed_check.py`；SW 单胞 QA 用，非 paper_box |
 | **Q=1 OCP GlueShift 单胞** | 已验收 vol=1；4×4×4 阵列仍在攻关 |
 | **无效的自接触缓解尝试** | 仅 `SCALE FACTOR` 软间隙、仅 ContactSettle、板/自接触 `INTERFERENCE FIT`、只加密网格——paper_box t=0 均不足，最终靠 STORE OFFSETS |

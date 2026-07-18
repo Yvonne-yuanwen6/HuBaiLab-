@@ -1,4 +1,5 @@
 import type {
+  CadGenerateRequest,
   CaseDetail,
   CaseListResponse,
   CaseSummary,
@@ -6,6 +7,7 @@ import type {
   DashboardSummary,
   ExportSettings,
   JobStatus,
+  QueueState,
   TaskResponse,
   TrashItem,
   VerifiedCad,
@@ -89,6 +91,11 @@ export const api = {
   getCurve: (slug: string) =>
     request<CurveResponse>(`/api/abaqus/cases/${encodeURIComponent(slug)}/curve`),
   listCad: () => request<VerifiedCad[]>("/api/abaqus/cad/verified"),
+  generateCad: (body: CadGenerateRequest) =>
+    request<TaskResponse>("/api/abaqus/cad/generate", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   getPresets: () => request<Record<string, ExportSettings>>("/api/abaqus/presets"),
   previewSettings: (settings: Partial<ExportSettings>) =>
     request<ExportSettings>("/api/abaqus/settings/preview", {
@@ -99,6 +106,45 @@ export const api = {
     request<TaskResponse>("/api/abaqus/export", {
       method: "POST",
       body: JSON.stringify({ settings }),
+    }),
+  mesh: (settings: Partial<ExportSettings>) =>
+    request<TaskResponse>("/api/abaqus/mesh", {
+      method: "POST",
+      body: JSON.stringify({ settings }),
+    }),
+  getQueue: () => request<QueueState>("/api/abaqus/queue"),
+  addToQueue: (body: {
+    slugs: string[];
+    target?: string;
+    cpus?: number;
+    memory_mb?: number;
+  }) =>
+    request<QueueState>("/api/abaqus/queue", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  reorderQueue: (ids: string[]) =>
+    request<QueueState>("/api/abaqus/queue/reorder", {
+      method: "PATCH",
+      body: JSON.stringify({ ids }),
+    }),
+  moveQueueItem: (id: string, direction: "up" | "down" | "top" | "bottom") =>
+    request<QueueState>(`/api/abaqus/queue/${encodeURIComponent(id)}/move`, {
+      method: "POST",
+      body: JSON.stringify({ direction }),
+    }),
+  removeQueueItem: (id: string) =>
+    request<QueueState>(`/api/abaqus/queue/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+  startQueue: () =>
+    request<QueueState>("/api/abaqus/queue/start", { method: "POST", body: "{}" }),
+  pauseQueue: () =>
+    request<QueueState>("/api/abaqus/queue/pause", { method: "POST", body: "{}" }),
+  clearFinishedQueue: () =>
+    request<QueueState>("/api/abaqus/queue/clear-finished", {
+      method: "POST",
+      body: "{}",
     }),
   submit: (
     slug: string,

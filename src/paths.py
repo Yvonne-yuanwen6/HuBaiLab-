@@ -23,9 +23,16 @@ NPM_CACHE_ROOT = CACHE_ROOT / "npm"
 OUTPUT_ROOT = PROJECT_ROOT / "output"
 ACTIVE_CASE_JSON = OUTPUT_ROOT / "active_case.json"
 
-EXPORT_ROOT = OUTPUT_ROOT / "export"
-ABAQUS_JOBS = OUTPUT_ROOT / "jobs"
-ABAQUS_POST = OUTPUT_ROOT / "post"
+
+def _env_output_subdir(env_name: str, default: Path) -> Path:
+    """Allow per-run redirect of export/jobs/post (e.g. batch tree under 批量构型/)."""
+    raw = os.environ.get(env_name, "").strip()
+    return Path(raw).resolve() if raw else default
+
+
+EXPORT_ROOT = _env_output_subdir("HU_BAI_EXPORT_ROOT", OUTPUT_ROOT / "export")
+ABAQUS_JOBS = _env_output_subdir("HU_BAI_JOBS_ROOT", OUTPUT_ROOT / "jobs")
+ABAQUS_POST = _env_output_subdir("HU_BAI_POST_ROOT", OUTPUT_ROOT / "post")
 TRASH_ROOT = OUTPUT_ROOT / "trash"
 CAD_ROOT = OUTPUT_ROOT / "cad"
 # Human-verified STEP files for Abaqus export (place confirmed solids here).
@@ -39,7 +46,8 @@ HUBAI_REMOTE_ROOT = "/media/art/file/XiangLang/Lattice/LWY/HuBaiLab"
 
 # COMSOL Multiphysics 5.6 (art server)
 COMSOL_DEFAULT_BIN = "/home/art/APP/comsol56/multiphysics/bin/comsol"
-COMSOL_JOBS_ROOT = OUTPUT_ROOT / "comsol_jobs"
+# Per-case redirect (e.g. batch tree under output/comsol_jobs/批量构型/{case_id}/)
+COMSOL_JOBS_ROOT = _env_output_subdir("HU_BAI_COMSOL_JOBS_ROOT", OUTPUT_ROOT / "comsol_jobs")
 COMSOL_BATCH_PREFS_DIR = PROJECT_ROOT / "config" / "comsol_batch"
 
 

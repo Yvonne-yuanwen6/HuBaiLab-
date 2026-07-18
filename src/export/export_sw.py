@@ -355,32 +355,24 @@ def export_lattice_stl_concat(
     n_theta: int = 16,
     n_sphere_lat: int = 8,
     n_sphere_lon: int = 16,
-    junction_spheres: bool = True,
+    junction_spheres: bool = False,
 ) -> dict[str, int | float]:
     """
-    Export lattice as one STL file by merging cylinder/sphere meshes (no boolean union).
+    Export lattice as one STL file by merging cylinder meshes (no boolean union).
 
-    Fast and does not require trimesh. Junction spheres overlap strut ends so
-    SolidWorks can often form one solid (Import → Try to form solid).
+    Fast and does not require trimesh. Junction-sphere seeds are disabled.
     """
-    from src.mesh.junction_mesh import collect_solid_junction_radii, effective_solid_radius
+    from src.mesh.junction_mesh import effective_solid_radius
     from src.mesh.solid_profiles import SOLID_SKIP_BEAM_TYPES, polyline_mesh_profile
+
+    if junction_spheres:
+        raise ValueError(
+            "junction-sphere seeds are disabled; use paper_box export "
+            "(scripts/export_unitcell_paper_box_cut.py / OCP glue routes)."
+        )
 
     lookup = {int(n[0]): np.array([float(n[1]), float(n[2]), float(n[3])]) for n in nodes}
     facets: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
-
-    if junction_spheres:
-        for nid, radius in collect_solid_junction_radii(nodes, beams, polylines).items():
-            center = lookup.get(int(nid))
-            if center is not None and radius > 0.0:
-                facets.extend(
-                    _sphere_facets(
-                        center,
-                        radius,
-                        n_lat=n_sphere_lat,
-                        n_lon=n_sphere_lon,
-                    )
-                )
 
     for _bid, n1, n2, radius, btype in beams:
         if str(btype) in SOLID_SKIP_BEAM_TYPES:
@@ -435,7 +427,7 @@ def _collect_solid_primitives(
     beams: list,
     *,
     polylines: list[dict] | None = None,
-    junction_spheres: bool = True,
+    junction_spheres: bool = False,
     trim_for_junctions: bool | None = None,
     polyline_sweep: str = "cylinder",
     polyline_endpoints_only: bool = False,
@@ -447,36 +439,21 @@ def _collect_solid_primitives(
     """
     Return node lookup and analytic primitives.
 
-    Kinds: ``sphere``, ``cylinder``, or ``pipe`` (centerline points + radius).
+    Kinds: ``cylinder`` or ``pipe`` (centerline points + radius).
+    Junction-sphere seeds are disabled; use paper_box unit-cell export instead.
     """
-    from src.mesh.junction_mesh import (
-        collect_solid_junction_radii,
-        effective_solid_radius,
-        trim_beam_endpoints,
-    )
+    from src.mesh.junction_mesh import effective_solid_radius
     from src.mesh.solid_profiles import SOLID_SKIP_BEAM_TYPES, polyline_mesh_profile
 
-    if trim_for_junctions is None:
-        trim_for_junctions = junction_spheres
+    if junction_spheres or trim_for_junctions:
+        raise ValueError(
+            "junction-sphere seeds are disabled; use paper_box export "
+            "(scripts/export_unitcell_paper_box_cut.py / OCP glue routes)."
+        )
 
     lookup = {int(n[0]): np.array([float(n[1]), float(n[2]), float(n[3])]) for n in nodes}
     parts: list[tuple[str, tuple, float]] = []
     use_pipe = str(polyline_sweep).lower() == "pipe"
-
-    junction_r: dict[int, float] = {}
-    if junction_spheres or trim_for_junctions:
-        junction_r = collect_solid_junction_radii(
-            nodes,
-            beams,
-            polylines,
-            polyline_endpoints_only=use_pipe or polyline_endpoints_only,
-        )
-
-    if junction_spheres:
-        for nid, radius in junction_r.items():
-            center = lookup.get(int(nid))
-            if center is not None and radius > 0.0:
-                parts.append(("sphere", tuple(center), float(radius)))
 
     profile = str(solid_profile).strip().lower()
     if profile not in ("circle", "ellipse"):
@@ -488,16 +465,6 @@ def _collect_solid_primitives(
         r = effective_solid_radius(radius=float(radius), profile="circle")
         p1 = lookup[int(n1)]
         p2 = lookup[int(n2)]
-        if trim_for_junctions:
-            trimmed = trim_beam_endpoints(
-                p1,
-                p2,
-                junction_r.get(int(n1), 0.0),
-                junction_r.get(int(n2), 0.0),
-            )
-            if trimmed is None:
-                continue
-            p1, p2 = trimmed
         if profile == "ellipse":
             r_major = float(r)
             r_minor = float(r) * float(ellipse_minor_ratio)
@@ -546,16 +513,6 @@ def _collect_solid_primitives(
             for i in range(len(node_ids) - 1):
                 pa = lookup[node_ids[i]]
                 pb = lookup[node_ids[i + 1]]
-                if trim_for_junctions:
-                    trimmed = trim_beam_endpoints(
-                        pa,
-                        pb,
-                        junction_r.get(node_ids[i], 0.0),
-                        junction_r.get(node_ids[i + 1], 0.0),
-                    )
-                    if trimmed is None:
-                        continue
-                    pa, pb = trimmed
                 if profile == "ellipse":
                     r_major = float(r)
                     r_minor = float(r) * float(ellipse_minor_ratio)
@@ -970,7 +927,7 @@ def _occ_fuse_unitcell_pipe_first(
     progress_label: str = "intra-fuse",
     per_strut_corner_caps: bool = True,
 ) -> list[tuple[int, int]]:
-    """Fuse 8 pipes first (pairwise / per-strut), then junction spheres."""
+    """Fuse 8 pipes first (pairwise / per-strut); optional leftover non-pipe solids."""
     import gmsh
 
     pipe_parts = [p for p in parts if p[0] == "pipe"]
@@ -1060,14 +1017,19 @@ def _occ_fuse_unitcell_solid(
     """
     Unified unit-cell fuse with automatic strategy selection.
 
-    1. pipe-first (pairwise → per-strut) + junction spheres — stable for Q≤1.
-    2. fuse-all tree (17 primitives) — fallback when pipe-first drops struts (Q1.5)
+    1. pipe-first (pairwise → per-strut) — preferred for Q≤1 without junction spheres.
+    2. fuse-all tree — fallback when pipe-first drops struts (Q1.5)
        or when pipe-first cells fail neighbor boolean fuse (Q1.0 arrays).
     """
     import gmsh
 
     if len(parts) <= 1:
         return _occ_dimtags_from_parts(parts)
+
+    if any(p[0] == "sphere" for p in parts):
+        raise ValueError(
+            "junction-sphere seeds are disabled; parts must not include sphere solids."
+        )
 
     def _fuse_all() -> list[tuple[int, int]]:
         return _occ_fuse_unitcell_fuse_all(parts, progress_label=progress_label)
@@ -1490,7 +1452,7 @@ def export_fused_stl(
     *,
     polylines: list[dict] | None = None,
     resolution: int = 12,
-    junction_spheres: bool = True,
+    junction_spheres: bool = False,
 ) -> dict[str, int | float | bool | str]:
     """Single watertight STL via trimesh/manifold boolean union (large blocks)."""
     from src.mesh.solid_union import export_union_stl
@@ -1553,6 +1515,10 @@ def _finalize_occ_step_write(
 
     gmsh.write(path)
 
+    from src.export.step_size_guard import as_report_dict, check_step_file_size
+
+    size_ck = check_step_file_size(path, raise_on_error=True)
+
     import re
 
     with open(path, encoding="utf-8", errors="ignore") as fh:
@@ -1564,13 +1530,14 @@ def _finalize_occ_step_write(
     sw_safe = n_products <= 1 and (
         (fuse and n_solids == 1) or (not fuse and n_products <= n_volumes and n_solids == n_volumes)
     )
-    report: dict[str, int | bool | str] = {
+    report: dict = {
         "step_path": os.path.abspath(path),
         "product_count": n_products,
         "solid_count": n_solids,
         "expected_volumes": n_volumes,
         "solidworks_safe": sw_safe,
         "fuse": fuse,
+        "step_size_check": as_report_dict(size_ck),
     }
     if not sw_safe:
         report["problems"] = (
@@ -1598,7 +1565,7 @@ def export_lattice_step_occ(
     path: str,
     *,
     polylines: list[dict] | None = None,
-    junction_spheres: bool = True,
+    junction_spheres: bool = False,
     fuse: bool = False,
     polyline_sweep: str | None = None,
     cell_size: float | None = None,
@@ -1611,7 +1578,8 @@ def export_lattice_step_occ(
     Export analytic rod/sphere BREP as STEP via gmsh OpenCASCADE.
 
     ``fuse=False`` (default): multi-body compound, fast — matches STL concat mode.
-    ``fuse=True``: boolean union into one solid (junction spheres + overlapping struts).
+    ``fuse=True``: boolean union of overlapping struts into one solid.
+    ``junction_spheres=True`` is rejected (paper_box / no-sphere geometry only).
 
     Polylines default to ``pipe`` sweep (one OCC volume per curved strut). Pass
     ``polyline_sweep="cylinder"`` to restore the legacy per-segment cylinder chain.
@@ -1623,10 +1591,11 @@ def export_lattice_step_occ(
             "STEP/X_T export requires gmsh. Install: pip install gmsh"
         ) from exc
 
-    use_junction = junction_spheres
-    # Trimmed struts leave micro-gaps at spheres → OCC fuse yields 90+ disjoint solids
-    # (SW runs out of window resources opening the STEP). Overlapping strut+sphere → 1 solid.
-    trim_ends = False
+    if junction_spheres:
+        raise ValueError(
+            "junction-sphere seeds are disabled; use paper_box export "
+            "(scripts/export_unitcell_paper_box_cut.py / OCP glue routes)."
+        )
     if polyline_sweep is None:
         polyline_sweep = "pipe" if polylines else "cylinder"
     use_pipe = str(polyline_sweep).lower() == "pipe"
@@ -1635,8 +1604,8 @@ def export_lattice_step_occ(
         nodes,
         beams,
         polylines=polylines,
-        junction_spheres=use_junction,
-        trim_for_junctions=trim_ends,
+        junction_spheres=False,
+        trim_for_junctions=False,
         polyline_sweep=polyline_sweep,
         solid_profile=solid_profile,
         ellipse_minor_ratio=ellipse_minor_ratio,
@@ -1658,8 +1627,7 @@ def export_lattice_step_occ(
             sweep_label = "pipe sweep" if use_pipe else "cylinder chain"
             print(
                 f"  Boolean fuse: {n_parts} OCC solids "
-                f"({sweep_label}, junction spheres={'on' if use_junction else 'off'}, "
-                f"trimmed struts={'on' if trim_ends else 'off'})...",
+                f"({sweep_label}, no junction spheres)...",
                 flush=True,
             )
             if n_parts > 1:
@@ -1817,7 +1785,8 @@ def export_unitcell_array_from_seed(
     (same as the verified ``export_line_from_unitcell_seed --compound`` path).
     Boolean fuse (``fuse=True``): copy/translate + inter-cell fuse → 1 solid.
 
-    Seed must come from ``scripts/export_unitcell_seed_check.py`` (fuse-all for Q1.0).
+    Seed should be a paper_box unit-cell STEP
+    (``scripts/export_unitcell_paper_box_cut.py`` / OCP glue routes).
     """
     import gmsh
 
@@ -1959,7 +1928,7 @@ def export_lattice_step_occ_unitcell_array(
     nz: int,
     cell_size: float,
     polylines: list[dict] | None = None,
-    junction_spheres: bool = True,
+    junction_spheres: bool = False,
     polyline_sweep: str | None = None,
 ) -> dict[str, int | float | bool | str | list]:
     """
@@ -1987,8 +1956,11 @@ def export_lattice_step_occ_unitcell_array(
     if cell_l <= 0.0:
         raise ValueError(f"cell_size must be positive, got {cell_l}")
 
-    use_junction = junction_spheres
-    trim_ends = False
+    if junction_spheres:
+        raise ValueError(
+            "junction-sphere seeds are disabled; use paper_box export "
+            "(scripts/export_unitcell_paper_box_cut.py / OCP glue routes)."
+        )
     if polyline_sweep is None:
         polyline_sweep = "pipe" if polylines else "cylinder"
     use_pipe = str(polyline_sweep).lower() == "pipe"
@@ -1997,8 +1969,8 @@ def export_lattice_step_occ_unitcell_array(
         nodes,
         beams,
         polylines=polylines,
-        junction_spheres=use_junction,
-        trim_for_junctions=trim_ends,
+        junction_spheres=False,
+        trim_for_junctions=False,
         polyline_sweep=polyline_sweep,
     )
     if not parts:
@@ -2028,7 +2000,7 @@ def export_lattice_step_occ_unitcell_array(
         sweep_label = "pipe sweep" if use_pipe else "cylinder chain"
         print(
             f"  Unit cell fuse: {n_uc_parts} OCC solids "
-            f"({sweep_label}, junction spheres={'on' if use_junction else 'off'})...",
+            f"({sweep_label}, no junction spheres)...",
             flush=True,
         )
         if n_uc_parts > 1:
@@ -2134,7 +2106,7 @@ def export_lattice_step_occ_row(
     block_nz: int,
     cell_size: float,
     polylines: list[dict] | None = None,
-    junction_spheres: bool = True,
+    junction_spheres: bool = False,
     polyline_sweep: str | None = None,
 ) -> dict[str, int | float | bool | str | list]:
     """
@@ -2160,7 +2132,11 @@ def export_lattice_step_occ_row(
     if not (0 <= iy_i < bny and 0 <= iz_i < bnz):
         raise ValueError(f"iy={iy_i} or iz={iz_i} out of range for block {bnx}x{bny}x{bnz}")
 
-    use_junction = junction_spheres
+    if junction_spheres:
+        raise ValueError(
+            "junction-sphere seeds are disabled; use paper_box export "
+            "(scripts/export_unitcell_paper_box_cut.py / OCP glue routes)."
+        )
     if polyline_sweep is None:
         polyline_sweep = "pipe" if polylines else "cylinder"
     use_pipe = str(polyline_sweep).lower() == "pipe"
@@ -2169,7 +2145,7 @@ def export_lattice_step_occ_row(
         nodes,
         beams,
         polylines=polylines,
-        junction_spheres=use_junction,
+        junction_spheres=False,
         trim_for_junctions=False,
         polyline_sweep=polyline_sweep,
     )
@@ -2197,7 +2173,7 @@ def export_lattice_step_occ_row(
         sweep_label = "pipe sweep" if use_pipe else "cylinder chain"
         print(
             f"  Unit cell fuse: {n_uc_parts} OCC solids "
-            f"({sweep_label}, junction spheres={'on' if use_junction else 'off'})...",
+            f"({sweep_label}, no junction spheres)...",
             flush=True,
         )
         if n_uc_parts > 1:
@@ -2296,7 +2272,7 @@ def export_lattice_step_occ_zslab(
     block_nz: int,
     cell_size: float,
     polylines: list[dict] | None = None,
-    junction_spheres: bool = True,
+    junction_spheres: bool = False,
     polyline_sweep: str | None = None,
 ) -> dict[str, int | float | bool | str | list]:
     """
@@ -2321,7 +2297,11 @@ def export_lattice_step_occ_zslab(
     if not (0 <= iz_i < bnz):
         raise ValueError(f"iz={iz_i} out of range for block {bnx}x{bny}x{bnz}")
 
-    use_junction = junction_spheres
+    if junction_spheres:
+        raise ValueError(
+            "junction-sphere seeds are disabled; use paper_box export "
+            "(scripts/export_unitcell_paper_box_cut.py / OCP glue routes)."
+        )
     if polyline_sweep is None:
         polyline_sweep = "pipe" if polylines else "cylinder"
     use_pipe = str(polyline_sweep).lower() == "pipe"
@@ -2330,7 +2310,7 @@ def export_lattice_step_occ_zslab(
         nodes,
         beams,
         polylines=polylines,
-        junction_spheres=use_junction,
+        junction_spheres=False,
         trim_for_junctions=False,
         polyline_sweep=polyline_sweep,
     )
@@ -2360,7 +2340,7 @@ def export_lattice_step_occ_zslab(
         sweep_label = "pipe sweep" if use_pipe else "cylinder chain"
         print(
             f"  Unit cell fuse: {n_uc_parts} OCC solids "
-            f"({sweep_label}, junction spheres={'on' if use_junction else 'off'})...",
+            f"({sweep_label}, no junction spheres)...",
             flush=True,
         )
         if n_uc_parts > 1:
@@ -2600,7 +2580,7 @@ def export_lattice_step_occ_block(
     nz: int,
     cell_size: float,
     polylines: list[dict] | None = None,
-    junction_spheres: bool = True,
+    junction_spheres: bool = False,
     polyline_sweep: str | None = None,
 ) -> dict[str, int | float | bool | str | list]:
     """
@@ -2622,7 +2602,11 @@ def export_lattice_step_occ_block(
     if min(nx_i, ny_i, nz_i) < 1:
         raise ValueError(f"nx/ny/nz must be >= 1, got {nx_i}x{ny_i}x{nz_i}")
 
-    use_junction = junction_spheres
+    if junction_spheres:
+        raise ValueError(
+            "junction-sphere seeds are disabled; use paper_box export "
+            "(scripts/export_unitcell_paper_box_cut.py / OCP glue routes)."
+        )
     if polyline_sweep is None:
         polyline_sweep = "pipe" if polylines else "cylinder"
     use_pipe = str(polyline_sweep).lower() == "pipe"
@@ -2631,7 +2615,7 @@ def export_lattice_step_occ_block(
         nodes,
         beams,
         polylines=polylines,
-        junction_spheres=use_junction,
+        junction_spheres=False,
         trim_for_junctions=False,
         polyline_sweep=polyline_sweep,
     )
@@ -2663,7 +2647,7 @@ def export_lattice_step_occ_block(
         sweep_label = "pipe sweep" if use_pipe else "cylinder chain"
         print(
             f"  Unit cell fuse: {n_uc_parts} OCC solids "
-            f"({sweep_label}, junction spheres={'on' if use_junction else 'off'})...",
+            f"({sweep_label}, no junction spheres)...",
             flush=True,
         )
         if n_uc_parts > 1:
@@ -3299,7 +3283,7 @@ def export_lattice_step_occ_unitcell_array_translate(
     nz: int,
     cell_size: float,
     polylines: list[dict] | None = None,
-    junction_spheres: bool = True,
+    junction_spheres: bool = False,
     polyline_sweep: str | None = None,
     keep_work_dir: bool = False,
     resume: bool = True,
@@ -3472,7 +3456,7 @@ def export_lattice_step_occ_unitcell_array_sequential(
     nz: int,
     cell_size: float,
     polylines: list[dict] | None = None,
-    junction_spheres: bool = True,
+    junction_spheres: bool = False,
     polyline_sweep: str | None = None,
     keep_work_dir: bool = False,
     resume: bool = True,
@@ -3667,7 +3651,7 @@ def export_lattice_step_occ_layered(
     layer_data: list[tuple[list, list, list]],
     path: str,
     *,
-    junction_spheres: bool = True,
+    junction_spheres: bool = False,
     polyline_sweep: str | None = None,
     keep_layer_steps: bool = False,
 ) -> dict[str, int | float | bool | str | list]:
@@ -3845,7 +3829,7 @@ def export_lattice_xt(
     xt_path: str,
     *,
     polylines: list[dict] | None = None,
-    junction_spheres: bool = True,
+    junction_spheres: bool = False,
     fuse: bool = False,
     keep_step: bool = True,
     step_path: str | None = None,
@@ -3872,13 +3856,17 @@ def export_lattice_xt(
         solidworks_com_available,
     )
 
-    count_junction = junction_spheres or bool(fuse)
+    if junction_spheres:
+        raise ValueError(
+            "junction-sphere seeds are disabled; use paper_box export "
+            "(scripts/export_unitcell_paper_box_cut.py / OCP glue routes)."
+        )
     polyline_sweep = "pipe" if polylines else "cylinder"
     _, parts = _collect_solid_primitives(
         nodes,
         beams,
         polylines=polylines,
-        junction_spheres=count_junction,
+        junction_spheres=False,
         polyline_sweep=polyline_sweep,
     )
     n_parts = len(parts)
@@ -3904,7 +3892,7 @@ def export_lattice_xt(
             fused_stl,
             polylines=polylines,
             resolution=mesh_resolution,
-            junction_spheres=junction_spheres,
+            junction_spheres=False,
         )
         stats.update(stl_stats)
         stats["method"] = "trimesh_union_stl"
@@ -3937,7 +3925,7 @@ def export_lattice_xt(
         beams,
         step_path,
         polylines=polylines,
-        junction_spheres=True,
+        junction_spheres=False,
         fuse=fuse,
     )
     stats["step_path"] = step_path

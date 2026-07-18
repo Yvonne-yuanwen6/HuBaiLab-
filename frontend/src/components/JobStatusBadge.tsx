@@ -6,8 +6,12 @@ const COLORS: Record<string, string> = {
   FAILED: "error",
   STOPPED: "warning",
   WAITING: "default",
+  PENDING: "default",
+  DONE: "success",
+  CANCELLED: "warning",
 };
 
 export function JobStatusBadge({ status }: { status: string }) {
-  return <Tag color={COLORS[status] ?? "default"}>{status}</Tag>;
+  const key = (status || "").toUpperCase();
+  return <Tag color={COLORS[key] ?? "default"}>{key}</Tag>;
 }

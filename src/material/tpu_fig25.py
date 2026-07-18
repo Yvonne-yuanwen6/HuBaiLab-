@@ -21,13 +21,25 @@ def _ensure_origin_anchor(pts: list[tuple[float, float]]) -> list[tuple[float, f
     return pts
 
 
-def load_tpu_fig25_uniaxial(path: Path | str | None = None) -> list[tuple[float, float]]:
-    """Return (engineering_strain, engineering_stress_MPa) for *Uniaxial Test Data."""
+def load_tpu_fig25_uniaxial(
+    path: Path | str | None = None,
+    *,
+    stress_scale: float = 1.0,
+) -> list[tuple[float, float]]:
+    """Return (engineering_strain, engineering_stress_MPa) for *Uniaxial Test Data.
+
+    ``stress_scale`` multiplies engineering stress only (strain unchanged). Use to
+    soften/stiffen Marlow input relative to traced Fig.2.5 when lattice curves
+    are systematically offset vs Fig.3.3 while keeping C3D4 mesh fixed.
+    """
     p = Path(path) if path else DEFAULT_TPU_FIG25_JSON
     if not p.is_file():
         raise FileNotFoundError(f"TPU Fig.2.5 traced JSON missing: {p}")
+    scale = float(stress_scale)
+    if scale <= 0.0:
+        raise ValueError(f"stress_scale must be > 0, got {scale}")
     data = json.loads(p.read_text(encoding="utf-8"))
-    pts = [(float(a), float(b)) for a, b in data.get("points") or []]
+    pts = [(float(a), float(b) * scale) for a, b in data.get("points") or []]
     pts = _ensure_origin_anchor(pts)
     if len(pts) < 3:
         raise ValueError(f"Too few points in {p}")

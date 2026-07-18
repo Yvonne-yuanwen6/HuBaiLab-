@@ -43,6 +43,7 @@ from src.export.abaqus_compression import (
     hu_bai_density_abq,
     hu_bai_neo_hooke_c10,
     hu_bai_quasi_static_step_time,
+    is_neo_hooke_material,
     validate_explicit_restart_inp,
 )
 from src.export.beam_utils import dedupe_beams
@@ -188,10 +189,10 @@ _parser.add_argument(
 )
 _parser.add_argument(
     "--material-model",
-    choices=("paper", "hyperelastic", "elastic_plastic", "elastic"),
+    choices=("neo_hooke", "paper", "hyperelastic", "elastic_plastic", "elastic"),
     default=None,
-    help="paper = Neo-Hooke TPU (原文未写 FE 本构；Ch.3 描述平台段用超弹性材料); "
-    "elastic_plastic = E+Plastic (repo); default: paper profile→hyperelastic",
+    help="neo_hooke (= paper/hyperelastic legacy) = Neo-Hooke TPU; "
+    "elastic_plastic = E+Plastic (repo); default: paper profile→neo_hooke",
 )
 _parser.add_argument(
     "--contact-interference-fit",
@@ -277,9 +278,11 @@ if PROFILE == "paper":
 
 MATERIAL_KIND = _args.material_model
 if MATERIAL_KIND is None:
-    MATERIAL_KIND = "paper" if PROFILE == "paper" else "elastic_plastic"
-USE_HYPERELASTIC = MATERIAL_KIND in ("paper", "hyperelastic")
-INP_MATERIAL_MODEL = "hyperelastic" if USE_HYPERELASTIC else "elastic"
+    MATERIAL_KIND = "neo_hooke" if PROFILE == "paper" else "elastic_plastic"
+if is_neo_hooke_material(MATERIAL_KIND):
+    MATERIAL_KIND = "neo_hooke"
+USE_HYPERELASTIC = is_neo_hooke_material(MATERIAL_KIND)
+INP_MATERIAL_MODEL = "neo_hooke" if USE_HYPERELASTIC else "elastic"
 USE_PLASTIC = MATERIAL_KIND == "elastic_plastic"
 
 if PROFILE == "paper":

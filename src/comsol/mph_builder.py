@@ -45,6 +45,35 @@ def _import_mph() -> Any:
     return mph
 
 
+def _shutdown_mph(mph: Any, client: Any | None = None) -> None:
+    """Tear down MPh/COMSOL client so ClientWebSocket cannot segfault during later waits.
+
+    After build we often spawn ``comsol batch`` in-process; leaving the JPype client
+    alive for hours has caused SIGSEGV in ClientWebSocket while the batch child
+    continued successfully.
+    """
+    if client is not None:
+        try:
+            for name in list(getattr(client, "names", lambda: [])() or []):
+                try:
+                    client.remove(name)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    for fn_name in ("shutdown", "exit", "close"):
+        fn = getattr(mph, fn_name, None)
+        if callable(fn):
+            try:
+                fn()
+                print(f"  MPh: {fn_name}()", flush=True)
+                return
+            except Exception as exc:
+                print(f"  WARN: mph.{fn_name} failed: {exc}", flush=True)
+    # Fallback: drop references; next mph.start() may reuse a half-dead client.
+    print("  MPh: no shutdown API — client left to GC", flush=True)
+
+
 LATTICE_GEOM = "geom_lat"
 LATTICE_MESH = "mesh_lat"
 
@@ -252,7 +281,7 @@ def _center_paper_box_import(
     geom_tag: str,
     settings: HuBaiComsolSettings,
 ) -> None:
-    """Translate imported lattice so its STEP bbox center sits at the global origin."""
+    """Translate imported lattice so the paper_box design envelope is origin-centred."""
     cx, cy, cz = settings.paper_box_import_center_mm
     if settings.step_path:
         measured = _step_bbox_center_mm(settings.step_path)
@@ -265,10 +294,10 @@ def _center_paper_box_import(
             ):
                 print(
                     f"  STEP bbox center ({mx:g}, {my:g}, {mz:g}) mm "
-                    f"≠ grid assumption ({cx:g}, {cy:g}, {cz:g}) mm — using measured",
+                    f"≠ design envelope ({cx:g}, {cy:g}, {cz:g}) mm "
+                    f"— using design centre (pipe overhang asymmetry)",
                     flush=True,
                 )
-            cx, cy, cz = mx, my, mz
     if abs(cx) < 1e-6 and abs(cy) < 1e-6 and abs(cz) < 1e-6:
         return
     geom = comp.geom(geom_tag)
@@ -293,11 +322,17 @@ def _clip_lattice_top_to_nominal(
     geom: str = "geom1",
     import_tag: str = "imp1",
 ) -> bool:
-    """Trim lattice protrusion above §2.4.3 z_max so plate imprint can bond (ap2).
+    """Trim lattice protrusion above §2.4.3 z_max (Difference, keep=off).
 
-    Curved SFBLS struts can extend ~1–2 mm above nominal height.  If the plate
-    sits on the design plane while lattice tips poke through, ``fin`` overlap
-    prevents identity pairs and ``pb_top`` reads zero after solve.
+    Curved SFBLS tips can poke ~1–2 mm above nominal.  Plate clamp keeps the
+    plate on the design plane; without a trim, Form Assembly imprint may merge
+    domains (ndom=2 → SelectionOutOfBounds).
+
+    Implementation notes:
+    - Use ``Difference`` (not Compose + deactivate).  Deactivating inputs and
+      re-running made Compose look up dead objects (``blk_lat_top`` unknown).
+    - On any failure, log and return False so build can fall back to the
+      pre-clip path (some protrusions still mesh with 3 domains).
     """
     z_max = settings.z_max_mm
     z_top = _geom_lattice_z_top_mm(comp, geom)
@@ -306,58 +341,79 @@ def _clip_lattice_top_to_nominal(
 
     print(
         f"  Lattice top clip: z_top={z_top:g} > nominal {z_max:g} mm — "
-        f"compose trim to design height",
+        f"Difference trim to design height",
         flush=True,
     )
     g = comp.geom(geom)
     feat_tags = [str(t) for t in g.feature().tags()]
     lattice_feat = "mov1" if "mov1" in feat_tags else import_tag
     top_tag = "blk_lat_top"
-    compose_tag = "co_lat_clip"
-    print(f"  Lattice clip compose: {lattice_feat}-{top_tag}", flush=True)
-    for tag in (compose_tag, top_tag):
-        if tag in feat_tags:
-            g.feature().remove(tag)
+    dif_tag = "dif_lat_clip"
+    print(f"  Lattice clip difference: {lattice_feat} − {top_tag}", flush=True)
 
-    half = settings.half_xy_mm + 5.0
-    _add_block(
-        comp,
-        top_tag,
-        x0=-half,
-        y0=-half,
-        z0=z_max,
-        lx=2.0 * half,
-        ly=2.0 * half,
-        lz=max(20.0, z_top - z_max + 5.0),
-        geom=geom,
-    )
-    g.run()
-    obj_names = [str(o) for o in g.objectNames()]
-    if lattice_feat not in obj_names or top_tag not in obj_names:
-        raise RuntimeError(
-            f"Lattice clip objects missing (have {obj_names}, "
-            f"need {lattice_feat} and {top_tag})"
+    try:
+        for tag in (dif_tag, top_tag):
+            if tag in [str(t) for t in g.feature().tags()]:
+                g.feature().remove(tag)
+
+        half = settings.half_xy_mm + 5.0
+        _add_block(
+            comp,
+            top_tag,
+            x0=-half,
+            y0=-half,
+            z0=z_max,
+            lx=2.0 * half,
+            ly=2.0 * half,
+            lz=max(20.0, z_top - z_max + 5.0),
+            geom=geom,
         )
-    if compose_tag in [str(t) for t in g.feature().tags()]:
-        g.feature().remove(compose_tag)
-    co_f = g.feature().create(compose_tag, "Compose")
-    co_f.set("formula", f"{lattice_feat} - {top_tag}")
-    co_f.selection("input").set([lattice_feat, top_tag])
-    g.run()
-    for tag in (lattice_feat, top_tag):
+        g.run()
+        obj_names = [str(o) for o in g.objectNames()]
+        if lattice_feat not in obj_names or top_tag not in obj_names:
+            raise RuntimeError(
+                f"Lattice clip objects missing (have {obj_names}, "
+                f"need {lattice_feat} and {top_tag})"
+            )
+
+        dif = g.feature().create(dif_tag, "Difference")
+        dif.selection("input").set(lattice_feat)
+        dif.selection("input2").set(top_tag)
+        # Consume inputs so only the trimmed solid remains (no second run needed).
+        for keep_key, keep_val in (
+            ("keep", False),
+            ("keep", "off"),
+            ("keepinput", False),
+            ("keepinput", "off"),
+        ):
+            try:
+                dif.set(keep_key, keep_val)
+                break
+            except Exception:
+                continue
+        g.run()
+
+        z_after = _geom_lattice_z_top_mm(comp, geom)
+        if z_after is None or z_after > z_max + 0.15:
+            raise RuntimeError(
+                f"Lattice clip failed: z_top still {z_after} mm (nominal {z_max:g})"
+            )
+        print(f"  Lattice top after clip: {z_after:g} mm", flush=True)
+        return True
+    except Exception as exc:
+        print(
+            f"  WARN: lattice top clip skipped ({type(exc).__name__}: {exc})",
+            flush=True,
+        )
+        # Best-effort cleanup so fixture Form Assembly still sees mov1/imp1.
         try:
-            g.feature(tag).active(False)
-        except Exception as exc:
-            print(f"  WARN: could not deactivate {tag} after clip ({exc})", flush=True)
-    g.run()
-
-    z_after = _geom_lattice_z_top_mm(comp, geom)
-    if z_after is None or z_after > z_max + 0.15:
-        raise RuntimeError(
-            f"Lattice clip failed: z_top still {z_after} mm (nominal {z_max:g})"
-        )
-    print(f"  Lattice top after clip: {z_after:g} mm", flush=True)
-    return True
+            for tag in (dif_tag, top_tag):
+                if tag in [str(t) for t in g.feature().tags()]:
+                    g.feature().remove(tag)
+            g.run()
+        except Exception as cleanup_exc:
+            print(f"  WARN: clip cleanup failed ({cleanup_exc})", flush=True)
+        return False
 
 
 def _log_fixture_stack(settings: HuBaiComsolSettings) -> None:
@@ -2486,7 +2542,11 @@ def build_fixture_template_mph(
     _mesh_fixture_component(comp, settings)
     model.save(out)
     print(f"  Saved fixture template: {out}", flush=True)
-    client.remove(model)
+    try:
+        client.remove(model)
+    except Exception:
+        pass
+    _shutdown_mph(mph, client)
     return out
 
 
@@ -2585,9 +2645,24 @@ def build_mph_from_step(
     imp.set("unit", "source")
     comp.geom(lat_geom).run()
     _center_paper_box_import(comp, lat_geom, settings)
+    # Curved SFBLS tips can poke through the §2.4.3 plate plane.  Difference
+    # clip is opt-in: many protrusions still assemble with 3 domains (e.g.
+    # af2q1p5 ~41.5 mm).  Broken Compose clip previously killed the queue.
+    # Enable with HU_BAI_COMSOL_CLIP_TOP=1 when Type-B ndom=2 / SelectionOOB.
+    if os.environ.get("HU_BAI_COMSOL_CLIP_TOP", "0").strip().lower() in (
+        "1",
+        "true",
+        "on",
+        "yes",
+    ):
+        _clip_lattice_top_to_nominal(comp, settings, geom=lat_geom)
+    else:
+        print(
+            "  Lattice top clip: off (set HU_BAI_COMSOL_CLIP_TOP=1 for Type-B ndom=2)",
+            flush=True,
+        )
 
     if settings.include_shaker_fixture:
-        _clip_lattice_top_to_nominal(comp, settings, geom=lat_geom)
         plate_z = _resolve_plate_z_bottom_mm(settings, comp=comp, geom_tag=lat_geom)
         settings.extra["plate_z_bottom_mm"] = plate_z
         if not settings.skip_mesh and not settings.physics_controlled_mesh:
@@ -2728,7 +2803,11 @@ def build_mph_from_step(
 
     model.save(out)
     print(f"  Saved model: {out}", flush=True)
-    client.remove(model)
+    try:
+        client.remove(model)
+    except Exception:
+        pass
+    _shutdown_mph(mph, client)
     return out
 
 

@@ -1,5 +1,5 @@
 import { Space, Table, Tag } from "antd";
-import type { ColumnsType } from "antd/es/table";
+import type { ColumnsType, TableProps } from "antd/es/table";
 import { Link } from "react-router-dom";
 import type { CaseSummary } from "../types";
 import { JobStatusBadge } from "./JobStatusBadge";
@@ -9,9 +9,17 @@ interface Props {
   cases: CaseSummary[];
   loading?: boolean;
   showTags?: boolean;
+  selectedSlugs?: string[];
+  onSelectSlugs?: (slugs: string[]) => void;
 }
 
-export function CaseTable({ cases, loading, showTags = false }: Props) {
+export function CaseTable({
+  cases,
+  loading,
+  showTags = false,
+  selectedSlugs,
+  onSelectSlugs,
+}: Props) {
   const columns: ColumnsType<CaseSummary> = [
     {
       title: "Slug",
@@ -104,12 +112,21 @@ export function CaseTable({ cases, loading, showTags = false }: Props) {
     },
   ];
 
+  const rowSelection: TableProps<CaseSummary>["rowSelection"] | undefined = onSelectSlugs
+    ? {
+        selectedRowKeys: selectedSlugs ?? [],
+        onChange: (keys) => onSelectSlugs(keys as string[]),
+        getCheckboxProps: (row) => ({ disabled: !row.has_inp }),
+      }
+    : undefined;
+
   return (
     <Table
       rowKey="slug"
       loading={loading}
       columns={columns}
       dataSource={cases}
+      rowSelection={rowSelection}
       pagination={{ pageSize: 20, showSizeChanger: true }}
       size="middle"
     />

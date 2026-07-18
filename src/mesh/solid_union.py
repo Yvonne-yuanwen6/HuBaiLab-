@@ -9,43 +9,13 @@ from typing import Iterable
 import numpy as np
 
 from src.export.export_sw import _segment_trimesh_cylinder, _union_all_meshes, _union_meshes_tree
-from src.mesh.junction_mesh import collect_solid_junction_radii, effective_solid_radius
+from src.mesh.junction_mesh import effective_solid_radius
 from src.mesh.solid_profiles import SOLID_SKIP_BEAM_TYPES, polyline_mesh_profile
 from src.paths import hubai_temp_directory
 
 
 def _node_lookup(nodes: list) -> dict[int, tuple[float, float, float]]:
     return {int(n[0]): (float(n[1]), float(n[2]), float(n[3])) for n in nodes}
-
-
-def _junction_radii(
-    nodes: list,
-    beams: list,
-    polylines: list[dict] | None,
-) -> dict[int, float]:
-    return collect_solid_junction_radii(nodes, beams, polylines)
-
-
-def _junction_sphere_meshes(
-    lookup: dict[int, tuple[float, float, float]],
-    junction_r: dict[int, float],
-    *,
-    resolution: int = 12,
-) -> list:
-    import trimesh
-
-    subdiv = 3 if resolution >= 20 else 2
-    meshes: list = []
-    for nid, radius in junction_r.items():
-        if radius <= 0.0:
-            continue
-        center = lookup.get(nid)
-        if center is None:
-            continue
-        sphere = trimesh.creation.icosphere(subdivisions=subdiv, radius=float(radius))
-        sphere.apply_translation(center)
-        meshes.append(sphere)
-    return meshes
 
 
 def _polyline_segment_meshes(
@@ -73,12 +43,13 @@ def build_lattice_union_mesh(
     *,
     polylines: list[dict] | None = None,
     resolution: int = 12,
-    junction_spheres: bool = True,
+    junction_spheres: bool = False,
 ) -> object:
     """
-    Merge all beam cylinders and junction spheres into one watertight solid.
+    Merge all beam cylinders into one watertight solid.
 
     Requires trimesh + manifold3d (same as SolidWorks STL export).
+    Junction-sphere seeds are disabled.
     """
     try:
         import trimesh  # noqa: F401
@@ -87,17 +58,14 @@ def build_lattice_union_mesh(
             "Union solid requires trimesh and manifold3d. Install: pip install trimesh manifold3d"
         ) from exc
 
+    if junction_spheres:
+        raise ValueError(
+            "junction-sphere seeds are disabled; use paper_box export "
+            "(scripts/export_unitcell_paper_box_cut.py / OCP glue routes)."
+        )
+
     lookup = _node_lookup(nodes)
     parts: list = []
-
-    if junction_spheres:
-        parts.extend(
-            _junction_sphere_meshes(
-                lookup,
-                _junction_radii(nodes, beams, polylines),
-                resolution=resolution,
-            )
-        )
 
     for _bid, n1, n2, radius, btype in beams:
         if str(btype) in SOLID_SKIP_BEAM_TYPES:
@@ -141,7 +109,7 @@ def export_union_stl(
     *,
     polylines: list[dict] | None = None,
     resolution: int = 12,
-    junction_spheres: bool = True,
+    junction_spheres: bool = False,
 ) -> dict[str, float | bool | int]:
     """Write boolean-union STL and return mesh quality stats."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -304,14 +272,18 @@ def mesh_lattice_gmsh_occ(
     dict[str, list[int]],
 ]:
     """
-    Paper-style solid mesh: analytic beam cylinders (+ optional junction spheres)
-    boolean-fused in Gmsh OpenCASCADE, then ~mesh_size mm tet volume mesh (C3D4).
+    Paper-style solid mesh: analytic beam cylinders boolean-fused in Gmsh
+    OpenCASCADE, then ~mesh_size mm tet volume mesh (C3D4).
 
-    Single connected solid (no beam penetration, smooth cosine surfaces).
+    Junction-sphere seeds are disabled. Single connected solid.
     """
     import gmsh
 
-    lookup = _node_lookup(nodes)
+    if junction_spheres:
+        raise ValueError(
+            "junction-sphere seeds are disabled; use paper_box / no-sphere mesh paths."
+        )
+
     segments = _beam_segments(nodes, beams, polylines)
     if not segments:
         raise ValueError("No beam segments for gmsh OCC mesh.")
@@ -339,22 +311,6 @@ def mesh_lattice_gmsh_occ(
                 )
             )
 
-        if junction_spheres:
-            for nid, radius in _junction_radii(nodes, beams, polylines).items():
-                if radius <= 0.0:
-                    continue
-                center = lookup.get(int(nid))
-                if center is None:
-                    continue
-                vol_tags.append(
-                    gmsh.model.occ.addSphere(
-                        float(center[0]),
-                        float(center[1]),
-                        float(center[2]),
-                        float(radius),
-                    )
-                )
-
         if not vol_tags:
             raise ValueError("gmsh OCC: no volume primitives created.")
 
@@ -377,7 +333,7 @@ def mesh_lattice_gmsh_occ(
         if n_comp != 1:
             raise RuntimeError(
                 f"gmsh OCC union produced {n_comp} disconnected solids (expected 1). "
-                "Try junction_spheres=True or check geometry."
+                "Junction spheres are disabled; check geometry / use paper_box."
             )
         elsets = {"solid": [int(e[0]) for e in mesh_elements]}
         return mesh_nodes, mesh_elements, elsets

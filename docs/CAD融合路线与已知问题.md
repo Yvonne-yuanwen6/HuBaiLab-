@@ -46,7 +46,7 @@ py -3 scripts/export_unitcell_paper_box_cut.py --Q 0 0.5 1.0 1.5
 | Q | 单胞融合策略 | 说明 |
 |---|--------------|------|
 | 0 / 0.5 | pipe-first → L³ 相交 | 直杆 / 正弦杆，gmsh OCC 通常一次成功 |
-| 1.0 | **8×octant 切杆 → 顺序 fuse** | 禁止 junction-sphere 种子；详见单胞策略文档 |
+| 1.0 | **8×octant 切杆 → 顺序 fuse** | 详见单胞策略文档 |
 | 1.5 | 逐杆 full L³ box-cut → merge | pipe-first 不稳定 |
 
 **Q=1 单胞备选（OCP）**：`bash scripts/linux/run_ocp_glue_fuse_pilot.sh`  
@@ -132,7 +132,7 @@ py -3 scripts/validate_step_solidworks.py output\cad\_paper_box_array_q0p5\*.ste
 | 阵列 4×4×4 | gmsh layered | ✅ ~7 min，`vol=1`（2026-06 验收） |
 | 阵列 4×4×4 | OCP layered（`run_ocp_q1_4x4x4_array_fuse.sh`） | ✅ **OCP444** → verified 主文件 |
 
-**禁止**作为 paper_box 阵列种子：SW 手工 Combine 的 8 体 compound、junction-sphere 单胞、一次性 batch fuse 8 octant（会静默丢杆）。细节见 [`单胞融合策略.md`](单胞融合策略.md)。
+**禁止**作为 paper_box 阵列种子：SW 手工 Combine 的 8 体 compound、一次性 batch fuse 8 octant（会静默丢杆）。细节见 [`单胞融合策略.md`](单胞融合策略.md)。
 
 ---
 
@@ -228,4 +228,3 @@ BCC 工作目录：`output/cad/_stepwise_q0/`（说明：`README_SW_BCC.txt`）�
 | `_solid_merged` | SW 步进，常含结点球 | Legacy；部分 fast80 旧算例 |
 | `_solid_array` | OCC 单胞平铺 fuse | Legacy BCC fast80；4×4 auto-fuse 暂停 |
 | `_solid_layered` | z 层分层 OCC | 备选，慢 |
-| junction-sphere 单胞 | 9 节点球 + pipe | 仅 QA，非 paper_box |

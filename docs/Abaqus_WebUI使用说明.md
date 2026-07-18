@@ -196,8 +196,10 @@ Invoke-RestMethod http://127.0.0.1:8000/api/health
 | 页面 | 路径 | 功能 |
 |------|------|------|
 | 仪表盘 | `/` | 运行中/完成/失败统计、**同步服务器 output** 勾选、活动算例、最近算例 |
-| 算例 | `/cases` | 列表、状态/参数标签筛选、完成时间 |
-| 导出 INP | `/export` | 分步向导 + 预设 |
+| 算例 | `/cases` | 列表、状态/参数标签筛选、多选加入仿真队列 |
+| CAD / STEP | `/cad` | 结构/尺寸参数 → 生成 paper_box 阵列 STEP → verified 列表 |
+| 导出 INP | `/export` | 分步向导（结构/尺寸/网格）+ 预设；网格步可独立启动任务 |
+| 仿真队列 | `/queue` | 串行排队、上移/下移/置顶/置底、开始/暂停 |
 | 作业监控 | `/monitor` | 轮询进度、远程同步、远程终止 |
 | 回收站 | `/trash` | 已删除算例还原 / 永久清除 |
 | COMSOL | — | 占位，尚未实现 |
@@ -207,18 +209,27 @@ Invoke-RestMethod http://127.0.0.1:8000/api/health
 ## 4. 典型工作流
 
 ```
-verified STEP → 导出 INP → 提交求解（远程）→ 监控 .sta → 同步远程 → 提取曲线 → 查看 σ–ε 图
+STEP 生成 → 导出 INP（含网格）→ 加入仿真队列 → 监控 .sta → 同步远程 → 提取曲线 → 查看 σ–ε 图
 ```
+
+也可跳过队列，在算例详情直接 **提交求解**。
+
+### 4.0 生成 STEP（可选）
+
+1. 打开 **CAD / STEP**
+2. 选择结构（BCC / SFBLS）、Q、单胞边长 L、cells、OCP/Gmsh 后端
+3. 点击 **开始生成 STEP** → 后台调用 `scripts/run_hu_bai_paper_box_4x4x4_array_fuse.py`
+4. 完成后刷新 verified 列表；再到 **导出 INP** 选用
 
 ### 4.1 新建算例（导出 INP）
 
 1. 打开 **导出 INP**
 2. 左侧点击预设（如 `bcc_q0_baseline`、`sfbls_q05_baseline`、`fast_test`）或逐步填写：
-   - **几何**：Q、cells、verified STEP（可留空自动查找）
-   - **网格**：cae-seed、mesh-quality、单元类型、Virtual Topology
+   - **几何**：结构（BCC/SFBLS）、Q、单胞边长 L、杆径、Af、cells、verified STEP
+   - **网格**：cae-seed、mesh-quality、单元类型、Virtual Topology、服务器/本机剖分；可点「仅启动网格/导出任务」
    - **载荷**：应变、加载速率、材料、STORE OFFSETS / ContactSettle
-   - **计算**：提交目标、是否在服务器剖分、CPU/内存（提交用）
-   - **确认**：查看预计 slug
+   - **计算**：提交目标、CPU/内存
+   - **确认**：查看预计 slug / variant
 3. 点击 **开始导出 INP** → 后台调用 `scripts/run_hu_bai_bcc_solid_cad_cae_tet_export.py`
 4. 完成后自动跳转 **作业监控**
 
@@ -227,13 +238,20 @@ verified STEP → 导出 INP → 提交求解（远程）→ 监控 .sta → 同
 - `output/export/{slug}/` — INP、`case_manifest.json`、`*_meta.json`
 - `output/active_case.json` — 最后一次导出
 
-### 4.2 提交求解
+### 4.2 提交求解 / 仿真队列
 
-在 **算例详情** 或导出完成后：
+**单算例**：在 **算例详情** 点击 **提交求解**（默认远程，48 CPU / 256 GB）。
 
-1. 确认状态非 RUNNING，且存在 INP
-2. 点击 **提交求解**（默认远程，`submit_job.sh`，48 CPU / 256 GB 可在后续版本表单中调整）
-3. 作业文件写入 `output/jobs/{slug}/`
+**排队串行**（等价于 UI 版 `submit_queue.sh`）：
+
+1. 在 **算例** 多选有 INP 的算例 → **加入仿真队列**，或详情页 **加入队列**
+2. 打开 **仿真队列**，用上移/下移/置顶/置底调整顺序
+3. 点击 **开始**；同一时间只运行一个；完成后自动提交下一个
+4. 可 **暂停**（不杀当前作业，仅停止派发下一个）、**清空已完成**
+
+队列状态持久化：`output/logs/ui_sim_queue.json`。
+
+作业文件写入 `output/jobs/{slug}/`
 
 ### 4.3 监控进度
 
@@ -308,7 +326,7 @@ verified STEP → 导出 INP → 提交求解（远程）→ 监控 .sta → 同
 | **状态** | 运行中 / 已完成 / 失败 / 已停止 / 等待中；快捷标签 + 多选 |
 | **参数标签** | 从 `case_manifest.json` / `*_meta.json` 解析：Q、结构、材料、单元、seed、应变、加载速率、**dt**、步长、阵列、profile、网格 preset；多选下拉，选项旁显示算例数量 |
 
-同一维度内多选为 **或** 关系，不同维度之间为 **且** 关系（例如：材料=paper **且** Q=0）。列表表格增加 **标签** 列展示主要参数。
+同一维度内多选为 **或** 关系，不同维度之间为 **且** 关系（例如：材料=Neo-Hooke **且** Q=0）。列表表格增加 **标签** 列展示主要参数。
 
 标签数据来自导出 manifest；仅有 `.sta` 无 manifest 的算例可能没有标签。
 
@@ -330,7 +348,7 @@ verified STEP → 导出 INP → 提交求解（远程）→ 监控 .sta → 同
 
 | 预设 ID | 用途 |
 |---------|------|
-| `bcc_q0_baseline` | BCC Q=0 论文基线（seed 0.6、80% 应变、5 mm/min、paper 材料） |
+| `bcc_q0_baseline` | BCC Q=0 论文基线（seed 0.6、80% 应变、5 mm/min、Neo-Hooke 材料） |
 | `sfbls_q05_baseline` | SFBLS Q=0.5 基线 |
 | `fast_test` | 快速验证（小应变、elastic、较少资源） |
 
@@ -354,8 +372,19 @@ verified STEP → 导出 INP → 提交求解（远程）→ 监控 .sta → 同
 | DELETE | `/trash/{trash_id}` | 永久删除 |
 | GET | `/cases/{slug}/curve` | σ–ε CSV JSON |
 | GET | `/cad/verified` | verified STEP 列表 |
+| POST | `/cad/generate` | 启动 STEP 生成任务（Q/L/cells/backend/mode） |
 | GET | `/presets` | 导出预设 |
+| POST | `/settings/preview` | 预览 slug / variant |
 | POST | `/export` | 启动导出任务 |
+| POST | `/mesh` | 启动网格/导出任务（同 export 脚本） |
+| GET | `/queue` | 仿真队列状态 |
+| POST | `/queue` | 批量加入队列（`slugs`） |
+| PATCH | `/queue/reorder` | 按 id 列表重排 |
+| POST | `/queue/start` | 开始串行派发 |
+| POST | `/queue/pause` | 暂停派发 |
+| POST | `/queue/clear-finished` | 清空已完成/失败项 |
+| POST | `/queue/{id}/move` | 上移/下移/置顶/置底（`direction`） |
+| DELETE | `/queue/{id}` | 移除队列项（running 除外） |
 | GET | `/jobs/{slug}/status?sync_remote=` | 作业状态 |
 | GET | `/jobs/{slug}/logs` | `.sta` 尾部 |
 | POST | `/jobs/{slug}/submit` | 提交求解 |
@@ -364,7 +393,7 @@ verified STEP → 导出 INP → 提交求解（远程）→ 监控 .sta → 同
 | POST | `/jobs/{slug}/extract` | ODB → CSV |
 | POST | `/jobs/{slug}/plot` | CSV → PNG |
 
-异步任务（导出、提交、提取等）返回 `task_id`，轮询 `/api/tasks/{task_id}`；状态文件在 `output/logs/ui_tasks/`。
+异步任务（导出、CAD、提交、提取等）返回 `task_id`，轮询 `/api/tasks/{task_id}`；状态文件在 `output/logs/ui_tasks/`。队列状态在 `output/logs/ui_sim_queue.json`。
 
 ---
 
@@ -419,4 +448,4 @@ verified STEP → 导出 INP → 提交求解（远程）→ 监控 .sta → 同
 
 ---
 
-*最后与代码对齐：2026-07-08 — 仪表盘远程同步、启动方式、标签筛选*
+*最后与代码对齐：2026-07-14 — CAD/STEP 生成、尺寸/结构、网格任务、仿真队列*

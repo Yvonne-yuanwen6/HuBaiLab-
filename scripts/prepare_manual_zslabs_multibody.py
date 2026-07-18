@@ -38,7 +38,6 @@ _parser.add_argument("--nx", type=int, default=4)
 _parser.add_argument("--ny", type=int, default=4)
 _parser.add_argument("--nz", type=int, default=4)
 _parser.add_argument("--n-segments", type=int, default=24)
-_parser.add_argument("--no-junction-spheres", action="store_true")
 _args = _parser.parse_args()
 
 L = 20.0
@@ -71,7 +70,7 @@ if not os.path.isfile(seed_path):
         beams,
         seed_path,
         polylines=polylines,
-        junction_spheres=not _args.no_junction_spheres,
+        junction_spheres=False,
         fuse=True,
     )
 

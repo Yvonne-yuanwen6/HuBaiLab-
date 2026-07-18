@@ -41,11 +41,6 @@ _parser.add_argument("--Af", type=float, default=2.0)
 _parser.add_argument("--cells", type=int, default=4, help="Cells per axis")
 _parser.add_argument("--n-segments", type=int, default=24)
 _parser.add_argument(
-    "--no-junction-spheres",
-    action="store_true",
-    help="Overlap struts at nodes (fewer OCC parts)",
-)
-_parser.add_argument(
     "--copy-verified",
     action="store_true",
     help="Also copy STEP to output/cad/verified/ for solid_cad_export",
@@ -98,7 +93,7 @@ stats = export_lattice_step_occ_unitcell_array_auto(
     nz=n,
     cell_size=L,
     polylines=polylines,
-    junction_spheres=not _args.no_junction_spheres,
+    junction_spheres=False,
 )
 
 bbox = stats.get("bbox_mm") or {}

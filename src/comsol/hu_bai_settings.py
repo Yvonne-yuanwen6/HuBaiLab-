@@ -157,7 +157,9 @@ class HuBaiComsolSettings:
     def fixture_template_mph(self) -> Path:
         if self.fixture_template_path:
             return Path(self.fixture_template_path)
-        return COMSOL_JOBS_ROOT / "comsol_fixture_444" / "comsol_fixture_444.mph"
+        # Always use global fixture under output/comsol_jobs/ — do NOT follow
+        # HU_BAI_COMSOL_JOBS_ROOT (batch per-case redirect would miss the template).
+        return PROJECT_ROOT / "output" / "comsol_jobs" / "comsol_fixture_444" / "comsol_fixture_444.mph"
 
     @property
     def variant_name(self) -> str:
@@ -175,17 +177,17 @@ class HuBaiComsolSettings:
 
     @property
     def paper_box_import_center_mm(self) -> tuple[float, float, float]:
-        """Fallback lattice centroid before COMSOL recentering [mm].
+        """Paper_box array envelope centre in STEP coords (``origin_centered=False``).
 
-        Nominal 4×4×4 @ L=20 with ``origin_centered=False`` spans ~[0, nL].
-        Verified paper_box-cut STEPs are asymmetric (~±10 mm rod overhang), so
-        the true bbox center is often ~(nL−20)/2 per axis, not nL/2.  Prefer
-        ``_step_bbox_center_mm`` at build time; this tuple is the legacy grid guess.
+        Single-cell seed is paper_box-cut at the origin (±L/2).  An n×n×n array
+        spans [-L/2, (n−1)·L + L/2] per axis → centre = (n−1)·L/2.  Solid bbox
+        is asymmetric (~±1 mm pipe overhang); align the **design envelope** to
+        Fig. 2.8 ±(nL/2), not the axis-aligned bbox centre.
         """
-        hx = 0.5 * self.nx * self.cell_size_mm
-        hy = 0.5 * self.ny * self.cell_size_mm
-        hz = 0.5 * self.nz * self.cell_size_mm
-        return (hx, hy, hz)
+        cx = 0.5 * (float(self.nx) - 1.0) * float(self.cell_size_mm)
+        cy = 0.5 * (float(self.ny) - 1.0) * float(self.cell_size_mm)
+        cz = 0.5 * (float(self.nz) - 1.0) * float(self.cell_size_mm)
+        return (cx, cy, cz)
 
     @property
     def footprint_mm(self) -> float:
@@ -327,10 +329,13 @@ class HuBaiComsolSettings:
             "geometry": {
                 "variant": self.variant_name,
                 "Q": self.Q,
+                "amplitude_mm": self.amplitude_mm,
                 "cells": [self.nx, self.ny, self.nz],
                 "cell_size_mm": self.cell_size_mm,
                 "rod_diameter_mm": self.rod_diameter_mm,
                 "height_mm": self.lattice_height_mm,
+                "paper_box_import_center_mm": list(self.paper_box_import_center_mm),
+                "z_envelope_mm": [self.z_min_mm, self.z_max_mm],
             },
             "material": {
                 "lattice_model": self.lattice_material_model,

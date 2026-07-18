@@ -1,5 +1,6 @@
-import { Card, Checkbox, Input, Typography } from "antd";
+import { Button, Card, Checkbox, Input, Space, Typography, message } from "antd";
 import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { CaseTable } from "../components/CaseTable";
@@ -25,6 +26,7 @@ function readSyncRemotePref(): boolean {
 }
 
 export function CasesPage() {
+  const navigate = useNavigate();
   const [syncRemote, setSyncRemote] = useState(readSyncRemotePref);
   const { data, isLoading } = useQuery({
     queryKey: ["cases", syncRemote],
@@ -35,6 +37,8 @@ export function CasesPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string[]>([]);
   const [tagFilters, setTagFilters] = useState<CaseTagFilters>({});
+  const [selectedSlugs, setSelectedSlugs] = useState<string[]>([]);
+  const [adding, setAdding] = useState(false);
 
   const filtered = useMemo(() => {
     let rows = filterByStatuses(cases, statusFilter);
@@ -45,26 +49,51 @@ export function CasesPage() {
     return rows;
   }, [cases, search, statusFilter, tagFilters]);
 
+  const handleAddToQueue = async () => {
+    if (!selectedSlugs.length) return;
+    setAdding(true);
+    try {
+      await api.addToQueue({ slugs: selectedSlugs });
+      message.success(`已加入队列：${selectedSlugs.length} 个算例`);
+      setSelectedSlugs([]);
+      navigate("/queue");
+    } catch (e) {
+      message.error(String(e));
+    } finally {
+      setAdding(false);
+    }
+  };
+
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <Typography.Title level={3} style={{ margin: 0 }}>
           算例列表
         </Typography.Title>
-        <Checkbox
-          checked={syncRemote}
-          onChange={(e) => {
-            const checked = e.target.checked;
-            setSyncRemote(checked);
-            try {
-              localStorage.setItem(SYNC_REMOTE_KEY, checked ? "1" : "0");
-            } catch {
-              /* ignore */
-            }
-          }}
-        >
-          同步服务器 output
-        </Checkbox>
+        <Space>
+          <Button
+            type="primary"
+            disabled={!selectedSlugs.length}
+            loading={adding}
+            onClick={() => void handleAddToQueue()}
+          >
+            加入仿真队列{selectedSlugs.length ? ` (${selectedSlugs.length})` : ""}
+          </Button>
+          <Checkbox
+            checked={syncRemote}
+            onChange={(e) => {
+              const checked = e.target.checked;
+              setSyncRemote(checked);
+              try {
+                localStorage.setItem(SYNC_REMOTE_KEY, checked ? "1" : "0");
+              } catch {
+                /* ignore */
+              }
+            }}
+          >
+            同步服务器 output
+          </Checkbox>
+        </Space>
       </div>
       <DataSourceBanner label={data?.data_source_label} hint={data?.hint} />
       <Card style={{ marginBottom: 16 }}>
@@ -86,7 +115,13 @@ export function CasesPage() {
           </div>
         </div>
       </Card>
-      <CaseTable cases={filtered} loading={isLoading} showTags />
+      <CaseTable
+        cases={filtered}
+        loading={isLoading}
+        showTags
+        selectedSlugs={selectedSlugs}
+        onSelectSlugs={setSelectedSlugs}
+      />
     </div>
   );
 }

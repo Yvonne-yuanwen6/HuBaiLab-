@@ -516,11 +516,19 @@ def export_single_strut_paper_box_cut(
     rod_diameter: float = 2.0,
     amplitude: float = 2.0,
     out_path: str,
+    raw_out_path: str | None = None,
     origin_assembly: bool = True,
     centre_extension_mm: float | None = None,
+    corner_extension_mm: float | None = None,
+    both_end_extension: bool = True,
+    solid_profile: str = "circle",
+    ellipse_minor_ratio: float = 1.0,
+    compression_axis: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    ellipse_align_to_compression: str = "minor",
 ) -> dict:
     import gmsh
 
+    profile = str(solid_profile or "circle").strip().lower()
     gen = HuBaiLatticeGenerator(
         cell_size=float(cell_size_mm),
         rod_diameter=float(rod_diameter),
@@ -537,8 +545,12 @@ def export_single_strut_paper_box_cut(
         junction_spheres=False,
         trim_for_junctions=False,
         polyline_sweep="pipe",
+        solid_profile=profile,
+        ellipse_minor_ratio=float(ellipse_minor_ratio),
+        compression_axis=tuple(compression_axis),
+        ellipse_align_to_compression=str(ellipse_align_to_compression or "minor"),
     )
-    pipes = [p for p in pipes_only if p[0] == "pipe"]
+    pipes = [p for p in pipes_only if p[0] in ("pipe", "pipe_ellipse")]
     if not pipes:
         raise ValueError("No pipe primitives.")
     idx = int(strut_index)
@@ -555,11 +567,26 @@ def export_single_strut_paper_box_cut(
         if centre_extension_mm is not None
         else octant_centre_path_extension_mm(rod_radius)
     )
-    pipe_part = pipe_part_with_centre_path_extension(part, centre_ext)
+    corner_ext = (
+        float(corner_extension_mm)
+        if corner_extension_mm is not None
+        else centre_ext
+    )
+    if both_end_extension:
+        pipe_part = pipe_part_with_both_end_path_extension(
+            part,
+            centre_ext,
+            corner_extension_mm=corner_ext,
+        )
+    else:
+        pipe_part = pipe_part_with_centre_path_extension(part, centre_ext)
     extended_start = pipe_part[1][0]
+    extended_end = pipe_part[1][-1]
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
+    raw_abs: str | None = None
+    raw_step_report: dict[str, int | bool | str] | None = None
     gmsh.initialize()
     try:
         gmsh.option.setNumber("General.Terminal", 0)
@@ -569,6 +596,21 @@ def export_single_strut_paper_box_cut(
         pipe_tags = _occ_dimtags_from_parts([pipe_part])
         gmsh.model.occ.synchronize()
         pipe_mass = float(gmsh.model.occ.getMass(3, int(pipe_tags[0][1])))
+        # Pre-cut solid (same extended pipe that will be octant-box-cut).
+        if raw_out_path:
+            raw_abs = os.path.abspath(raw_out_path)
+            os.makedirs(os.path.dirname(raw_abs) or ".", exist_ok=True)
+            if os.path.isfile(raw_abs):
+                os.remove(raw_abs)
+            _occ_remove_all_volumes_except(pipe_tags[0])
+            raw_step_report = _finalize_occ_step_write(
+                raw_abs, fuse=True, validate_step=False
+            )
+            print(
+                f"  strut pre-cut (raw) written: {raw_abs} "
+                f"mass={pipe_mass:.1f} mm3",
+                flush=True,
+            )
         oct_bounds = _octant_bounds_from_corner_mm(corner, cell_size_mm)
         corner_tuple = tuple(float(v) for v in corner)
 
@@ -618,8 +660,21 @@ def export_single_strut_paper_box_cut(
             f"STEP not SolidWorks-safe (orphan PRODUCTs → multi-window): {exc}"
         ) from exc
 
+    if raw_abs and os.path.isfile(raw_abs):
+        try:
+            raw_step_report = _postprocess_written_step(
+                raw_abs,
+                raw_step_report or {},
+                fused_single=True,
+                max_flatten_bodies=1,
+            )
+            raw_step_report = analyze_step_for_solidworks(raw_abs, fused_single=True)
+        except Exception as exc:
+            print(f"  [warn] strut raw STEP postprocess: {exc}", flush=True)
+
     return {
         "step_path": os.path.abspath(out_path),
+        "raw_step_path": raw_abs,
         "variant": gen.variant_name,
         "Q": float(period_factor),
         "strut_index": idx,
@@ -627,7 +682,10 @@ def export_single_strut_paper_box_cut(
         "corner_tag": corner_tag,
         "centre_mm": tuple(float(v) for v in path_pts[0]),
         "centre_path_extension_mm": centre_ext,
+        "corner_path_extension_mm": corner_ext if both_end_extension else 0.0,
+        "both_end_extension": bool(both_end_extension),
         "extended_start_mm": tuple(float(v) for v in extended_start),
+        "extended_end_mm": tuple(float(v) for v in extended_end),
         "pipe_mass_mm3": pipe_mass,
         "cut_mass_mm3": cut_mass,
         "mass_ratio": cut_mass / pipe_mass if pipe_mass > 0 else None,
@@ -641,11 +699,17 @@ def export_single_strut_paper_box_cut(
         "fused_volume_count": step_report.get("solid_count"),
         "step_product_count": step_report.get("product_count"),
         "step_solidworks_safe": step_report.get("solidworks_safe"),
+        "raw_fused_volume_count": (raw_step_report or {}).get("solid_count"),
         "method": "single_strut_pipe_octant_1_8_box_cut",
+        "solid_profile": profile,
+        "ellipse_minor_ratio": float(ellipse_minor_ratio),
         "pipe_open_centre": False,
         "octant_cut": True,
         "centre_weld": False,
         "size_bytes": os.path.getsize(out_path) if os.path.isfile(out_path) else 0,
+        "raw_size_bytes": (
+            os.path.getsize(raw_abs) if raw_abs and os.path.isfile(raw_abs) else 0
+        ),
     }
 
 

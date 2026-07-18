@@ -255,25 +255,21 @@ def mesh_beams_c3d8r(
     n_theta: int = 8,
     merge_decimals: int = 6,
     polyline_axial_per_span: int = 4,
-    junction_spheres: bool = True,
+    junction_spheres: bool = False,
     junction_n_lat: int = 4,
     trim_for_junctions: bool | None = None,
 ) -> tuple[list[tuple[int, float, float, float]], list[tuple[int, ...]], dict[str, list[int]]]:
     """
     Mesh each beam as a solid cylinder with C3D8R elements (wedge bricks).
 
-    With ``junction_spheres=True``, beam ends are trimmed to junction-sphere radii
-    so cylinders do not penetrate the nodal spheres (avoids contact blow-up at t=0).
+    Junction-sphere seeding/meshing is disabled (paper_box geometry only).
     """
-    from src.mesh.junction_mesh import collect_solid_junction_radii, trim_beam_endpoints
-
-    if trim_for_junctions is None:
-        trim_for_junctions = junction_spheres
+    if junction_spheres or trim_for_junctions:
+        raise ValueError(
+            "junction-sphere seeds are disabled; use paper_box / no-sphere mesh paths."
+        )
 
     node_lookup = {int(n[0]): np.array([float(n[1]), float(n[2]), float(n[3])]) for n in nodes}
-    junction_r: dict[int, float] = {}
-    if trim_for_junctions or junction_spheres:
-        junction_r = collect_solid_junction_radii(nodes, beams, polylines)
 
     pos_to_nid: dict[tuple[float, float, float], int] = {}
     mesh_nodes: list[tuple[int, float, float, float]] = []
@@ -301,16 +297,6 @@ def mesh_beams_c3d8r(
         p1 = node_lookup[int(n1)]
         p2 = node_lookup[int(n2)]
         r = float(radius)
-        if trim_for_junctions:
-            trimmed = trim_beam_endpoints(
-                p1,
-                p2,
-                junction_r.get(int(n1), 0.0),
-                junction_r.get(int(n2), 0.0),
-            )
-            if trimmed is None:
-                continue
-            p1, p2 = trimmed
 
         next_eid = _mesh_straight_cylinder_c3d8r(
             p1,
@@ -336,16 +322,6 @@ def mesh_beams_c3d8r(
                 half = prof["square_half"]
                 for i in range(len(node_ids) - 1):
                     pa, pb = path[i], path[i + 1]
-                    if trim_for_junctions:
-                        trimmed = trim_beam_endpoints(
-                            pa,
-                            pb,
-                            junction_r.get(node_ids[i], 0.0),
-                            junction_r.get(node_ids[i + 1], 0.0),
-                        )
-                        if trimmed is None:
-                            continue
-                        pa, pb = trimmed
                     next_eid = _mesh_polyline_square_c3d8r(
                         [pa, pb],
                         half,
@@ -362,16 +338,6 @@ def mesh_beams_c3d8r(
                 rad = prof["radius"]
                 for i in range(len(node_ids) - 1):
                     pa, pb = path[i], path[i + 1]
-                    if trim_for_junctions:
-                        trimmed = trim_beam_endpoints(
-                            pa,
-                            pb,
-                            junction_r.get(node_ids[i], 0.0),
-                            junction_r.get(node_ids[i + 1], 0.0),
-                        )
-                        if trimmed is None:
-                            continue
-                        pa, pb = trimmed
                     next_eid = _mesh_polyline_c3d8r(
                         [pa, pb],
                         rad,
@@ -385,25 +351,6 @@ def mesh_beams_c3d8r(
                         elsets_by_type=elsets_by_type,
                         next_eid=next_eid,
                     )
-
-    if junction_spheres:
-        from src.mesh.junction_mesh import mesh_junction_spheres_c3d8r
-
-        struct_lookup = {
-            int(n[0]): np.array([float(n[1]), float(n[2]), float(n[3])], dtype=float)
-            for n in nodes
-        }
-        next_eid = mesh_junction_spheres_c3d8r(
-            junction_r,
-            struct_lookup,
-            get_nid=get_nid,
-            coords=coords,
-            n_lat=junction_n_lat,
-            n_theta=n_theta,
-            next_eid=next_eid,
-            elsets_by_type=elsets_by_type,
-            mesh_elements=mesh_elements,
-        )
 
     elements_out = [tuple(e[:9]) for e in mesh_elements]
     return mesh_nodes, elements_out, elsets_by_type

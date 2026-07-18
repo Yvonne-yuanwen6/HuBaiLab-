@@ -654,8 +654,8 @@ def count_step_products(step_path: str) -> int:
         return len(re.findall(r"^#\d+ = PRODUCT\(", fh.read(), flags=re.MULTILINE))
 
 
-def measure_step_occ_stats(step_path: str) -> dict[str, float | int]:
-    """Import STEP in gmsh OCC and return volume / face / bbox stats."""
+def _measure_step_occ_stats_impl(step_path: str) -> dict[str, float | int]:
+    """gmsh OCC measure (must run on process main thread — gmsh installs SIGINT)."""
     import gmsh
 
     step_path = os.path.abspath(step_path)
@@ -687,6 +687,200 @@ def measure_step_occ_stats(step_path: str) -> dict[str, float | int]:
         }
     finally:
         gmsh.finalize()
+
+
+def measure_step_occ_stats(step_path: str) -> dict[str, float | int]:
+    """Import STEP in gmsh OCC and return volume / face / bbox stats.
+
+    gmsh.initialize() calls ``signal.signal`` (main-thread only). When this is
+    invoked from ``ThreadPoolExecutor`` workers (``--jobs>1``), run the measure
+    in a short-lived child process instead.
+    """
+    import threading
+
+    step_path = os.path.abspath(step_path)
+    if not os.path.isfile(step_path):
+        raise FileNotFoundError(step_path)
+
+    if threading.current_thread() is threading.main_thread():
+        return _measure_step_occ_stats_impl(step_path)
+
+    from src.export.timed_attempt import run_with_timeout
+
+    return run_with_timeout(
+        _measure_step_occ_stats_impl,
+        step_path,
+        timeout_s=600.0,
+        label="measure_occ",
+    )
+
+
+def _recenter_step_com_to_origin_impl(
+    step_path: str,
+    *,
+    tol_mm: float = 1e-3,
+) -> dict[str, float | bool | dict[str, float]]:
+    """Translate STEP so mass center of gravity → origin; rewrite in place.
+
+    Paper-box overhang can be asymmetric, so AABB midpoint ≠ cell/junction
+    center. COM tracks the lattice centre the eye sees in SW.
+    """
+    import shutil
+    import tempfile
+
+    import gmsh
+
+    step_path = os.path.abspath(step_path)
+    if not os.path.isfile(step_path):
+        raise FileNotFoundError(step_path)
+
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add("recenter_com")
+        gmsh.model.occ.importShapes(step_path)
+        gmsh.model.occ.synchronize()
+        vols = gmsh.model.getEntities(3)
+        if not vols:
+            raise RuntimeError(f"recenter: no volumes in {step_path}")
+
+        mtot = 0.0
+        cx = cy = cz = 0.0
+        for dim, tag in vols:
+            m = float(gmsh.model.occ.getMass(int(dim), int(tag)))
+            if m <= 0.0:
+                continue
+            c = gmsh.model.occ.getCenterOfMass(int(dim), int(tag))
+            cx += float(c[0]) * m
+            cy += float(c[1]) * m
+            cz += float(c[2]) * m
+            mtot += m
+        if mtot <= 0.0:
+            raise RuntimeError(f"recenter: zero mass in {step_path}")
+        mx, my, mz = cx / mtot, cy / mtot, cz / mtot
+        com_before = {"x": mx, "y": my, "z": mz}
+        bb = gmsh.model.getBoundingBox(-1, -1)
+        aabb_before = {
+            "x": 0.5 * (float(bb[0]) + float(bb[3])),
+            "y": 0.5 * (float(bb[1]) + float(bb[4])),
+            "z": 0.5 * (float(bb[2]) + float(bb[5])),
+        }
+
+        if max(abs(mx), abs(my), abs(mz)) <= float(tol_mm):
+            return {
+                "shifted": False,
+                "mode": "com",
+                "dx": 0.0,
+                "dy": 0.0,
+                "dz": 0.0,
+                "tol_mm": float(tol_mm),
+                "com_before": com_before,
+                "com_after": com_before,
+                "bbox_mid_before": aabb_before,
+                "bbox_mm": {
+                    "x": [float(bb[0]), float(bb[3])],
+                    "y": [float(bb[1]), float(bb[4])],
+                    "z": [float(bb[2]), float(bb[5])],
+                },
+            }
+
+        gmsh.model.occ.translate(vols, -mx, -my, -mz)
+        gmsh.model.occ.synchronize()
+
+        # Recompute COM after translate (should be ~0).
+        mtot2 = 0.0
+        cx2 = cy2 = cz2 = 0.0
+        for dim, tag in gmsh.model.getEntities(3):
+            m = float(gmsh.model.occ.getMass(int(dim), int(tag)))
+            if m <= 0.0:
+                continue
+            c = gmsh.model.occ.getCenterOfMass(int(dim), int(tag))
+            cx2 += float(c[0]) * m
+            cy2 += float(c[1]) * m
+            cz2 += float(c[2]) * m
+            mtot2 += m
+        com_after = {
+            "x": cx2 / mtot2 if mtot2 else 0.0,
+            "y": cy2 / mtot2 if mtot2 else 0.0,
+            "z": cz2 / mtot2 if mtot2 else 0.0,
+        }
+        bb2 = gmsh.model.getBoundingBox(-1, -1)
+
+        fd, tmp_name = tempfile.mkstemp(
+            suffix=".step", prefix="recenter_", dir=os.path.dirname(step_path) or None
+        )
+        os.close(fd)
+        try:
+            gmsh.write(tmp_name)
+            if not os.path.isfile(tmp_name) or os.path.getsize(tmp_name) < 64:
+                raise RuntimeError(f"recenter write failed: {tmp_name}")
+            shutil.move(tmp_name, step_path)
+        finally:
+            if os.path.isfile(tmp_name):
+                try:
+                    os.remove(tmp_name)
+                except OSError:
+                    pass
+        return {
+            "shifted": True,
+            "mode": "com",
+            "dx": -mx,
+            "dy": -my,
+            "dz": -mz,
+            "tol_mm": float(tol_mm),
+            "com_before": com_before,
+            "com_after": com_after,
+            "bbox_mid_before": aabb_before,
+            "bbox_mid_after": {
+                "x": 0.5 * (float(bb2[0]) + float(bb2[3])),
+                "y": 0.5 * (float(bb2[1]) + float(bb2[4])),
+                "z": 0.5 * (float(bb2[2]) + float(bb2[5])),
+            },
+            "bbox_mm": {
+                "x": [float(bb2[0]), float(bb2[3])],
+                "y": [float(bb2[1]), float(bb2[4])],
+                "z": [float(bb2[2]), float(bb2[5])],
+            },
+        }
+    finally:
+        gmsh.finalize()
+
+
+def recenter_step_bbox_to_origin(
+    step_path: str,
+    *,
+    tol_mm: float = 1e-3,
+) -> dict[str, float | bool | dict[str, float]]:
+    """Make mass COM the origin (paper-box unitcell hygiene).
+
+    Name kept for call-site compatibility; implementation uses center-of-mass,
+    not AABB midpoint (asymmetric overhang made AABB mid look centered while
+    the junction sat above the origin).
+    """
+    import threading
+
+    step_path = os.path.abspath(step_path)
+    if not os.path.isfile(step_path):
+        raise FileNotFoundError(step_path)
+
+    if threading.current_thread() is threading.main_thread():
+        return _recenter_step_com_to_origin_impl(step_path, tol_mm=float(tol_mm))
+
+    from src.export.timed_attempt import run_with_timeout
+
+    def _job(path: str) -> dict[str, float | bool | dict[str, float]]:
+        return _recenter_step_com_to_origin_impl(path, tol_mm=float(tol_mm))
+
+    return run_with_timeout(
+        _job,
+        step_path,
+        timeout_s=600.0,
+        label="recenter_com",
+    )
+
+
+# Alias for clarity at new call sites.
+recenter_step_com_to_origin = recenter_step_bbox_to_origin
 
 
 def analyze_step_for_solidworks(

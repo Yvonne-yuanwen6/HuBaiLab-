@@ -138,13 +138,18 @@ manifest: dict = {
 
 
 def _zslab_report(path: str, report: dict) -> None:
+    from src.export.step_size_guard import as_report_dict, check_step_file_size
+
     bbox = report.get("bbox_mm") or {}
     x_span = float(bbox.get("x", [0, 0])[1]) - float(bbox.get("x", [0, 0])[0])
     y_span = float(bbox.get("y", [0, 0])[1]) - float(bbox.get("y", [0, 0])[0])
     expected = n * L
+    size_ck = check_step_file_size(path, role="zslab", raise_on_error=True)
+    report["step_size_check"] = as_report_dict(size_ck)
     print(
         f"  OK iz={report.get('iz')}: vol={report.get('fused_volume_count')} "
         f"sw_safe={report.get('step_solidworks_safe')} "
+        f"size={size_ck.mib:.1f}MiB/{size_ck.status} "
         f"x={x_span:.1f} y={y_span:.1f} mm",
         flush=True,
     )
@@ -258,9 +263,14 @@ if _args.all or _args.merge_only:
             progress_label="paper-box-inter-slab",
         )
     manifest["array_merge"] = merge_report
+    from src.export.step_size_guard import as_report_dict, check_step_file_size
+
+    array_size = check_step_file_size(array_step, role="array", raise_on_error=True)
+    merge_report["step_size_check"] = as_report_dict(array_size)
     print(
         f"  OK: vol={merge_report.get('fused_volume_count')} "
-        f"sw_safe={merge_report.get('step_solidworks_safe')}",
+        f"sw_safe={merge_report.get('step_solidworks_safe')} "
+        f"size={array_size.mib:.1f}MiB/{array_size.status}",
         flush=True,
     )
     if int(merge_report.get("fused_volume_count") or 0) != 1:

@@ -407,6 +407,7 @@ def ocp_glue_struts_sequential(
     *,
     fuzzy_mm: float = 0.05,
     progress_label: str = "strut-glue",
+    simplify: bool = False,
 ) -> Any:
     """Fallback: sequential GlueShift fuse on strut solids (array sew control)."""
     from src.export.ocp_unitcell_fuse import ocp_fuse_pair
@@ -416,22 +417,41 @@ def ocp_glue_struts_sequential(
     acc = shapes[0]
     ref = ocp_mass(acc)
     min_delta = 0.15 * ref
+    fuzzies = sorted({float(fuzzy_mm), 0.05, 0.1, 0.2, 0.4})
     for idx, sh in enumerate(shapes[1:], start=2):
         prev = ocp_mass(acc)
-        acc = ocp_fuse_pair(
-            acc,
-            sh,
-            glue="shift",
-            fuzzy_mm=float(fuzzy_mm),
-            label=f"{progress_label} {idx}/{len(shapes)}",
-        )
-        new = ocp_mass(acc)
-        if new < prev + min_delta:
+        last_err: Exception | None = None
+        fused_ok = False
+        for fz in fuzzies:
+            try:
+                cand = ocp_fuse_pair(
+                    acc,
+                    sh,
+                    glue="shift",
+                    fuzzy_mm=float(fz),
+                    simplify=bool(simplify),
+                    label=f"{progress_label} {idx}/{len(shapes)}",
+                )
+                new = ocp_mass(cand)
+                if new < prev + min_delta:
+                    last_err = RuntimeError(
+                        f"mass {new:.1f} < {prev + min_delta:.1f} mm3 (fuzzy={fz:g})"
+                    )
+                    continue
+                acc = cand
+                fused_ok = True
+                print(
+                    f"  {progress_label}: {idx}/{len(shapes)} mass={new:.1f} mm3 "
+                    f"(fuzzy={fz:g})",
+                    flush=True,
+                )
+                break
+            except Exception as exc:
+                last_err = exc
+        if not fused_ok:
             raise RuntimeError(
-                f"{progress_label}: step {idx}/{len(shapes)} mass "
-                f"{new:.1f} < {prev + min_delta:.1f} mm3"
+                f"{progress_label}: step {idx}/{len(shapes)} failed: {last_err}"
             )
-        print(f"  {progress_label}: {idx}/{len(shapes)} mass={new:.1f} mm3", flush=True)
     return acc
 
 
@@ -457,9 +477,15 @@ def _build_cell_glue_row_solids(
     periodic_overlap_mm: float = PERIODIC_FACE_OVERLAP_MM,
     periodic_axes: tuple[str, ...] = ("x",),
     glue_fuzzy_mm: float = 0.05,
+    rod_d: float = 2.0,
+    amplitude: float = 2.0,
 ) -> tuple[list[Any], float, dict[str, Any]]:
     """Build one iz layer: octant struts → cell glue → row solids (OCP BREP, no STEP)."""
-    pipe_parts = load_q1_pipe_parts(cell_size=float(cell_size_mm))
+    pipe_parts = load_q1_pipe_parts(
+        cell_size=float(cell_size_mm),
+        rod_d=float(rod_d),
+        amplitude=float(amplitude),
+    )
     struts, cut_sum = build_array_octant_strut_solids(
         pipe_parts,
         nx=int(nx),
@@ -618,6 +644,8 @@ def export_ocp_cell_glue_444_brep_fused(
     periodic_overlap_mm: float = PERIODIC_FACE_OVERLAP_MM,
     periodic_axes: tuple[str, ...] = ("x",),
     heal_mm: float = 0.05,
+    rod_d: float = 2.0,
+    amplitude: float = 2.0,
 ) -> dict[str, Any]:
     """
     4×4×4 single solid: build iz=0 row BREPs, copy +Z in OCP, gmsh fuse all rows.
@@ -633,7 +661,8 @@ def export_ocp_cell_glue_444_brep_fused(
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
     print(
-        f"OCP cell_glue 444: build iz=0 rows, copy {n_i} layers, gmsh fuse...",
+        f"OCP cell_glue 444: build iz=0 rows, copy {n_i} layers, gmsh fuse "
+        f"(rod_d={rod_d:g}, Af={amplitude:g})...",
         flush=True,
     )
     row_solids, cut_sum, row_report = _build_cell_glue_row_solids(
@@ -645,6 +674,8 @@ def export_ocp_cell_glue_444_brep_fused(
         periodic_overlap_mm=float(periodic_overlap_mm),
         periodic_axes=periodic_axes,
         glue_fuzzy_mm=float(glue_fuzzy_mm),
+        rod_d=float(rod_d),
+        amplitude=float(amplitude),
     )
     all_rows: list[Any] = list(row_solids)
     row_mass = sum(ocp_mass(r) for r in row_solids)

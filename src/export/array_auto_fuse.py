@@ -285,7 +285,7 @@ def export_lattice_step_occ_unitcell_array_auto(
     nz: int,
     cell_size: float,
     polylines: list[dict] | None = None,
-    junction_spheres: bool = True,
+    junction_spheres: bool = False,
     polyline_sweep: str | None = None,
 ) -> dict[str, int | float | bool | str | list]:
     """Unit-cell array STEP with BCC-safe inter-cell OCC fuse."""
@@ -314,7 +314,11 @@ def export_lattice_step_occ_unitcell_array_auto(
     if cell_l <= 0.0:
         raise ValueError(f"cell_size must be positive, got {cell_l}")
 
-    use_junction = junction_spheres
+    if junction_spheres:
+        raise ValueError(
+            "junction-sphere seeds are disabled; use paper_box export "
+            "(scripts/export_unitcell_paper_box_cut.py / OCP glue routes)."
+        )
     if polyline_sweep is None:
         polyline_sweep = "pipe" if polylines else "cylinder"
     use_pipe = str(polyline_sweep).lower() == "pipe"
@@ -323,7 +327,7 @@ def export_lattice_step_occ_unitcell_array_auto(
         nodes,
         beams,
         polylines=polylines,
-        junction_spheres=use_junction,
+        junction_spheres=False,
         trim_for_junctions=False,
         polyline_sweep=polyline_sweep,
     )
@@ -354,7 +358,7 @@ def export_lattice_step_occ_unitcell_array_auto(
         sweep_label = "pipe sweep" if use_pipe else "cylinder chain"
         print(
             f"  Unit cell fuse: {n_uc_parts} OCC solids "
-            f"({sweep_label}, junction spheres={'on' if use_junction else 'off'})...",
+            f"({sweep_label}, no junction spheres)...",
             flush=True,
         )
         if n_uc_parts > 1:

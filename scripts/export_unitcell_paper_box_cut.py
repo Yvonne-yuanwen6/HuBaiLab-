@@ -5,7 +5,7 @@ Export paper-style unit-cell STEPs: pipe sweep + virtual L³ hexahedron cut.
   py -3 scripts/export_unitcell_paper_box_cut.py --Q 0 1.0 1.5
 
 Strut ends on the RVE boundary are planar cut faces (no junction spheres).
-Uses the same pipe-first OCC sweep as export_unitcell_seed_check.py.
+Uses pipe-first OCC sweep + L³ box cut (paper_box geometry).
 """
 
 from __future__ import annotations

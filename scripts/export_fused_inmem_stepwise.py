@@ -82,7 +82,7 @@ stats = export_lattice_step_occ_zslab(
     block_nz=block,
     cell_size=L,
     polylines=polylines,
-    junction_spheres=True,
+    junction_spheres=False,
 )
 
 report = analyze_step_for_solidworks(step_path, fused_single=True)

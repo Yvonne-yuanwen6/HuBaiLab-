@@ -51,14 +51,14 @@ def mesh_token(
 
 
 def mat_token(material_model: str) -> str:
-    kind = material_model.lower()
+    kind = material_model.lower().replace("-", "_")
     if kind in ("elastic", "elastic_plastic"):
         return "el"
     if kind == "marlow":
         return "marlow"
     if kind == "polynomial":
         return "poly"
-    if kind in ("paper", "hyperelastic"):
+    if kind in ("neo_hooke", "paper", "hyperelastic", "neohooke"):
         return "nh"
     return kind[:8]
 

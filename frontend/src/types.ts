@@ -152,6 +152,9 @@ export interface ExportSettings {
   Q: number;
   Af: number;
   cells: number;
+  cell_size: number;
+  rod_diameter: number;
+  structure: string;
   cad_path: string;
   cae_seed_mm: number;
   cae_mesh_quality: string;
@@ -184,4 +187,35 @@ export interface VerifiedCad {
   name: string;
   path: string;
   size_bytes: number;
+}
+
+export interface CadGenerateRequest {
+  Q: number;
+  cells: number;
+  L: number;
+  structure: string;
+  backend: string;
+  mode: string;
+  force?: boolean;
+  ocp_fuse_mode?: string;
+}
+
+export interface QueueItem {
+  id: string;
+  slug: string;
+  cpus: number;
+  memory_mb: number;
+  target: string;
+  status: string;
+  order: number;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+  task_id: string | null;
+}
+
+export interface QueueState {
+  running: boolean;
+  items: QueueItem[];
 }

@@ -48,7 +48,7 @@ STAGE_HELP = {
     4: "扫掠 QA：仅 8 根 pipe STEP（未融合，检查截面是否均匀圆柱）",
     5: "杆融合：pairwise 融 8 根 pipe 为 1 体（尚无节点球）",
     6: "全融合：杆+球 fuse 后、prune 前 STEP",
-    7: "最终：prune + 写 STEP（与 export_unitcell_seed_check 相同）",
+    7: "最终：prune + 写 STEP（与 export_unitcell_paper_box_cut 相同管线）",
 }
 
 STAGE_CHECKS = {
@@ -197,7 +197,7 @@ def stage_2_primitives(out_dir: str, *, q: float, af: float, n_segments: int) ->
         nodes,
         beams,
         polylines=polylines,
-        junction_spheres=True,
+        junction_spheres=False,
         trim_for_junctions=False,
         polyline_sweep="pipe",
     )
@@ -249,7 +249,7 @@ def stage_3_occ17(out_dir: str, *, q: float, af: float, n_segments: int) -> dict
         beams,
         step_path,
         polylines=polylines,
-        junction_spheres=True,
+        junction_spheres=False,
         fuse=False,
     )
 
@@ -261,7 +261,7 @@ def stage_3_occ17(out_dir: str, *, q: float, af: float, n_segments: int) -> dict
         nodes,
         beams,
         polylines=polylines,
-        junction_spheres=True,
+        junction_spheres=False,
         trim_for_junctions=False,
         polyline_sweep="pipe",
     )
@@ -370,7 +370,7 @@ def stage_6_fused_raw(out_dir: str, *, q: float, af: float, n_segments: int) -> 
         nodes,
         beams,
         polylines=polylines,
-        junction_spheres=True,
+        junction_spheres=False,
         trim_for_junctions=False,
         polyline_sweep="pipe",
     )
@@ -405,7 +405,7 @@ def stage_7_final(out_dir: str, *, q: float, af: float, n_segments: int) -> dict
             beams,
             step_path,
             polylines=polylines,
-            junction_spheres=True,
+            junction_spheres=False,
             fuse=True,
         )
         sw_safe = report.get("step_solidworks_safe")

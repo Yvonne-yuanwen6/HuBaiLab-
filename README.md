@@ -93,7 +93,7 @@ py -3 scripts/export_unitcell_paper_box_cut.py --Q 0.5
 | **1.0** | **8×octant 切杆 → OCP sequential_glue_shift** | **单胞 ✅；4×4×4 ❌** |
 | 1.5 | 逐杆 full L³ box-cut → strut merge | gmsh |
 
-Q=1 **不要**用下方 `export_unitcell_seed_check.py`（junction-sphere + pipe-first）作 paper_box 种子。
+Q=1 用 octant/OCP paper_box 种子，勿使用已禁用的 junction-sphere 路线。
 
 **SolidWorks 验收（paper_box 单胞）**
 
@@ -107,42 +107,6 @@ Q=1 **不要**用下方 `export_unitcell_seed_check.py`（junction-sphere + pipe
 单杆 octant 切 QA：`py -3 scripts/export_single_strut_paper_box_cut.py --Q 1.0 --strut 1`
 
 ---
-
-**legacy：junction-sphere 单胞 QA**（`solid_merged` / 旧阵列，**非** paper_box）：
-
-```powershell
-py -3 scripts/export_unitcell_seed_check.py --Q 1.0
-```
-
-输出：`output/cad/_unitcell_check/unitcell_sfbls_af2q1_fused.step`（及 `manifest.json`）
-
-**SolidWorks 验收标准（legacy seed）**
-
-| 检查项 | 期望 |
-|--------|------|
-| 杆件数量 | **8 根**完整 SFBLS 杆（上下各 4 根，不可缺杆） |
-| 节点球 | 中心交汇处 **9 个**节点球已融合 |
-| 实体树 | **(1)** 个实体（`Solid Bodies` 计数为 1） |
-| 日志策略 | 控制台出现 `strategy=pipe-first`，**不是** `fuse-all` |
-
-**正确融合方式（已固化在 `export_unitcell_seed_check.py`）**
-
-- 调用 `export_lattice_step_occ(..., fuse=True, junction_spheres=True)`，**不传** `cell_size`。
-- 走 **pipe-first per-strut** 路径：8 根扫掠管 + 9 个节点球 → 逐杆合并 → 单实体 STEP。
-- STEP 体积约 **2 MB**（Q=1.0）；`vol=1`、`sw_safe=True`。
-
-**常见错误（会导致上下各缺 1 根杆）**
-
-若在单胞导出时传入 `cell_size=20.0`，会触发 `export_sw._occ_fuse_unitcell_solid_for_array()`：
-
-1. pipe-first 先成功融合出完整 8 杆几何；
-2. Q=1.0 的 X 方向周期邻胞布尔检测失败；
-3. 代码**丢弃**上述几何，回退到 **fuse-all**；
-4. fuse-all 在 SolidWorks 中常只剩 **6 根杆**（上下各缺 1 根），STEP 约 1.5 MB。
-
-因此：**单胞目视 QA 种子禁止传 `cell_size`**。`cell_size` 仅用于阵列流水线中的邻胞布尔兼容性检测，与单胞几何完整性是两套取舍，不可混用。
-
-单胞确认无误后，再按步进 QA 做 2-cell、Y 向 4-cell、4×4 层等（见 `scripts/export_pair_fuse_check.py` 等）。
 
 ### 0b. paper_box 4×4×4 融合 STEP（Q=1 进行中）
 
@@ -297,7 +261,7 @@ powershell -File scripts/run_bcc_q1_4x4x4_fast80.ps1 -SkipQ1   # 仅 BCC fast80
 
 | 变体 | STEP 路径 | 生成方式 | SW / gmsh 验收 |
 |------|-----------|----------|----------------|
-| SFBLS Q=0.5/1/1.5 单胞 | `output/cad/_unitcell_check/unitcell_sfbls_af2q{0p5,1,1p5}_fused.step` | `export_unitcell_seed_check.py --Q …`，**pipe-first** + 平行移动截面扫掠（`occ_pipe.py`） | 8 杆均匀圆柱截面，9 节点球，单实体 |
+| SFBLS Q=0.5/1/1.5 单胞（paper_box） | `output/cad/_unitcell_paper_box_cut/unitcell_*_paper_box.step` | `export_unitcell_paper_box_cut.py` | 8 杆 L³ 平切，无节点球，单实体 |
 | **SFBLS Q=1.0 单胞（paper_box，OCP）** | `output/cad/_ocp_glue_pilot/unitcell_af2q1_L20_ocp_stub_sequential-glue-shift.step` | `_tmp_ocp_glue_fuse_pilot.py` / `run_ocp_glue_fuse_pilot.sh`：octant 切杆 + **OCP GlueShift** | `vol=1`，无节点球，SW 单窗口 |
 | SFBLS Q=1.0，4×4×4（paper_box） | `output/cad/_paper_box_array_q1p0_ocp/`（目标） | `run_ocp_q1_4x4x4_array_fuse.sh` 或 gmsh `run_hu_bai_paper_box_4x4x4_array_fuse.py` | **❌ 尚未验收** |
 | SFBLS Q=1.0，4×4×4（legacy SW） | `output/cad/verified/hu_bai_sfbls_af2q1_L20_4x4x4_solid_merged.STEP` | `run_sfbls_sw_stepwise_4x4x4_pipeline.ps1`：16 体 compound → SW → Z 复制 → 4 体 SW 合并 | 已用于 fast80 网格导出（**非** paper_box 几何） |
@@ -323,7 +287,7 @@ Fig. 3.3 目标批量（3×3×3 SFBLS Q=0.5/1/1.5 fast80）见 `scripts/submit_h
 
 | 脚本 | 用途 |
 |------|------|
-| `export_unitcell_seed_check.py` | **单胞融合 STEP**（SW 目视 QA；不传 `cell_size`，pipe-first） |
+| `export_unitcell_paper_box_cut.py` | **单胞 paper_box STEP**（SW 目视 QA；无节点球） |
 | `export_pair_fuse_check.py` | 2-cell 化合物（Y + X）；Q=1.0 勿用 STEP 种子 `--fuse`（SW 中为曲面实体） |
 | `export_line_from_unitcell_seed.py` | 由单胞种子平移生成 N-cell 线阵列 |
 | `export_zslab_layer_from_column.py` | 4×4 z 层化合物 / 行融合 |

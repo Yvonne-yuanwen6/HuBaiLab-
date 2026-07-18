@@ -7,7 +7,7 @@ are repo additions (原文未写). See ``run_hu_bai_bcc_solid_cad_export.py`` fo
 Example (Windows: CAE mesh runs on server by default):
   py -3 scripts/run_hu_bai_bcc_solid_cad_cae_tet_export.py --cells 4 --Q 0 --profile fast \\
     --case-suffix cae_tet0p6mm80_5mmin_paper --cae-seed 0.6 --strain 0.8 --load-rate-mm-min 5 \\
-    --explicit-dt 0.0001 --explicit-dt-mode fixed --no-mass-scaling --material-model paper
+    --explicit-dt 0.0001 --explicit-dt-mode fixed --no-mass-scaling --material-model neo_hooke
 
 On Linux server (mesh locally):
   py -3 scripts/run_hu_bai_bcc_solid_cad_cae_tet_export.py ... --mesh-locally
@@ -44,6 +44,7 @@ from src.export.abaqus_compression import (
     hu_bai_density_abq,
     hu_bai_neo_hooke_c10,
     hu_bai_quasi_static_step_time,
+    is_neo_hooke_material,
     validate_explicit_restart_inp,
 )
 from src.export.beam_utils import dedupe_beams
@@ -73,6 +74,13 @@ _parser = argparse.ArgumentParser(description="Hu & Bai CAD solid → CAE C3D4 c
 _parser.add_argument("--Q", type=float, default=0.0)
 _parser.add_argument("--Af", type=float, default=2.0)
 _parser.add_argument("--cells", type=int, default=4)
+_parser.add_argument("--L", type=float, default=20.0, help="Unit cell edge length [mm]")
+_parser.add_argument(
+    "--rod-diameter",
+    type=float,
+    default=2.0,
+    help="Nominal rod diameter [mm]",
+)
 _parser.add_argument("--cad", type=str, default="")
 _parser.add_argument("--cae-seed", type=float, default=1.2, help="CAE global seed [mm]")
 _parser.add_argument(
@@ -194,18 +202,65 @@ _parser.add_argument(
     action="store_true",
     help="Omit *Fixed Mass Scaling from INP (mass scaling 原文未给出)",
 )
+_parser.add_argument(
+    "--mass-scaling-factor",
+    type=float,
+    default=None,
+    help=(
+        "Fixed mass scaling factor for Explicit (default repo 50 if omitted; "
+        "ignored when --no-mass-scaling). Use e.g. 10 for lower inertia lag."
+    ),
+)
+_parser.add_argument(
+    "--mass-scaling-mode",
+    choices=("none", "uniform", "below_min"),
+    default=None,
+    help=(
+        "none=omit; uniform=all-element factor only (recommended for KE/IE studies); "
+        "below_min=scale up to target dt (legacy default with large dt forces huge mass). "
+        "Default: below_min when a factor is used, none with --no-mass-scaling."
+    ),
+)
+_parser.add_argument(
+    "--mass-scaling-dt",
+    type=float,
+    default=None,
+    help="BELOW MIN target stable dt [s]; default = --explicit-dt",
+)
 _parser.add_argument("--restart-interval", type=int, default=None)
 _parser.add_argument(
     "--material-model",
-    choices=("paper", "hyperelastic", "elastic_plastic", "elastic", "marlow", "polynomial"),
+    choices=(
+        "neo_hooke",
+        "paper",
+        "hyperelastic",
+        "elastic_plastic",
+        "elastic",
+        "marlow",
+        "polynomial",
+    ),
     default=None,
-    help="marlow/polynomial = Fig.2.5 WPD uniaxial; polynomial = test data input (Mooney-Rivlin fit); paper = Neo-Hooke; elastic = Fig.3.3 trend trials",
+    help=(
+        "neo_hooke (= paper/hyperelastic legacy) = Neo-Hooke; "
+        "marlow/polynomial = Fig.2.5 WPD uniaxial; "
+        "polynomial = test data input (Mooney-Rivlin fit); "
+        "elastic = Fig.3.3 trend trials"
+    ),
 )
 _parser.add_argument(
     "--tpu-fig25-json",
     type=str,
     default="data/hu_bai_tpu_fig25_tensile_traced.json",
     help="Traced Fig.2.5 tensile curve for --material-model marlow or polynomial",
+)
+_parser.add_argument(
+    "--tpu-stress-scale",
+    type=float,
+    default=1.0,
+    help=(
+        "Multiply Fig.2.5 uniaxial engineering stress by this factor before Marlow/"
+        "polynomial input (1.0 = as traced). Soften e.g. 0.77 to match Fig.3.3 early BCC."
+    ),
 )
 _parser.add_argument(
     "--mesh-on-server",
@@ -241,8 +296,8 @@ else:
 PROFILE = _args.profile
 CASE_SUFFIX_RAW = _args.case_suffix.strip().replace(" ", "_")
 IS_FAST80 = CASE_SUFFIX_RAW == "fast80"
-L = 20.0
-ROD_D = 2.0
+L = float(_args.L)
+ROD_D = float(_args.rod_diameter)
 AF = float(_args.Af)
 Q = float(_args.Q)
 NX = NY = NZ = int(_args.cells)
@@ -261,16 +316,24 @@ TPU_C10 = hu_bai_neo_hooke_c10(E_MODULUS, POISSON)
 
 MATERIAL_KIND = _args.material_model
 if MATERIAL_KIND is None:
-    MATERIAL_KIND = "paper" if PROFILE == "paper" else "elastic_plastic"
-USE_HYPERELASTIC = MATERIAL_KIND in ("paper", "hyperelastic")
+    MATERIAL_KIND = "neo_hooke" if PROFILE == "paper" else "elastic_plastic"
+# Canonicalize legacy aliases for manifest / slug
+if is_neo_hooke_material(MATERIAL_KIND):
+    MATERIAL_KIND = "neo_hooke"
+USE_HYPERELASTIC = is_neo_hooke_material(MATERIAL_KIND)
+TPU_STRESS_SCALE = float(_args.tpu_stress_scale)
 if MATERIAL_KIND == "marlow":
     INP_MATERIAL_MODEL = "marlow"
-    TPU_UNIAXIAL = load_tpu_fig25_uniaxial(_args.tpu_fig25_json)
+    TPU_UNIAXIAL = load_tpu_fig25_uniaxial(
+        _args.tpu_fig25_json, stress_scale=TPU_STRESS_SCALE
+    )
 elif MATERIAL_KIND == "polynomial":
     INP_MATERIAL_MODEL = "polynomial"
-    TPU_UNIAXIAL = load_tpu_fig25_uniaxial(_args.tpu_fig25_json)
+    TPU_UNIAXIAL = load_tpu_fig25_uniaxial(
+        _args.tpu_fig25_json, stress_scale=TPU_STRESS_SCALE
+    )
 elif USE_HYPERELASTIC:
-    INP_MATERIAL_MODEL = "hyperelastic"
+    INP_MATERIAL_MODEL = "neo_hooke"
     TPU_UNIAXIAL = None
 else:
     INP_MATERIAL_MODEL = "elastic"
@@ -330,7 +393,28 @@ if PROFILE == "paper" and EXPLICIT_DT_MODE in ("automatic", "auto", "adaptive"):
 CASE_SUFFIX = CASE_SUFFIX_RAW or f"cae_tet{CAE_SEED:g}mm{int(round(TARGET_STRAIN * 100))}p_{int(LOAD_RATE_MM_MIN)}mmin"
 STROKE_TAG = "f"
 N_INC_EST = max(100, int(round(STEP_TIME / EXPLICIT_DT)))
-EXPLICIT_MASS_SCALING = None if _args.no_mass_scaling else HU_BAI_EXPLICIT_MASS_SCALING
+if _args.no_mass_scaling:
+    EXPLICIT_MASS_SCALING = None
+    MASS_SCALING_MODE = "none"
+elif _args.mass_scaling_mode == "below_min" and _args.mass_scaling_factor is None:
+    # Uncapped BELOW MIN to --mass-scaling-dt (or explicit-dt): preferred KE/IE sweep.
+    EXPLICIT_MASS_SCALING = None
+    MASS_SCALING_MODE = "below_min"
+elif _args.mass_scaling_factor is not None:
+    if float(_args.mass_scaling_factor) <= 0.0:
+        raise SystemExit("--mass-scaling-factor must be > 0 (or use --no-mass-scaling)")
+    EXPLICIT_MASS_SCALING = float(_args.mass_scaling_factor)
+    MASS_SCALING_MODE = _args.mass_scaling_mode or "below_min"
+elif _args.mass_scaling_mode == "uniform":
+    raise SystemExit("uniform mass scaling requires --mass-scaling-factor > 0")
+else:
+    EXPLICIT_MASS_SCALING = HU_BAI_EXPLICIT_MASS_SCALING
+    MASS_SCALING_MODE = _args.mass_scaling_mode or "below_min"
+if _args.mass_scaling_mode is not None and not _args.no_mass_scaling:
+    MASS_SCALING_MODE = str(_args.mass_scaling_mode)
+MASS_SCALING_DT = (
+    float(_args.mass_scaling_dt) if _args.mass_scaling_dt is not None else None
+)
 
 gen = HuBaiLatticeGenerator(
     cell_size=L,
@@ -412,7 +496,10 @@ compression = CompressionSettings(
     explicit_dt=EXPLICIT_DT,
     explicit_dt_mode=EXPLICIT_DT_MODE,
     explicit_mass_scaling_factor=EXPLICIT_MASS_SCALING,
-    explicit_mass_scaling_dt_only=False,
+    explicit_mass_scaling_mode=MASS_SCALING_MODE,
+    explicit_mass_scaling_dt=MASS_SCALING_DT,
+    # uniform must not use legacy dt_only path
+    explicit_mass_scaling_dt_only=(MASS_SCALING_MODE == "below_min" and EXPLICIT_MASS_SCALING is None),
     amplitude_hold_fraction=HOLD_FRACTION,
     lattice_self_contact=not _args.no_lattice_self_contact,
     rod_radius=0.0,
@@ -672,6 +759,7 @@ manifest = {
         "neo_hooke_C10_MPa": TPU_C10 if USE_HYPERELASTIC else None,
         "fig25_json": _args.tpu_fig25_json if MATERIAL_KIND in ("marlow", "polynomial") else None,
         "fig25_n_points": len(TPU_UNIAXIAL) if TPU_UNIAXIAL else None,
+        "fig25_stress_scale": TPU_STRESS_SCALE if MATERIAL_KIND in ("marlow", "polynomial") else None,
         "hyperelastic_fit": "polynomial_order1_testdata" if MATERIAL_KIND == "polynomial" else None,
     },
     "mesh": {
@@ -703,6 +791,8 @@ manifest = {
         "explicit_dt_mode": EXPLICIT_DT_MODE,
         "amplitude_hold_fraction": HOLD_FRACTION,
         "explicit_mass_scaling": EXPLICIT_MASS_SCALING,
+        "explicit_mass_scaling_mode": MASS_SCALING_MODE,
+        "explicit_mass_scaling_dt": MASS_SCALING_DT,
         "explicit_n_increments_est": N_INC_EST,
         "case_suffix": CASE_SUFFIX,
         "contact_mode": CONTACT_MODE,
@@ -747,7 +837,13 @@ print(
     f"  Loading: {COMPRESSION_DISP:.1f} mm / {STEP_TIME:.1f} s "
     f"({LOAD_RATE_MM_MIN:g} mm/min), mu={HU_BAI_FRICTION}"
 )
-_ms_note = "none" if EXPLICIT_MASS_SCALING is None else f"x{EXPLICIT_MASS_SCALING:g}"
+if MASS_SCALING_MODE == "none":
+    _ms_note = "none"
+elif EXPLICIT_MASS_SCALING is None:
+    _ms_dt = MASS_SCALING_DT if MASS_SCALING_DT is not None else EXPLICIT_DT
+    _ms_note = f"{MASS_SCALING_MODE}:BELOW_MIN_dt={_ms_dt:g}"
+else:
+    _ms_note = f"{MASS_SCALING_MODE}:x{EXPLICIT_MASS_SCALING:g}"
 print(
     f"  Explicit: dt_mode={EXPLICIT_DT_MODE}, dt={EXPLICIT_DT:g} s, "
     f"mass scaling {_ms_note}, ~{N_INC_EST} increments"

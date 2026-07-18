@@ -47,8 +47,10 @@ else
   exit 1
 fi
 
-JOB_DIR="$ROOT/output/jobs/$SLUG"
-EXPORT_DIR="$ROOT/output/export/$SLUG"
+JOBS_ROOT="${HU_BAI_JOBS_ROOT:-$ROOT/output/jobs}"
+EXPORT_ROOT="${HU_BAI_EXPORT_ROOT:-$ROOT/output/export}"
+JOB_DIR="$JOBS_ROOT/$SLUG"
+EXPORT_DIR="$EXPORT_ROOT/$SLUG"
 INP="$EXPORT_DIR/${SLUG}.inp"
 
 [[ -f "$INP" ]] || { echo "Missing INP: $INP (run export on this machine first)"; exit 1; }
@@ -58,7 +60,7 @@ cp -f "$INP" "$JOB_DIR/"
 cd "$JOB_DIR"
 
 if [[ -n "$RESTART_FROM" ]]; then
-  SRC_JOB="$ROOT/output/jobs/$RESTART_FROM"
+  SRC_JOB="${HU_BAI_RESTART_JOBS_ROOT:-$ROOT/output/jobs}/$RESTART_FROM"
   [[ -d "$SRC_JOB" ]] || { echo "Missing restart source job dir: $SRC_JOB"; exit 1; }
   for ext in abq mdl stt pac prt res sel odb; do
     src_file="$SRC_JOB/${RESTART_FROM}.${ext}"

@@ -23,6 +23,7 @@ Environment (optional):
   HU_BAI_VTOPO_SHORT_EDGE  shortEdgeThreshold [mm] (default 0.8)
   HU_BAI_VTOPO_SLIVER_AR   faceAspectRatioThreshold (default 15)
   HU_BAI_VTOPO_CORNER_ANGLE smallFaceCornerAngleThreshold [deg] (default 75)
+  HU_BAI_IGNORE_INVALID    1/true: Ignore Invalidity + convertInvalidEntities
 """
 
 from __future__ import print_function
@@ -74,6 +75,11 @@ VIRTUAL_TOPOLOGY = os.environ.get("HU_BAI_VIRTUAL_TOPOLOGY", "").lower() in (
     "yes",
 )
 SEED_PART_ONLY = os.environ.get("HU_BAI_SEED_PART_ONLY", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+IGNORE_INVALID = os.environ.get("HU_BAI_IGNORE_INVALID", "").lower() in (
     "1",
     "true",
     "yes",
@@ -178,59 +184,6 @@ def log(msg):
         f.write(line + "\n")
 
 
-if os.path.isfile(LOG_PATH):
-    os.remove(LOG_PATH)
-
-model_name = "Model-1"
-part_name = PART_NAME
-
-print("Import STEP:", STEP_PATH)
-log("Import STEP: %s" % STEP_PATH)
-log(
-    "Mesh config: mode=%s quality=%s seed=%.4g mm rod=%.4g mm vtopo=%s"
-    % (MESH_MODE, MESH_QUALITY, SEED_MM, ROD_DIAMETER_MM, VIRTUAL_TOPOLOGY)
-)
-step_path = STEP_PATH.replace("\\", "/")
-
-for name in list(mdb.models.keys()):
-    if len(mdb.models) <= 1:
-        break
-    del mdb.models[name]
-log("Models after clear: %s" % list(mdb.models.keys()))
-
-if model_name not in mdb.models.keys():
-    mdb.Model(name=model_name)
-model = mdb.models[model_name]
-if part_name in model.parts.keys():
-    del model.parts[part_name]
-
-step_geom = mdb.openStep(step_path, scaleFromFile=OFF)
-log("openStep OK; creating Part %s (merge=%s)" % (part_name, MERGE_SOLIDS))
-part_kwargs = dict(
-    name=part_name,
-    geometryFile=step_geom,
-    combine=MERGE_SOLIDS,
-    dimensionality=THREE_D,
-    type=DEFORMABLE_BODY,
-)
-if MERGE_SOLIDS:
-    part_kwargs["mergeSolidRegions"] = True
-model.PartFromGeometryFile(**part_kwargs)
-p = model.parts[part_name]
-log(
-    "Part %s: cells=%d faces=%d edges=%d"
-    % (part_name, len(p.cells), len(p.faces), len(p.edges))
-)
-if len(p.cells) == 0:
-    raise RuntimeError("Part has no cells after import: %s" % STEP_PATH)
-
-try:
-    p.removeRedundantEntities(vertexAndEdgeAccuracy=0.001, faceAngleTolerance=0.15)
-    log("removeRedundantEntities OK")
-except Exception as exc:
-    log("removeRedundantEntities skipped: %s" % exc)
-
-
 def apply_virtual_topology(part_obj):
     if not VIRTUAL_TOPOLOGY:
         return
@@ -274,11 +227,13 @@ def apply_virtual_topology(part_obj):
             )
             log("createVirtualTopology OK (minimal)")
         except Exception as exc2:
-            log("createVirtualTopology FAILED: %s" % exc2)
-            raise
+            # CAE often raises when no short edges / small faces exist - continue mesh.
+            log("createVirtualTopology skipped: %s" % exc2)
+            return
     except Exception as exc:
-        log("createVirtualTopology FAILED: %s" % exc)
-        raise
+        # e.g. "No entity to be ignored was found" / auto VT feature failure
+        log("createVirtualTopology skipped: %s" % exc)
+        return
     log(
         "virtual topology AFTER: faces=%d edges=%d"
         % (len(part_obj.faces), len(part_obj.edges))
@@ -632,6 +587,99 @@ def score_mesh(part_obj):
     p95 = aspects[int(0.95 * (len(aspects) - 1))]
     n_elem = len(part_obj.elements)
     return p95 + 0.15 * (n_elem / 1000000.0), p95
+
+if os.path.isfile(LOG_PATH):
+    os.remove(LOG_PATH)
+
+model_name = "Model-1"
+part_name = PART_NAME
+
+print("Import STEP:", STEP_PATH)
+log("Import STEP: %s" % STEP_PATH)
+log(
+    "Mesh config: mode=%s quality=%s seed=%.4g mm rod=%.4g mm vtopo=%s ignoreInvalid=%s seedPartOnly=%s"
+    % (
+        MESH_MODE,
+        MESH_QUALITY,
+        SEED_MM,
+        ROD_DIAMETER_MM,
+        VIRTUAL_TOPOLOGY,
+        IGNORE_INVALID,
+        SEED_PART_ONLY,
+    )
+)
+step_path = STEP_PATH.replace("\\", "/")
+
+for name in list(mdb.models.keys()):
+    if len(mdb.models) <= 1:
+        break
+    del mdb.models[name]
+log("Models after clear: %s" % list(mdb.models.keys()))
+
+if model_name not in mdb.models.keys():
+    mdb.Model(name=model_name)
+model = mdb.models[model_name]
+if part_name in model.parts.keys():
+    del model.parts[part_name]
+
+step_geom = mdb.openStep(step_path, scaleFromFile=OFF)
+log("openStep OK; creating Part %s (merge=%s)" % (part_name, MERGE_SOLIDS))
+part_kwargs = dict(
+    name=part_name,
+    geometryFile=step_geom,
+    combine=MERGE_SOLIDS,
+    dimensionality=THREE_D,
+    type=DEFORMABLE_BODY,
+)
+if MERGE_SOLIDS:
+    part_kwargs["mergeSolidRegions"] = True
+model.PartFromGeometryFile(**part_kwargs)
+p = model.parts[part_name]
+log(
+    "Part %s: cells=%d faces=%d edges=%d"
+    % (part_name, len(p.cells), len(p.faces), len(p.edges))
+)
+if len(p.cells) == 0:
+    raise RuntimeError("Part has no cells after import: %s" % STEP_PATH)
+
+try:
+    p.removeRedundantEntities(vertexAndEdgeAccuracy=0.001, faceAngleTolerance=0.15)
+    log("removeRedundantEntities OK")
+except Exception as exc:
+    log("removeRedundantEntities skipped: %s" % exc)
+
+# Inline Ignore Invalidity (Abaqus/CAE Python rejects mid-script nested def here).
+if IGNORE_INVALID:
+    if hasattr(p, "convertInvalidEntities"):
+        try:
+            p.convertInvalidEntities()
+            log("convertInvalidEntities OK")
+        except Exception as exc:
+            log("convertInvalidEntities skipped: %s" % exc)
+    _ignore_applied = False
+    _ignore_last = None
+    try:
+        p.geometryValidity = ON
+        log("Ignore Invalidity applied (geometryValidity=ON)")
+        _ignore_applied = True
+    except Exception as exc:
+        _ignore_last = exc
+    if not _ignore_applied:
+        try:
+            p.geometryValidity = True
+            log("Ignore Invalidity applied (geometryValidity=True)")
+            _ignore_applied = True
+        except Exception as exc:
+            _ignore_last = exc
+    if not _ignore_applied:
+        try:
+            p.setValues(geometryValidity=ON)
+            log("Ignore Invalidity applied (setValues)")
+            _ignore_applied = True
+        except Exception as exc:
+            _ignore_last = exc
+    if not _ignore_applied:
+        log("Ignore Invalidity could not set geometryValidity: %s" % _ignore_last)
 
 
 apply_virtual_topology(p)

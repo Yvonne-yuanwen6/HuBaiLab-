@@ -160,6 +160,27 @@ export function CaseDetailPage() {
           </Button>
         </Col>
         <Col>
+          <Button
+            disabled={!detail?.paths.inp}
+            onClick={() => {
+              void api
+                .addToQueue({
+                  slugs: [decoded],
+                  target: "remote",
+                  cpus: 48,
+                  memory_mb: 262144,
+                })
+                .then(() => {
+                  message.success("已加入仿真队列");
+                  navigate("/queue");
+                })
+                .catch((e) => message.error(String(e)));
+            }}
+          >
+            加入队列
+          </Button>
+        </Col>
+        <Col>
           <Button onClick={() => void api.syncRemote(decoded).then(() => refetchStatus())}>
             同步远程
           </Button>

@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +16,9 @@ class HuBaiAbaqusSettings:
     Q: float = 0.0
     Af: float = 2.0
     cells: int = 4
+    cell_size: float = 20.0
+    rod_diameter: float = 2.0
+    structure: str = ""  # "bcc" | "sfbls" | "" (infer from Q)
     cad_path: str = ""
     cae_seed_mm: float = 0.6
     cae_mesh_quality: str = "lattice_contact"
@@ -28,7 +30,7 @@ class HuBaiAbaqusSettings:
     profile: str = "fast"
     strain: float = 0.80
     load_rate_mm_min: float = 5.0
-    material_model: str = "paper"
+    material_model: str = "neo_hooke"
     contact_store_offsets: bool = True
     contact_settle: bool = True
     case_suffix: str = "cae_tet0p6mm80_5mmin_paperbox"
@@ -42,12 +44,25 @@ class HuBaiAbaqusSettings:
     submit_recover: bool = False
     submit_restart_from: str = ""
 
+    def _normalized_structure(self) -> str:
+        s = (self.structure or "").strip().lower()
+        if s in ("bcc", "sfbls"):
+            return s
+        return "bcc" if float(self.Q) <= 0.0 else "sfbls"
+
+    def _effective_Q(self) -> float:
+        s = self._normalized_structure()
+        if s == "bcc":
+            return 0.0
+        q = float(self.Q)
+        return q if q > 0.0 else 0.5
+
     def _generator(self) -> HuBaiLatticeGenerator:
         gen = HuBaiLatticeGenerator(
-            cell_size=20.0,
-            rod_diameter=2.0,
+            cell_size=float(self.cell_size),
+            rod_diameter=float(self.rod_diameter),
             amplitude=self.Af,
-            period_factor=self.Q,
+            period_factor=self._effective_Q(),
             n_segments=12,
         )
         gen.build_lattice(self.cells, self.cells, self.cells)
@@ -59,14 +74,14 @@ class HuBaiAbaqusSettings:
 
     def slug_preview(self) -> str:
         gen = self._generator()
-        L = 20.0
+        L = float(self.cell_size)
         nx = ny = nz = self.cells
         stroke_tag = "f"
         if self.slug_mode == "short":
             if self.short_slug.strip():
                 return self.short_slug.strip()
             return build_paperbox_short_slug(
-                period_factor=self.Q,
+                period_factor=self._effective_Q(),
                 element_type=self.cae_element_type,
                 seed_mm=self.cae_seed_mm,
                 rods_per_diameter=self.cae_rods_per_diameter,
@@ -86,11 +101,15 @@ class HuBaiAbaqusSettings:
         argv = [
             str(script),
             "--Q",
-            str(self.Q),
+            str(self._effective_Q()),
             "--Af",
             str(self.Af),
             "--cells",
             str(self.cells),
+            "--L",
+            str(self.cell_size),
+            "--rod-diameter",
+            str(self.rod_diameter),
             "--cae-seed",
             str(self.cae_seed_mm),
             "--cae-mesh-quality",
@@ -134,6 +153,8 @@ class HuBaiAbaqusSettings:
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
+        data["structure"] = self._normalized_structure()
+        data["Q"] = self._effective_Q()
         data["variant_name"] = self.variant_name
         data["slug_preview"] = self.slug_preview()
         return data
@@ -149,26 +170,29 @@ def list_presets() -> dict[str, dict[str, Any]]:
     return {
         "bcc_q0_baseline": HuBaiAbaqusSettings(
             Q=0.0,
+            structure="bcc",
             case_suffix="cae_tet0p6mm80_5mmin_paperbox",
             cae_seed_mm=0.6,
             strain=0.80,
             load_rate_mm_min=5.0,
-            material_model="paper",
+            material_model="neo_hooke",
             contact_store_offsets=True,
             contact_settle=True,
         ).to_dict(),
         "sfbls_q05_baseline": HuBaiAbaqusSettings(
             Q=0.5,
+            structure="sfbls",
             case_suffix="cae_tet0p6mm80_5mmin_paperbox",
             cae_seed_mm=0.6,
             strain=0.80,
             load_rate_mm_min=5.0,
-            material_model="paper",
+            material_model="neo_hooke",
             contact_store_offsets=True,
             contact_settle=True,
         ).to_dict(),
         "fast_test": HuBaiAbaqusSettings(
             Q=0.0,
+            structure="bcc",
             profile="fast",
             strain=0.45,
             load_rate_mm_min=15.0,

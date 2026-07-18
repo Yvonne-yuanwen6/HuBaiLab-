@@ -33,6 +33,31 @@ HU_BAI_YIELD_MPA = 4.69  # §2.3.2 tensile only; §2.4.1 FE未写屈服/塑性
 HU_BAI_DENSITY_KG_M3 = 1135.0  # §2.3.2 / §2.4.1
 HU_BAI_MESH_MM = 0.6  # §2.4.1 C3D4 global size
 
+# Canonical name: neo_hooke. Legacy aliases still accepted in CLI / old manifests.
+NEO_HOOKE_MATERIAL_ALIASES = frozenset(
+    {"neo_hooke", "paper", "hyperelastic", "neohooke", "neo-hooke"},
+)
+
+
+def is_neo_hooke_material(material_model: str | None) -> bool:
+    """True for Neo-Hooke and legacy paper/hyperelastic aliases."""
+    if material_model is None:
+        return False
+    key = str(material_model).strip().lower().replace("-", "_")
+    return key in NEO_HOOKE_MATERIAL_ALIASES
+
+
+def material_model_display_name(material_model: str | None) -> str | None:
+    """UI / tag label: paper & hyperelastic → Neo-Hooke."""
+    if material_model is None:
+        return None
+    raw = str(material_model).strip()
+    if not raw:
+        return None
+    if is_neo_hooke_material(raw):
+        return "Neo-Hooke"
+    return raw
+
 
 def hu_bai_neo_hooke_c10(e_mpa: float = HU_BAI_E_MODULUS_MPA, nu: float = HU_BAI_POISSON) -> float:
     """Neo-Hooke C10 from small-strain modulus (soft TPU: E ≈ 6·C10 when nu ≈ 0.5)."""
@@ -174,8 +199,15 @@ class CompressionSettings:
     # 幅值曲线：前段保持 0 再线性加载（占总步长比例，减轻冲击）
     amplitude_hold_fraction: float = 0.4
     # 准静态显式：*Fixed Mass Scaling（None=不写；勿用 *Mass Scaling，CAE 无法识别）
+    # mode:
+    #   none      — 不写质量缩放
+    #   uniform   — 全场乘 factor（可预期的惯性放大，推荐做 KE/IE 扫参）
+    #   below_min — 按目标 dt 抬质量（大 dt 目标会极度增质，易假准静态失败）
+    explicit_mass_scaling_mode: str = "below_min"
     explicit_mass_scaling_factor: float | None = None
-    # True：仅 type=BELOW MIN + dt（与 factor 二选一，更稳）
+    # below_min 目标稳定步长；None → 用 explicit_dt
+    explicit_mass_scaling_dt: float | None = None
+    # 兼容旧字段：True 等价于 mode=below_min 且不写 factor
     explicit_mass_scaling_dt_only: bool = True
     # 顶面全部节点的 History（RF/U）会在 CAE 中产生数千条记录，默认关闭
     history_lattice_top_nodes: bool = False
@@ -788,14 +820,35 @@ def _write_explicit_dynamic_block(
     dt = settings.resolved_explicit_dt()
     dt_mode = (settings.explicit_dt_mode or "fixed").lower()
     ms = settings.explicit_mass_scaling_factor
+    mode = (settings.explicit_mass_scaling_mode or "below_min").strip().lower()
+    ms_dt = (
+        float(settings.explicit_mass_scaling_dt)
+        if settings.explicit_mass_scaling_dt is not None
+        else float(dt)
+    )
+
     mass_line = ""
-    if settings.explicit_mass_scaling_dt_only:
-        mass_line = f"*Fixed Mass Scaling, type=BELOW MIN, dt={dt:.12g}\n"
-    elif ms is not None and ms > 0.0:
-        mass_line = (
-            f"*Fixed Mass Scaling, elset=ALLSOLID, factor={ms:.12g}, "
-            f"type=BELOW MIN, dt={dt:.12g}\n"
+    if mode in ("", "none", "off"):
+        mass_line = ""
+    elif mode == "uniform":
+        if ms is None or ms <= 0.0:
+            raise ValueError("uniform mass scaling requires explicit_mass_scaling_factor > 0")
+        mass_line = f"*Fixed Mass Scaling, elset=ALLSOLID, factor={ms:.12g}\n"
+    elif mode in ("below_min", "belowmin", "dt"):
+        # Legacy dt_only=True: BELOW MIN without factor (even if factor is set)
+        if settings.explicit_mass_scaling_dt_only or ms is None or ms <= 0.0:
+            mass_line = f"*Fixed Mass Scaling, type=BELOW MIN, dt={ms_dt:.12g}\n"
+        else:
+            mass_line = (
+                f"*Fixed Mass Scaling, elset=ALLSOLID, factor={ms:.12g}, "
+                f"type=BELOW MIN, dt={ms_dt:.12g}\n"
+            )
+    else:
+        raise ValueError(
+            f"Unknown explicit_mass_scaling_mode={mode!r} "
+            "(expected none|uniform|below_min)"
         )
+
     if dt_mode in ("automatic", "auto", "adaptive"):
         f.write(
             f"** Explicit automatic dt (limit {dt:.6g}s); step {step_time:.12g}s\n"
@@ -809,6 +862,8 @@ def _write_explicit_dynamic_block(
             f"*Dynamic, Explicit, direct user control\n"
             f"{dt:.12g}, {step_time:.12g}\n"
         )
+    if mass_line:
+        f.write(f"** mass_scaling mode={mode}\n")
     f.write(
         f"{mass_line}*Bulk Viscosity\n"
         f"{settings.bulk_viscosity_linear:.12g}, {settings.bulk_viscosity_quadratic:.12g}\n"

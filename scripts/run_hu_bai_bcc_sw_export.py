@@ -1,7 +1,7 @@
 """
 Export Hu & Bai 2024 BCC / SFBLS as STL + Parasolid X_T for SolidWorks.
 
-Default (--fast): merged cylinder + junction sphere mesh, no boolean union (fast).
+Default (--fast): merged cylinder mesh, no boolean union (fast).
 Optional (--union): single watertight body via trimesh boolean (slow; needs trimesh).
 
 Also writes fused STEP + Parasolid X_T: gmsh STEP (single body) → SolidWorks COM Save As *.x_t.
@@ -146,7 +146,7 @@ if _args.union:
         paths["cad_stl"],
         polylines=polylines,
         resolution=RESOLUTION,
-        junction_spheres=True,
+        junction_spheres=False,
     )
     stats["export_mode"] = "union"
 else:
@@ -158,7 +158,7 @@ else:
         n_theta=RESOLUTION,
         n_sphere_lat=max(6, RESOLUTION // 2),
         n_sphere_lon=RESOLUTION,
-        junction_spheres=True,
+        junction_spheres=False,
     )
     stats["export_mode"] = "concat"
 
@@ -193,7 +193,7 @@ if not _args.skip_xt:
             beams,
             paths["cad_xt"],
             polylines=polylines,
-            junction_spheres=True,
+            junction_spheres=False,
             fuse=step_fuse,
             keep_step=True,
             step_path=paths["cad_step"],

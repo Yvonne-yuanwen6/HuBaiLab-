@@ -6,12 +6,31 @@ User-facing Web UI docs (keep in sync when changing routes/UI):
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import abaqus_cases, abaqus_export, abaqus_jobs, abaqus_post, abaqus_trash, tasks
+from api.routers import (
+    abaqus_cad,
+    abaqus_cases,
+    abaqus_export,
+    abaqus_jobs,
+    abaqus_post,
+    abaqus_queue,
+    abaqus_trash,
+    tasks,
+)
+from api.services import queue_manager
 
-app = FastAPI(title="HuBaiLab API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    queue_manager.ensure_worker()
+    yield
+
+
+app = FastAPI(title="HuBaiLab API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,13 +46,22 @@ def health() -> dict:
     return {
         "status": "ok",
         "api_version": "0.1.0",
-        "features": ["sync-output", "case-list-wrapper", "discover-remote"],
+        "features": [
+            "sync-output",
+            "case-list-wrapper",
+            "discover-remote",
+            "cad-generate",
+            "mesh",
+            "sim-queue",
+        ],
     }
 
 
 app.include_router(abaqus_cases.router)
 app.include_router(abaqus_jobs.router)
 app.include_router(abaqus_export.router)
+app.include_router(abaqus_cad.router)
+app.include_router(abaqus_queue.router)
 app.include_router(abaqus_post.router)
 app.include_router(abaqus_trash.router)
 app.include_router(tasks.router)
