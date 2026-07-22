@@ -66,10 +66,15 @@ def export_single_strut_raw(
     rod_diameter: float = 2.0,
     amplitude: float = 2.0,
     out_path: str,
+    solid_profile: str = "circle",
+    ellipse_minor_ratio: float = 1.0,
+    compression_axis: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    ellipse_align_to_compression: str = "minor",
 ) -> dict:
     """Export one full pipe sweep (no octant box cut) for CAD inspection."""
     import gmsh
 
+    profile = str(solid_profile or "circle").strip().lower()
     gen = HuBaiLatticeGenerator(
         cell_size=float(cell_size_mm),
         rod_diameter=float(rod_diameter),
@@ -86,8 +91,12 @@ def export_single_strut_raw(
         junction_spheres=False,
         trim_for_junctions=False,
         polyline_sweep="pipe",
+        solid_profile=profile,
+        ellipse_minor_ratio=float(ellipse_minor_ratio),
+        compression_axis=tuple(compression_axis),
+        ellipse_align_to_compression=str(ellipse_align_to_compression or "minor"),
     )
-    pipes = [p for p in pipes_only if p[0] == "pipe"]
+    pipes = [p for p in pipes_only if p[0] in ("pipe", "pipe_ellipse")]
     if not pipes:
         raise ValueError("No pipe primitives.")
     idx = int(strut_index)
@@ -213,8 +222,13 @@ def export_single_strut_aligned_octant_cut_step(
     both_end_extension: bool = True,
     centre_extension_mm: float | None = None,
     corner_extension_mm: float | None = None,
+    solid_profile: str = "circle",
+    ellipse_minor_ratio: float = 1.0,
+    compression_axis: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    ellipse_align_to_compression: str = "minor",
 ) -> dict:
     """Export one cell-frame aligned octant-cut strut (after intersect + virtual-box align)."""
+    profile = str(solid_profile or "circle").strip().lower()
     gen = HuBaiLatticeGenerator(
         cell_size=float(cell_size_mm),
         rod_diameter=float(rod_diameter),
@@ -231,9 +245,17 @@ def export_single_strut_aligned_octant_cut_step(
         junction_spheres=False,
         trim_for_junctions=False,
         polyline_sweep="pipe",
+        solid_profile=profile,
+        ellipse_minor_ratio=float(ellipse_minor_ratio),
+        compression_axis=tuple(compression_axis),
+        ellipse_align_to_compression=str(ellipse_align_to_compression or "minor"),
     )
-    pipes = [p for p in pipes_only if p[0] == "pipe"]
+    pipes = [p for p in pipes_only if p[0] in ("pipe", "pipe_ellipse")]
+    if not pipes:
+        raise ValueError("No pipe primitives.")
     idx = int(strut_index)
+    if idx < 1 or idx > len(pipes):
+        raise ValueError(f"--strut must be 1..{len(pipes)}, got {idx}")
     part = pipes[idx - 1]
     rod_radius = 0.5 * float(rod_diameter)
     centre_ext = (
@@ -760,7 +782,30 @@ def main() -> int:
         default="",
         help="Export aligned octant-cut strut STEP (cell frame) to this path and exit",
     )
+    p.add_argument(
+        "--solid-profile",
+        choices=("circle", "ellipse"),
+        default="circle",
+        help="Cross-section profile (ellipse uses --ellipse-minor-ratio)",
+    )
+    p.add_argument(
+        "--ellipse-minor-ratio",
+        type=float,
+        default=1.0,
+        help="Minor/major diameter ratio for ellipse (batch κ uses 1/κ)",
+    )
+    p.add_argument(
+        "--ellipse-align",
+        choices=("minor", "major"),
+        default="minor",
+        help="Which ellipse axis aligns to compression (default: minor=ellmin)",
+    )
     args = p.parse_args()
+
+    profile = str(args.solid_profile or "circle").strip().lower()
+    minor_ratio = float(args.ellipse_minor_ratio)
+    align = str(args.ellipse_align or "minor")
+    compression = (0.0, 0.0, 1.0)
 
     if args.aligned_cut_out:
         report = export_single_strut_aligned_octant_cut_step(
@@ -774,6 +819,10 @@ def main() -> int:
             both_end_extension=args.both_end_extension or True,
             centre_extension_mm=args.centre_extension_mm,
             corner_extension_mm=args.corner_extension_mm,
+            solid_profile=profile,
+            ellipse_minor_ratio=minor_ratio,
+            compression_axis=compression,
+            ellipse_align_to_compression=align,
         )
         print(f"Wrote: {report['step_path']}", flush=True)
         return 0
@@ -794,8 +843,12 @@ def main() -> int:
         junction_spheres=False,
         trim_for_junctions=False,
         polyline_sweep="pipe",
+        solid_profile=profile,
+        ellipse_minor_ratio=minor_ratio,
+        compression_axis=compression,
+        ellipse_align_to_compression=align,
     )
-    pipes = [p for p in pipes_only if p[0] == "pipe"]
+    pipes = [p for p in pipes_only if p[0] in ("pipe", "pipe_ellipse")]
 
     if args.list:
         print(f"{gen.variant_name}  struts={len(pipes)}", flush=True)
@@ -870,6 +923,10 @@ def main() -> int:
                 rod_diameter=float(args.rod_d),
                 amplitude=float(args.Af),
                 out_path=out_path,
+                solid_profile=profile,
+                ellipse_minor_ratio=minor_ratio,
+                compression_axis=compression,
+                ellipse_align_to_compression=align,
             )
         else:
             suffix = "octant" if args.cell_frame else "octant_at_origin"
@@ -887,6 +944,12 @@ def main() -> int:
                 out_path=out_path,
                 origin_assembly=not args.cell_frame,
                 centre_extension_mm=args.centre_extension_mm,
+                corner_extension_mm=args.corner_extension_mm,
+                both_end_extension=bool(args.both_end_extension) or True,
+                solid_profile=profile,
+                ellipse_minor_ratio=minor_ratio,
+                compression_axis=compression,
+                ellipse_align_to_compression=align,
             )
 
         meta_path = os.path.splitext(out_path)[0] + "_meta.json"

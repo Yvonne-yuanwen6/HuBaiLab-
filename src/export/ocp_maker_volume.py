@@ -151,3 +151,97 @@ def ocp_sew_faces_then_maker_volume(
 
 def gate_mass_ok(got: float, expected: float, *, lo: float = 0.85, hi: float = 1.15) -> bool:
     return expected > 0.0 and lo <= got / expected <= hi
+
+
+def ocp_make_connected(
+    shapes: list[Any],
+    *,
+    fuzzy_mm: float = 0.05,
+    label: str = "make-connected",
+) -> tuple[Any, dict[str, Any]]:
+    """Glue coinciding geometry via BOPAlgo_MakeConnected (OCC docs path)."""
+    from OCP.BOPAlgo import BOPAlgo_MakeConnected
+    from OCP.TopTools import TopTools_ListOfShape
+
+    if not shapes:
+        raise RuntimeError(f"{label}: no shapes")
+    args = TopTools_ListOfShape()
+    for sh in shapes:
+        args.Append(sh)
+    mc = BOPAlgo_MakeConnected()
+    mc.SetArguments(args)
+    if fuzzy_mm > 0.0:
+        mc.SetFuzzyValue(float(fuzzy_mm))
+    mc.SetRunParallel(True)
+    print(
+        f"  {label}: MakeConnected n={len(shapes)} fuzzy={fuzzy_mm:g}",
+        flush=True,
+    )
+    mc.Perform()
+    if mc.HasErrors():
+        raise RuntimeError(f"{label}: MakeConnected HasErrors")
+    result = mc.Shape()
+    report = {
+        "method": "BOPAlgo_MakeConnected",
+        "n_input": len(shapes),
+        "fuzzy_mm": float(fuzzy_mm),
+        "mass_mm3": float(ocp_mass(result)),
+        "topology": ocp_shape_topology(result),
+    }
+    print(
+        f"  {label}: mass={report['mass_mm3']:.1f} topo={report['topology']}",
+        flush=True,
+    )
+    return result, report
+
+
+def ocp_make_periodic_repeat(
+    shape: Any,
+    *,
+    period_mm: float,
+    nx: int = 4,
+    ny: int = 4,
+    nz: int = 4,
+    fuzzy_mm: float = 0.05,
+    label: str = "make-periodic",
+) -> tuple[Any, dict[str, Any]]:
+    """Make shape periodic in XYZ then X/Y/ZRepeat to nx×ny×nz (OCC lattice path)."""
+    from OCP.BOPAlgo import BOPAlgo_MakePeriodic
+
+    p = float(period_mm)
+    mp = BOPAlgo_MakePeriodic()
+    mp.SetShape(shape)
+    if fuzzy_mm > 0.0:
+        mp.SetFuzzyValue(float(fuzzy_mm))
+    mp.MakeXPeriodic(True, p)
+    mp.MakeYPeriodic(True, p)
+    mp.MakeZPeriodic(True, p)
+    # Do NOT trim: paper-box seeds overhang the L³ box; trimming destroys mass.
+    mp.SetXTrimmed(False)
+    mp.SetYTrimmed(False)
+    mp.SetZTrimmed(False)
+    print(
+        f"  {label}: MakePeriodic L={p:g} (no-trim) then Repeat "
+        f"+({int(nx) - 1},{int(ny) - 1},{int(nz) - 1})",
+        flush=True,
+    )
+    mp.Perform()
+    if mp.HasErrors():
+        raise RuntimeError(f"{label}: MakePeriodic HasErrors")
+    # Repeat returns the repeated shape; times = additional copies
+    result = mp.XRepeat(int(nx) - 1)
+    result = mp.YRepeat(int(ny) - 1)
+    result = mp.ZRepeat(int(nz) - 1)
+    report = {
+        "method": "BOPAlgo_MakePeriodic+XYZRepeat",
+        "period_mm": p,
+        "cells": [int(nx), int(ny), int(nz)],
+        "fuzzy_mm": float(fuzzy_mm),
+        "mass_mm3": float(ocp_mass(result)),
+        "topology": ocp_shape_topology(result),
+    }
+    print(
+        f"  {label}: mass={report['mass_mm3']:.1f} topo={report['topology']}",
+        flush=True,
+    )
+    return result, report

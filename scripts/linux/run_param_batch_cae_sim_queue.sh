@@ -17,8 +17,14 @@
 #   BATCH_SIM_FORCE_REMESH=1
 #   BATCH_SIM_SKIP_BASELINE=1   # skip lattice_contact+vtopo baseline; still try other seed-0.6
 #                               # ladder steps first (auto=1 when FORCE_REMESH=1 unless set to 0)
+#   BATCH_SIM_MESH_PROTOCOL=1   # unified comparable mesh: OCP+Gmsh STEP heal + only
+#                               # seed0.6 + fast + virtual-topology (no quality/seed ladder)
 #   BATCH_SIM_ALLOW_SOLVE_RETRY=0   # if 1, allow re-submit after solve crash (default: skip)
 #   BATCH_SIM_IGNORE_PAUSE=1        # ignore _batch_sim_paused.json and run anyway
+#   BATCH_HEAL_TIMEOUT_S=2400       # total heal wall budget (0=unlimited)
+#   BATCH_HEAL_PRESET_TIMEOUT_S=900 # per-preset heal kill budget
+#   BATCH_HEAL_OCP_PREREPAIR=1      # OCP ShapeFix before gmsh presets (default on)
+#   BATCH_SIM_FORCE_HEAL=1          # re-heal even if prior used_heal report exists
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -36,17 +42,28 @@ POLL_SEC="${BATCH_SIM_POLL_SEC:-45}"
 FORCE_REMESH="${BATCH_SIM_FORCE_REMESH:-0}"
 EXPORT_ONLY="${BATCH_SIM_EXPORT_ONLY:-0}"
 SUBMIT_ONLY="${BATCH_SIM_SUBMIT_ONLY:-0}"
+# Unified mesh protocol for cross-case comparability (heal + single CAE setting).
+MESH_PROTOCOL="${BATCH_SIM_MESH_PROTOCOL:-0}"
 # Default: never re-submit a case whose previous Abaqus solve already exited with errors.
 ALLOW_SOLVE_RETRY="${BATCH_SIM_ALLOW_SOLVE_RETRY:-0}"
 ONLY="${BATCH_SIM_ONLY:-}"
+FORCE_HEAL="${BATCH_SIM_FORCE_HEAL:-0}"
+export BATCH_HEAL_TIMEOUT_S="${BATCH_HEAL_TIMEOUT_S:-2400}"
+export BATCH_HEAL_PRESET_TIMEOUT_S="${BATCH_HEAL_PRESET_TIMEOUT_S:-900}"
+export BATCH_SIM_FORCE_HEAL="$FORCE_HEAL"
 # Remesh often hits fragile BREPs; default skip the known-bad baseline when forcing remesh.
 if [[ -z "${BATCH_SIM_SKIP_BASELINE:-}" && "$FORCE_REMESH" == "1" ]]; then
+  export BATCH_SIM_SKIP_BASELINE=1
+fi
+# Protocol mode implies skip multi-strategy baseline/ladder.
+if [[ "$MESH_PROTOCOL" == "1" ]]; then
   export BATCH_SIM_SKIP_BASELINE=1
 fi
 export BATCH_SIM_ONLY="$ONLY"
 export BATCH_SIM_CPUS="$CPUS"
 export BATCH_SIM_MEMORY_MB="$MEM"
 export BATCH_SIM_RUN_SLUG="$RUN_SLUG"
+export BATCH_SIM_MESH_PROTOCOL="$MESH_PROTOCOL"
 
 PAUSE_FILE="output/export/${BATCH_NAME}/_batch_sim_paused.json"
 if [[ -f "$PAUSE_FILE" && "${BATCH_SIM_IGNORE_PAUSE:-0}" != "1" ]]; then
@@ -210,6 +227,14 @@ job_completed() {
   sta="$(sta_path "$1")"
   [[ -f "$sta" ]] && grep -q 'THE ANALYSIS HAS COMPLETED SUCCESSFULLY' "$sta"
 }
+# Lock-file collisions from a double-submit are NOT real solve failures.
+job_lock_collision() {
+  local cid="$1"
+  local slog
+  slog="$(job_dir "$cid")/${RUN_SLUG}_submit.log"
+  [[ -f "$slog" ]] && grep -q 'Detected lock file' "$slog" 2>/dev/null
+}
+
 # True when a previous solve finished unsuccessfully (no .lck, not success).
 # Used to prevent infinite re-submit loops (e.g. Excessive distortion crashes).
 job_failed() {
@@ -217,6 +242,8 @@ job_failed() {
   local jd sta slog
   job_running "$cid" && return 1
   job_completed "$cid" && return 1
+  # Double-submit race: second launch dies on .lck — allow a clean retry.
+  job_lock_collision "$cid" && return 1
   jd="$(job_dir "$cid")"
   sta="$jd/${RUN_SLUG}.sta"
   slog="$jd/${RUN_SLUG}_submit.log"
@@ -244,13 +271,27 @@ job_fail_reason() {
     snip="$(grep -E 'Excessive distortion|THE ANALYSIS HAS BEEN ABORTED|exited with an error|exited with errors' "$sta" 2>/dev/null | tail -1 | tr -s ' ' | cut -c1-100 || true)"
   fi
   if [[ -z "$snip" && -f "$slog" ]]; then
-    snip="$(grep -E 'Excessive distortion|exited with an error|exited with errors' "$slog" 2>/dev/null | tail -1 | tr -s ' ' | cut -c1-100 || true)"
+    snip="$(grep -E 'Excessive distortion|exited with an error|exited with errors|Detected lock file' "$slog" 2>/dev/null | tail -1 | tr -s ' ' | cut -c1-100 || true)"
   fi
   if [[ -n "$snip" ]]; then
     echo "solve failed: $snip"
   else
     echo "solve failed (Abaqus exited with errors)"
   fi
+}
+
+# Wipe a job dir that only failed due to .lck collision (tiny/no real progress).
+clear_lock_collision_job() {
+  local cid="$1" jd
+  job_lock_collision "$cid" || return 1
+  job_running "$cid" && return 1
+  job_completed "$cid" && return 1
+  jd="$(job_dir "$cid")"
+  log "CLEAR lock-collision job dir $cid"
+  rm -rf "$jd"
+  mkdir -p "$jd"
+  unset "LAUNCHED[$cid]" || true
+  return 0
 }
 reap_failed_jobs() {
   [[ "$ALLOW_SOLVE_RETRY" == "1" ]] && return 0
@@ -308,9 +349,155 @@ p.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="ut
 PY
 }
 
+# Official comparable protocol: OCP ShapeFix + Gmsh OCC heal (mass gate) then one CAE setting.
+# Skip re-heal only when a prior successful used_heal report exists (failed attempts re-run).
+heal_cad_for_protocol() {
+  # Writes healed path to $3 (out var file); returns 0 if a path was decided.
+  local cid="$1" src="$2" out_path_file="$3"
+  local heal_dir="$VERIFIED/heal_${cid}"
+  local skip_reason_file
+  mkdir -p "$heal_dir"
+  rm -f "$out_path_file"
+
+  if [[ "${BATCH_SIM_FORCE_HEAL:-0}" != "1" ]]; then
+    skip_reason_file="$(mktemp)"
+    if BATCH_SIM_HEAL_CID="$cid" BATCH_SIM_HEAL_SKIP_OUT="$skip_reason_file" \
+        "$PY" - <<'PY' >/dev/null 2>&1
+import os, sys
+from pathlib import Path
+from src.export.step_heal_for_cae import should_skip_cae_heal
+
+cid = os.environ["BATCH_SIM_HEAL_CID"]
+out = Path(os.environ["BATCH_SIM_HEAL_SKIP_OUT"])
+skip, reason = should_skip_cae_heal(cid)
+out.write_text(reason + "\n", encoding="utf-8")
+sys.exit(0 if skip else 1)
+PY
+    then
+      reason="$(tr -d '\r\n' <"$skip_reason_file")"
+      # Prefer prior healed STEP when used_heal; else verified raw.
+      reuse="$src"
+      if [[ -f "$heal_dir/healed_path.txt" ]]; then
+        cand="$(tr -d '\r\n' <"$heal_dir/healed_path.txt")"
+        if [[ -n "$cand" && -f "$cand" ]]; then
+          reuse="$cand"
+        fi
+      fi
+      log "HEAL SKIP $cid :: $reason -> $reuse"
+      printf '%s\n' "$reuse" >"$out_path_file"
+      # Do not clobber a real prior heal_report.json (used_heal / attempts).
+      if [[ ! -f "$heal_dir/heal_report.json" ]] \
+          || ! grep -qE '"used_heal": true|"attempts"' "$heal_dir/heal_report.json" 2>/dev/null; then
+        printf '%s\n' "$reuse" >"$heal_dir/healed_path.txt"
+        BATCH_SIM_HEAL_DIR="$heal_dir" BATCH_SIM_HEAL_SKIP_OUT="$skip_reason_file" \
+          BATCH_SIM_HEAL_REUSE="$reuse" "$PY" - <<'PY' >/dev/null 2>&1 || true
+import json, os
+from pathlib import Path
+reason = Path(os.environ["BATCH_SIM_HEAL_SKIP_OUT"]).read_text(encoding="utf-8").strip()
+rep = {
+    "used_heal": False,
+    "skipped_cae_heal": True,
+    "reason": reason,
+    "reuse_step": os.environ.get("BATCH_SIM_HEAL_REUSE", ""),
+}
+Path(os.environ["BATCH_SIM_HEAL_DIR"], "heal_report.json").write_text(
+    json.dumps(rep, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+)
+PY
+      else
+        # Keep existing report; only refresh path pointer for this run.
+        printf '%s\n' "$reuse" >"$heal_dir/healed_path.txt"
+      fi
+      rm -f "$skip_reason_file"
+      return 0
+    fi
+    rm -f "$skip_reason_file"
+  fi
+
+  log "HEAL STEP $cid (structure-preserving v3: light sew/ShapeFix or KEEP verified raw; mass∈[0.98,1.02] face∈[0.92,1.08]; timeout=${BATCH_HEAL_TIMEOUT_S}s / preset=${BATCH_HEAL_PRESET_TIMEOUT_S}s)"
+  local t0 t1
+  t0="$(date +%s)"
+  if ! BATCH_SIM_HEAL_SRC="$src" BATCH_SIM_HEAL_DIR="$heal_dir" BATCH_SIM_HEAL_CID="$cid" \
+      "$PY" - <<'PY' >>"$LOG" 2>&1
+import json, os
+from pathlib import Path
+from src.export.step_heal_for_cae import heal_step_for_cae
+
+src = os.environ["BATCH_SIM_HEAL_SRC"]
+out_dir = os.environ["BATCH_SIM_HEAL_DIR"]
+cid = os.environ["BATCH_SIM_HEAL_CID"]
+healed, rep = heal_step_for_cae(
+    src,
+    out_dir,
+    basename=f"batch_{cid}",
+    stop_on_first_ok=True,
+)
+Path(out_dir, "heal_report.json").write_text(
+    json.dumps(rep, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+)
+Path(out_dir, "healed_path.txt").write_text(healed + "\n", encoding="utf-8")
+print(
+    f"  heal done used={rep.get('used_heal')} preset={rep.get('preset')} "
+    f"elapsed_s={rep.get('elapsed_s')} timed_out={rep.get('timed_out')}",
+    flush=True,
+)
+PY
+  then
+    return 1
+  fi
+  t1="$(date +%s)"
+  log "HEAL WALL $cid $((t1 - t0))s"
+  if [[ -f "$heal_dir/healed_path.txt" ]]; then
+    cp -f "$heal_dir/healed_path.txt" "$out_path_file"
+    return 0
+  fi
+  return 1
+}
+
+mesh_protocol_only() {
+  # Returns 0 if mesh written; uses healed STEP when heal succeeds (else raw verified).
+  local cid="$1" step="$2" out="$3" deq="$4"
+  local mesh_step="$step"
+  local path_file
+  local t_mesh0 t_mesh1
+  path_file="$(mktemp)"
+  fill_submit_slots || true
+  if heal_cad_for_protocol "$cid" "$step" "$path_file"; then
+    mesh_step="$(tr -d '\r\n' <"$path_file")"
+    if [[ -n "$mesh_step" && -f "$mesh_step" && "$mesh_step" != "$step" ]]; then
+      log "HEAL OK $cid -> $mesh_step"
+    else
+      log "HEAL kept original STEP $cid (no accepted preset / skipped / identity)"
+      mesh_step="$step"
+    fi
+  else
+    log "WARN heal failed $cid; using raw STEP"
+    mesh_step="$step"
+  fi
+  rm -f "$path_file"
+  log "CAE PROTOCOL $cid: seed0.6 quality=fast virtual-topology (no ladder)"
+  t_mesh0="$(date +%s)"
+  rm -f "$out"
+  if bash scripts/linux/run_abaqus_cae_mesh.sh \
+      --step "$mesh_step" --out "$out" --mesh-mode tet \
+      --part-name LATTICE --element-type C3D4 --rods-per-diameter 3.0 \
+      --seed 0.6 --mesh-quality fast --virtual-topology \
+      --rod-diameter "${deq}" >>"$LOG" 2>&1; then
+    if [[ -f "$out" && "$(wc -c <"$out" | tr -d ' ')" -gt 1000000 ]]; then
+      t_mesh1="$(date +%s)"
+      log "CAE PROTOCOL SUCCESS $cid wall=$((t_mesh1 - t_mesh0))s -> $out"
+      return 0
+    fi
+  fi
+  t_mesh1="$(date +%s)"
+  log "CAE PROTOCOL FAIL $cid wall=$((t_mesh1 - t_mesh0))s (0 elems / mesh error)"
+  return 1
+}
+
 # CAE strategy ladder (no gmsh). Policy: keep seed 0.6 for cross-case comparability.
 # Vary quality / vtopo / seed-part-only first; only enlarge seed if all 0.6 tries fail.
 # When baseline (lattice_contact+vtopo @0.6) already failed, do NOT put that combo as try#1.
+# Disabled when BATCH_SIM_MESH_PROTOCOL=1.
 mesh_ladder() {
   local cid="$1" step="$2" out="$3" deq="$4"
   local -a tries=(
@@ -458,6 +645,16 @@ mesh_one() {
     return 0
   fi
 
+  # Unified comparable protocol: heal + seed0.6/fast/vtopo only (no strategy ladder).
+  if [[ "$MESH_PROTOCOL" == "1" ]]; then
+    unset_case_roots
+    if mesh_protocol_only "$cid" "$verified" "$mesh_inp" "$deq"; then
+      start_export_bg "$cid" "$Af" "$Q" "$deq" "$verified" "$mesh_inp"
+      return 0
+    fi
+    return 1
+  fi
+
   if [[ "${BATCH_SIM_SKIP_BASELINE:-0}" != "1" ]]; then
     log "CAE AUTO MESH $cid Af=$Af Q=$Q deq=$deq (baseline)"
     local -a base_args=(
@@ -508,6 +705,7 @@ export_one() { mesh_one "$@"; }
 
 submit_one() {
   local cid="$1"
+  local i
   if [[ -n "${SKIPPED[$cid]:-}" ]]; then
     return 0
   fi
@@ -519,6 +717,13 @@ submit_one() {
     log "SKIP submit (running) $cid"
     return 0
   fi
+  # Prevent double-submit before .lck appears (bg export reap + main loop race).
+  if [[ -n "${LAUNCHED[$cid]:-}" ]]; then
+    log "SKIP submit (already launched) $cid"
+    return 0
+  fi
+  # Auto-heal prior lock-file collision, then allow one clean submit.
+  clear_lock_collision_job "$cid" || true
   if [[ "$ALLOW_SOLVE_RETRY" != "1" ]] && job_failed "$cid"; then
     mark_skip "$cid" "$(job_fail_reason "$cid")"
     return 0
@@ -527,6 +732,8 @@ submit_one() {
     return 1
   fi
   case_roots "$cid"
+  # Reserve slot BEFORE spawning so concurrent fill_submit_slots cannot double-fire.
+  LAUNCHED["$cid"]=1
   log "SUBMIT $cid cpus=$CPUS mem=$MEM"
   if ! bash scripts/linux/submit_job.sh \
       --slug "$RUN_SLUG" \
@@ -534,10 +741,25 @@ submit_one() {
       --memory-mb "$MEM" \
       --background >>"$LOG" 2>&1; then
     log "ERROR submit failed $cid (will retry later)"
+    unset "LAUNCHED[$cid]" || true
     unset_case_roots
     return 1
   fi
-  LAUNCHED["$cid"]=1
+  # Wait briefly for .lck so the next fill_submit_slots sees the job as running.
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    job_running "$cid" && break
+    sleep 1
+  done
+  if ! job_running "$cid"; then
+    if job_lock_collision "$cid"; then
+      log "WARN submit hit lock collision $cid — clearing for later retry"
+      clear_lock_collision_job "$cid" || true
+      unset "LAUNCHED[$cid]" || true
+      unset_case_roots
+      return 1
+    fi
+    log "WARN submit returned but no .lck yet $cid (keeping LAUNCHED guard)"
+  fi
   unset_case_roots
   return 0
 }
@@ -546,6 +768,9 @@ count_running() {
   local n=0 cid
   for cid in "${READY[@]}"; do
     if job_running "$cid" && ! job_completed "$cid"; then
+      n=$((n + 1))
+    elif [[ -n "${LAUNCHED[$cid]:-}" ]] && ! job_completed "$cid" && ! job_failed "$cid"; then
+      # Count in-flight launches that have not yet written .lck.
       n=$((n + 1))
     fi
   done
@@ -561,13 +786,12 @@ fill_submit_slots() {
     [[ -n "${SKIPPED[$cid]:-}" ]] && continue
     job_completed "$cid" && continue
     job_running "$cid" && continue
+    [[ -n "${LAUNCHED[$cid]:-}" ]] && continue
     inp_ready "$cid" || continue
     [[ "$running" -ge "$MAX_PARALLEL" ]] && break
     if submit_one "$cid"; then
-      # submit_one returns 0 also for skip/completed; only bump when newly launched
-      if job_running "$cid"; then
+      if job_running "$cid" || [[ -n "${LAUNCHED[$cid]:-}" ]]; then
         running=$((running + 1))
-        sleep 3
       fi
     fi
   done

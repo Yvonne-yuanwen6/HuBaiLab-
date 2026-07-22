@@ -11,8 +11,19 @@ $ErrorActionPreference = "Continue"
 
 $Remote = $HuBaiRemoteHost
 $Root = $HuBaiRemoteRoot
-$Script = "$Root/scripts/linux/_tmp_monitor_param_batch_cae_sim.sh"
 
 Write-Host "SSH monitor: $Remote  INTERVAL=$IntervalSec  (Ctrl+C to stop)" -ForegroundColor Cyan
+# Prefer /tmp/_mon.sh when NFS scripts/ is stalled by large ODBs under jobs/.
 # -t allocates a TTY so clear / cursor hide work like the STEP batch monitor
-ssh -t -o BatchMode=yes -o ConnectTimeout=15 $Remote "INTERVAL=$IntervalSec bash $Script"
+$remoteCmd = @"
+INTERVAL=$IntervalSec
+if [ -f /tmp/_mon.sh ]; then
+  bash /tmp/_mon.sh
+elif [ -f $Root/scripts/linux/_tmp_monitor_param_batch_cae_sim.sh ]; then
+  bash $Root/scripts/linux/_tmp_monitor_param_batch_cae_sim.sh
+else
+  echo 'monitor script missing' >&2
+  exit 1
+fi
+"@
+ssh -t -o BatchMode=yes -o ConnectTimeout=15 $Remote $remoteCmd

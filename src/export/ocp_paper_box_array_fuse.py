@@ -83,19 +83,22 @@ def load_q1_pipe_parts(
 
 
 def _translate_pipe_parts(
-    pipe_parts: list[tuple[str, tuple, float]],
+    pipe_parts: list[tuple],
     dx: float,
     dy: float,
     dz: float,
-) -> list[tuple[str, tuple, float]]:
+) -> list[tuple]:
+    """Translate pipe/ellipse path points; preserve trailing profile fields."""
     if abs(dx) < 1e-12 and abs(dy) < 1e-12 and abs(dz) < 1e-12:
         return list(pipe_parts)
-    out: list[tuple[str, tuple, float]] = []
-    for kind, path, radius in pipe_parts:
+    out: list[tuple] = []
+    for part in pipe_parts:
+        kind, path = part[0], part[1]
+        rest = part[2:]
         new_path = tuple(
             (float(p[0]) + dx, float(p[1]) + dy, float(p[2]) + dz) for p in path
         )
-        out.append((kind, new_path, radius))
+        out.append((kind, new_path, *rest))
     return out
 
 

@@ -1350,3 +1350,340 @@ def export_seed_translate_gmsh_array_fuse(
         flush=True,
     )
     return report
+
+
+def _dual_overlap_bridge_spheres(
+    shape_a: Any,
+    shape_b: Any,
+    *,
+    x0: float,
+    x1: float,
+    y0: float,
+    y1: float,
+    z0: float,
+    z1: float,
+    radius: float = 1.2,
+    nx: int = 5,
+    ny: int = 7,
+    nz: int = 8,
+    min_common: float = 0.05,
+) -> list[Any]:
+    """Spheres in the AABB corridor that intersect *both* solids (volume bridges)."""
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Common
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeSphere
+    from OCP.gp import gp_Pnt
+
+    if nx < 2 or ny < 2 or nz < 2:
+        raise ValueError("bridge grid needs >=2 samples per axis")
+    bridges: list[Any] = []
+    for i in range(nx):
+        x = x0 + (x1 - x0) * i / (nx - 1)
+        for j in range(ny):
+            y = y0 + (y1 - y0) * j / (ny - 1)
+            for k in range(nz):
+                z = z0 + (z1 - z0) * k / (nz - 1)
+                sph = BRepPrimAPI_MakeSphere(gp_Pnt(x, y, z), float(radius)).Shape()
+                m0 = ocp_mass(BRepAlgoAPI_Common(shape_a, sph).Shape())
+                if m0 < min_common:
+                    continue
+                m1 = ocp_mass(BRepAlgoAPI_Common(shape_b, sph).Shape())
+                if m1 >= min_common:
+                    bridges.append(sph)
+    return bridges
+
+
+def _ocp_bbox(shape: Any) -> tuple[float, float, float, float, float, float]:
+    from OCP.Bnd import Bnd_Box
+    from OCP.BRepBndLib import BRepBndLib
+
+    box = Bnd_Box()
+    BRepBndLib.Add_s(shape, box, True)
+    return box.Get()
+
+
+def _attach_shapes_to_solid(
+    base: Any,
+    extras: list[Any],
+    *,
+    label: str,
+) -> tuple[Any, int]:
+    """Sequentially OCP-fuse extras onto base; skip non-sticking pieces."""
+    acc = base
+    attached = 0
+    for i, extra in enumerate(extras):
+        prev = ocp_mass(acc)
+        em = ocp_mass(extra)
+        stuck = False
+        for g, fz in (("off", 0.25), ("off", 0.5), ("shift", 0.1)):
+            try:
+                cand = ocp_fuse_pair(
+                    acc, extra, glue=g, fuzzy_mm=fz, simplify=False, label=f"{label}_{i}"
+                )
+                m = ocp_mass(cand)
+                if (
+                    _ocp_count_solids(cand) == 1
+                    and m >= prev * 0.98
+                    and m >= prev + 0.25 * em
+                ):
+                    acc = cand
+                    attached += 1
+                    stuck = True
+                    break
+            except Exception:
+                continue
+        if not stuck:
+            print(f"  {label}: skip piece {i}", flush=True)
+    return acc, attached
+
+def export_ocp_column_weld_array_fuse(
+    seed_step: str,
+    array_step: str,
+    *,
+    nx: int = 4,
+    ny: int = 4,
+    nz: int = 4,
+    cell_size: float = 20.0,
+    weld_radius_mm: float = 1.0,
+    weld_half_len_mm: float = 0.6,
+    glue: GlueMode = "off",
+    fuzzy_mm: float = 0.2,
+    mass_lo: float = 0.90,
+    mass_hi: float = 1.12,
+    force: bool = True,
+) -> dict[str, Any]:
+    """Z-column fuse (seed) + explicit face-weld cylinders → XY merge.
+
+    For thick Q≈1 hybrids where raw X/Y boolean returns empty or half-mass
+    (e.g. ``af2q1_deq2p5_k1``): Z-neighbour fuse works, but X/Y face contact
+    is not BOP-reliable. Short cylinders on face/edge anchors create volume
+    overlap so column batch/gmsh fuse can finish to one solid.
+    """
+    n = int(nx)
+    if int(ny) != n or int(nz) != n:
+        raise ValueError("column-weld fuse expects cubic nx=ny=nz")
+    cell_l = float(cell_size)
+    array_step = os.path.abspath(array_step)
+    out_dir = os.path.dirname(array_step) or "."
+    os.makedirs(out_dir, exist_ok=True)
+    if force and os.path.isfile(array_step):
+        os.remove(array_step)
+
+    t0 = time.time()
+    seed, seed_mass = load_ocp_unitcell_shape(
+        os.path.abspath(seed_step), cell_size=cell_l
+    )
+    if seed_mass <= 0.0 or _ocp_count_solids(seed) != 1:
+        raise RuntimeError(
+            f"seed not a single solid mass={seed_mass:.1f} n={_ocp_count_solids(seed)}"
+        )
+
+    work_merge = os.path.join(out_dir, ".deep_pad_merge", "column_weld")
+    os.makedirs(work_merge, exist_ok=True)
+    half = float(weld_half_len_mm)
+    radius = float(weld_radius_mm)
+    print(
+        f"column-weld 444: seed={seed_mass:.1f} r={radius:g} half_len={half:g} "
+        f"grid={n}^3 glue={glue} fz={fuzzy_mm:g}",
+        flush=True,
+    )
+
+    # 1) Z-columns from raw seed (proven HIT on hard hybrid).
+    columns: list[Any] = []
+    for iy in range(n):
+        for ix in range(n):
+            stack = [
+                ocp_translate_shape(
+                    seed, float(ix) * cell_l, float(iy) * cell_l, float(iz) * cell_l
+                )
+                for iz in range(n)
+            ]
+            exp = seed_mass * float(n)
+            col = None
+            for g, fz in (("shift", 0.1), ("off", 0.2), ("full", 0.1)):
+                try:
+                    cand = ocp_fuse_batch(
+                        stack, glue=g, fuzzy_mm=fz, simplify=False, label=f"col{ix}{iy}"
+                    )
+                    m = ocp_mass(cand)
+                    if _ocp_count_solids(cand) == 1 and gate_mass_ok(
+                        m, exp, lo=0.95, hi=1.05
+                    ):
+                        col = cand
+                        break
+                except Exception as e:
+                    print(f"  col{ix}{iy} ocp FAIL g={g}: {e}", flush=True)
+            if col is None:
+                col = _gmsh_fuse_shapes(
+                    stack,
+                    work_step=os.path.join(work_merge, f"col{ix}{iy}.step"),
+                    label=f"col{ix}{iy}-gmsh",
+                    expected_mass=exp,
+                    mass_lo=0.90,
+                    mass_hi=1.10,
+                )
+            columns.append(col)
+            print(f"  col{ix}{iy} OK m={ocp_mass(col):.1f}", flush=True)
+
+    # 2) Dual-overlap bridge spheres on every internal X/Y column interface,
+    #    attach to the lower-index column, then fuse the 16 columns.
+    def _col_index(ix: int, iy: int) -> int:
+        return iy * n + ix
+
+    welded_columns = list(columns)
+    weld_mass_total = 0.0
+    n_welds_attached = 0
+    radius = float(weld_radius_mm)
+
+    for iy in range(n):
+        for ix in range(n):
+            i0 = _col_index(ix, iy)
+            # +X neighbor
+            if ix < n - 1:
+                i1 = _col_index(ix + 1, iy)
+                b0 = _ocp_bbox(welded_columns[i0])
+                b1 = _ocp_bbox(welded_columns[i1])
+                bridges = _dual_overlap_bridge_spheres(
+                    welded_columns[i0],
+                    welded_columns[i1],
+                    x0=min(b0[3], b1[0]) - 0.5,
+                    x1=max(b0[3], b1[0]) + 0.5,
+                    y0=max(b0[1], b1[1]),
+                    y1=min(b0[4], b1[4]),
+                    z0=max(b0[2], b1[2]),
+                    z1=min(b0[5], b1[5]),
+                    radius=radius,
+                )
+                print(
+                    f"  bridge X ({ix},{iy})-({ix+1},{iy}): {len(bridges)} spheres",
+                    flush=True,
+                )
+                if bridges:
+                    wmass = sum(ocp_mass(s) for s in bridges)
+                    welded_columns[i0], n_att = _attach_shapes_to_solid(
+                        welded_columns[i0], bridges, label=f"bx{ix}{iy}"
+                    )
+                    n_welds_attached += n_att
+                    weld_mass_total += wmass * (n_att / max(len(bridges), 1))
+            # +Y neighbor
+            if iy < n - 1:
+                i1 = _col_index(ix, iy + 1)
+                b0 = _ocp_bbox(welded_columns[i0])
+                b1 = _ocp_bbox(welded_columns[i1])
+                bridges = _dual_overlap_bridge_spheres(
+                    welded_columns[i0],
+                    welded_columns[i1],
+                    x0=max(b0[0], b1[0]),
+                    x1=min(b0[3], b1[3]),
+                    y0=min(b0[4], b1[1]) - 0.5,
+                    y1=max(b0[4], b1[1]) + 0.5,
+                    z0=max(b0[2], b1[2]),
+                    z1=min(b0[5], b1[5]),
+                    radius=radius,
+                )
+                print(
+                    f"  bridge Y ({ix},{iy})-({ix},{iy+1}): {len(bridges)} spheres",
+                    flush=True,
+                )
+                if bridges:
+                    wmass = sum(ocp_mass(s) for s in bridges)
+                    welded_columns[i0], n_att = _attach_shapes_to_solid(
+                        welded_columns[i0], bridges, label=f"by{ix}{iy}"
+                    )
+                    n_welds_attached += n_att
+                    weld_mass_total += wmass * (n_att / max(len(bridges), 1))
+
+    expected = sum(ocp_mass(c) for c in welded_columns)
+    print(
+        f"  welded_cols={len(welded_columns)} attached_bridges={n_welds_attached} "
+        f"weld_mass~{weld_mass_total:.1f} expect={expected:.1f}",
+        flush=True,
+    )
+
+    fused: Any | None = None
+    last_err: Exception | None = None
+    for g, fz in (
+        (glue, fuzzy_mm),
+        ("off", 0.2),
+        ("off", 0.4),
+        ("shift", 0.1),
+        ("full", 0.1),
+    ):
+        try:
+            cand = ocp_fuse_batch(
+                welded_columns,
+                glue=g,
+                fuzzy_mm=float(fz),
+                simplify=False,
+                label="cols16-weld",
+            )
+            m = ocp_mass(cand)
+            nsol = _ocp_count_solids(cand)
+            print(
+                f"  cols16-weld ocp g={g} fz={fz:g} n={nsol} m={m:.1f} "
+                f"r={m / expected:.3f}",
+                flush=True,
+            )
+            if nsol == 1 and gate_mass_ok(m, expected, lo=mass_lo, hi=mass_hi):
+                fused = cand
+                break
+            if nsol != 1 and gate_mass_ok(m, expected, lo=mass_lo, hi=mass_hi):
+                try:
+                    fused = _ensure_single_solid(
+                        cand,
+                        cut_mass=expected,
+                        fuzzy_mm=float(fz),
+                        label="cols16-weld-remelt",
+                        budget_s=300,
+                    )
+                    if _ocp_count_solids(fused) == 1 and gate_mass_ok(
+                        ocp_mass(fused), expected, lo=mass_lo, hi=mass_hi
+                    ):
+                        break
+                    fused = None
+                except Exception as rem_err:
+                    last_err = rem_err
+                    fused = None
+        except Exception as e:
+            last_err = e
+            print(f"  cols16-weld ocp FAIL g={g} fz={fz:g}: {e}", flush=True)
+
+    if fused is None:
+        try:
+            fused = _gmsh_fuse_shapes(
+                welded_columns,
+                work_step=os.path.join(work_merge, "cols16_weld_gmsh.step"),
+                label="cols16-weld-gmsh",
+                expected_mass=expected,
+                mass_lo=mass_lo,
+                mass_hi=mass_hi,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"column-weld fuse failed; last_ocp={last_err}; gmsh={e}"
+            ) from e
+
+    a_mass = ocp_mass(fused)
+    nsol = _ocp_count_solids(fused)
+    if nsol != 1:
+        raise RuntimeError(f"column-weld final n={nsol}, want 1")
+    ocp_write_step(fused, array_step)
+    report = {
+        "method": "ocp_column_weld_array_fuse",
+        "weld_radius_mm": radius,
+        "weld_half_len_mm": half,
+        "n_welds": n_welds_attached,
+        "weld_mass_mm3": weld_mass_total,
+        "seed_mass": seed_mass,
+        "array_mass": a_mass,
+        "array_solids": nsol,
+        "volume_ratio_vs_seed": a_mass / seed_mass if seed_mass > 0 else None,
+        "array_step": array_step,
+        "cells": [n, n, n],
+        "elapsed_s": round(time.time() - t0, 1),
+    }
+    print(
+        f"  column-weld 444 OK mass={a_mass:.1f} ratio~{a_mass / seed_mass:.2f} "
+        f"elapsed={report['elapsed_s']}s",
+        flush=True,
+    )
+    return report

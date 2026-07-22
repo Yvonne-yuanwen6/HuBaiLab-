@@ -5,10 +5,12 @@
 #   nohup bash scripts/linux/run_param_batch_step_generate.sh >> output/logs/param_batch_step.log 2>&1 &
 #
 # Env: FORCE=1 ONLY="af2q0_deq2_k1 …" TOL_REL=0.03 STOP_ON_FAIL=1 JOBS=2
+#      BATCH_STEP_POST_HEAL=0  # skip mass-gated Gmsh heal after 444 write
 #
 # Locked scheme (see docs/批量构型STEP生成说明.md):
 #   444 prefers ocp_seed_scale*_zcopy_* (iz0 fuse + Z-copy);
 #   accept only gmsh volume_count==1; --jobs>1 OK (QC measure in child process).
+#   Default: structure-preserving post-heal on _444.step (mass_ratio∈[0.95,1.05]).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -32,6 +34,8 @@ NICE_LEVEL="${NICE_LEVEL:-10}"
 MIN_FREE_GB="${MIN_FREE_GB:-40}"
 UNITCELL_TIMEOUT="${UNITCELL_TIMEOUT:-600}"
 ARRAY_TIMEOUT="${ARRAY_TIMEOUT:-5400}"
+BATCH_STEP_POST_HEAL="${BATCH_STEP_POST_HEAL:-1}"
+export BATCH_STEP_POST_HEAL
 
 mkdir -p "$(dirname "$LOG")" "$ROOT/output/cad/批量构型"
 
@@ -65,7 +69,7 @@ preflight() {
 }
 
 PY="$(python_cmd)"
-log "PY=$PY ROOT=$ROOT JOBS=$JOBS"
+log "PY=$PY ROOT=$ROOT JOBS=$JOBS POST_HEAL=$BATCH_STEP_POST_HEAL"
 preflight
 touch_progress "start"
 
@@ -82,6 +86,9 @@ if [[ "$FORCE" == "1" ]]; then
 fi
 if [[ "$STOP_ON_FAIL" == "1" ]]; then
   args+=(--stop-on-fail)
+fi
+if [[ "$BATCH_STEP_POST_HEAL" == "0" ]]; then
+  args+=(--no-post-heal)
 fi
 if [[ -n "$ONLY" ]]; then
   # shellcheck disable=SC2206

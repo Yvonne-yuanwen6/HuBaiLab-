@@ -11,6 +11,11 @@ Naming:
 QC: V_444 / V_1x1 ≈ 64 (±3% default). Strut is independent of that gate.
 Accept 444 only when gmsh OCC reports volume_count==1 (not OCP-only).
 
+After a valid 444 write, optionally run structure-preserving Gmsh OCC heal
+(``step_heal_for_cae``): only replace ``*_444.step`` when mass_ratio∈[0.95,1.05]
+and a single solid remains — design params Af/Q/deq/k are unchanged. Disable with
+``--no-post-heal`` / ``BATCH_STEP_POST_HEAL=0``.
+
 Locked 444 scheme (do not regress):
   - Preferred: ocp_seed_scale*_zcopy_* = scale-inflate → fuse iz=0 only → +Z copy
     layers → 444z fuse → gmsh-verify single solid.
@@ -134,6 +139,59 @@ def _count_seed_volumes_job(path: str) -> int:
     from src.export.paper_box_array_fuse import _count_seed_volumes
 
     return int(_count_seed_volumes(path))
+
+
+def _seed_face_mate_ok(path: str, *, pitch_mm: float = L_MM) -> bool:
+    """True if pitch=L neighbour fuse yields one solid with mass≈2×seed (X/Y/Z).
+
+    A 1-volume 1x1 can still fail array fuse when tip faces do not mate at pitch=L
+    (seen 2026-07-19 on ``af2q1_deq2p5_k1`` --force rebuild).
+    """
+    try:
+        from src.export.ocp_paper_box_array_fuse import (
+            ocp_read_step_shape,
+            ocp_translate_shape,
+        )
+        from src.export.ocp_unitcell_fuse import (
+            _ocp_count_solids,
+            ocp_fuse_pair,
+            ocp_mass,
+        )
+
+        seed = ocp_read_step_shape(path)
+        m = float(ocp_mass(seed))
+        if m <= 0.0 or int(_ocp_count_solids(seed)) != 1:
+            return False
+        pitch = float(pitch_mm)
+        for axis, off in (
+            ("X", (pitch, 0.0, 0.0)),
+            ("Y", (0.0, pitch, 0.0)),
+            ("Z", (0.0, 0.0, pitch)),
+        ):
+            hit = False
+            b = ocp_translate_shape(seed, *off)
+            for glue, fz in (("shift", 0.1), ("off", 0.2), ("full", 0.1)):
+                try:
+                    fused = ocp_fuse_pair(
+                        seed,
+                        b,
+                        glue=glue,  # type: ignore[arg-type]
+                        fuzzy_mm=float(fz),
+                        simplify=False,
+                        label=f"mate-{axis}",
+                    )
+                    n = int(_ocp_count_solids(fused))
+                    r = float(ocp_mass(fused)) / (2.0 * m)
+                    if n == 1 and 0.9 <= r <= 1.1:
+                        hit = True
+                        break
+                except Exception:
+                    continue
+            if not hit:
+                return False
+        return True
+    except Exception:
+        return False
 
 
 def _seed_ok(path: str, *, timeout_s: float = 90.0) -> bool:
@@ -365,8 +423,35 @@ def _export_unitcell(
     #   on hard Q=1 / ellipse cases while this hybrid succeeds (~25s).
     # - gmsh *_both_end and OCP both_end_extension remain as fallbacks.
     # Forbidden ACCEPT: bare centre_stub / gmsh_paper_box / bare gmsh_octant.
+    #
+    # Face-mate lock (2026-07-19): auto corner≈0.75*deq can yield a 1-solid 1x1 that
+    # still fails pitch=L neighbour fuse (empty BOP). Prefer proven ext first so
+    # ``_seed_ok`` does not ACCEPT a non-mating seed before noclip_batch64.
     need_ocp = profile == "ellipse" or is_q1_period(Q) or abs(float(Q) - 1.5) < 1e-9
     if need_ocp:
+        if profile != "ellipse" and is_q1_period(Q):
+            if abs(float(deq_mm) - 2.5) < 1e-6:
+                # af2q1_deq2p5_k1: ext=2.5 → X/Y/Z HIT → noclip_batch64
+                _add_ocp(
+                    "centre_stub_corner_ext",
+                    "sequential_glue_shift",
+                    0.1,
+                    0.02,
+                    2.5,
+                )
+            if abs(float(deq_mm) - 1.5) < 1e-6:
+                # af2q1_deq1p5_k1: ext=1.5 → X/Y/Z HIT → noclip_batch64
+                _add_ocp(
+                    "centre_stub_corner_ext",
+                    "sequential_glue_shift",
+                    0.1,
+                    0.02,
+                    1.5,
+                )
+        if profile == "ellipse" and float(k) >= 2.0 - 1e-9:
+            # af2q0p5_deq2_k2: centre_stub fails; both_end+ext=3 → HIT → noclip
+            _add_ocp("both_end_extension", "sequential_glue_shift", 0.1, 0.05, 3.0)
+            _add_ocp("both_end_extension", "sequential_glue_shift", 0.1, 0.02, 2.5)
         for strat, fz in (
             ("sequential_glue_shift", 0.05),
             ("sequential_glue_shift", 0.1),
@@ -459,7 +544,26 @@ def _export_unitcell(
                     or payload.get("pipe_mode") == "both_end_extension"
                 )
                 # Export paths already recenter; keep idempotent for legacy/edge cases.
-                return _apply_unitcell_bbox_recenter(out_step, report)
+                report = _apply_unitcell_bbox_recenter(out_step, report)
+                # Hard Q/ellipse arrays need pitch=L face mating (after recenter).
+                need_mate = (
+                    profile == "ellipse"
+                    or is_q1_period(Q)
+                    or abs(float(Q) - 1.5) < 1e-9
+                )
+                if need_mate and not _seed_face_mate_ok(out_step):
+                    errors.append(
+                        f"{label}: refused non-mating seed "
+                        f"(pitch=L X/Y/Z fuse miss; {time.time() - t0:.0f}s)"
+                    )
+                    print(
+                        f"    REJECT {label}: face-mate lock "
+                        f"(need X/Y/Z neighbour fuse n=1 r≈1 at pitch=L)",
+                        flush=True,
+                    )
+                    continue
+                report["face_mate_ok"] = True
+                return report
             errors.append(f"{label}: seed not 1-volume ({time.time() - t0:.0f}s)")
             print(f"    FAIL {label}: seed not 1-volume", flush=True)
         except AttemptTimeoutError as exc:
@@ -698,6 +802,17 @@ def _export_array(
             )
         )
 
+    # Ellipse (incl. Q=0.5 κ=2): noclip first when seed has face mating
+    # (2026-07-19 af2q0p5_deq2_k2 both_end+ext=3 → single-solid 444).
+    if backend == "ocp" and ellipse and not hard_q:
+        _append_noclip_batch((("shift", 0.1), ("off", 0.1)))
+        _append_scale_batch(
+            (
+                (1.005, "shift", 0.1),
+                (1.02, "shift", 0.1),
+            )
+        )
+
     # Ellipse / ordinary OCP circle: seed_scale_zcopy (iz0 fuse + Z-copy).
     # Q=1/1.5 hybrid seeds often fail seed_scale (16 vols left); try only 1–2
     # scales then rely on noclip OCP (paper-box overhang overlap) earlier below.
@@ -727,7 +842,15 @@ def _export_array(
             (ocp_mode, "shift", 0.40, "shift", 0.20, True, 0.2),
         ]
         if thin_rod:
-            # Seed-translate OCP empty-fuses on deq≈1.5; try deep-pad rebuild first.
+            # Face-mate seed (corner_ext=1.5) → noclip first (2026-07-19).
+            # deep_pad remains fallback if seed still has no pitch=L contact.
+            _append_noclip_batch((("shift", 0.1), ("off", 0.1)))
+            _append_scale_batch(
+                (
+                    (1.005, "shift", 0.1),
+                    (1.02, "shift", 0.1),
+                )
+            )
             for pad, glue, fz in DEEP_PAD_SPECS_THIN_ROD:
                 payload = dict(base)
                 payload.update(
@@ -898,6 +1021,75 @@ def _export_array(
     return out
 
 
+def _post_heal_444_structure_preserving(
+    *,
+    array_step: str,
+    case_dir: str,
+    case_id: str,
+) -> dict[str, Any]:
+    """Gmsh OCC heal after 444 write; replace STEP only if mass gate passes.
+
+    Accepted heal cleans CAD topology (sew / tiny edges) without changing lattice
+    design (Af/Q/deq/k). Typical accepted mass_ratio ≈ 1.00. Rejected presets keep
+    the original ``*_444.step`` unchanged.
+    """
+    from src.export.step_heal_for_cae import heal_step_for_cae
+
+    heal_dir = os.path.join(case_dir, ".work", "heal_444")
+    os.makedirs(heal_dir, exist_ok=True)
+    report_path = os.path.join(case_dir, f"{case_id}_444_heal.json")
+    print(
+        f"  [{case_id}] post-heal 444 (structure-preserving, mass_ratio∈[0.95,1.05])…",
+        flush=True,
+    )
+    try:
+        healed, rep = heal_step_for_cae(
+            array_step,
+            heal_dir,
+            basename=f"{case_id}_444",
+            mass_ratio_min=0.95,
+            mass_ratio_max=1.05,
+            stop_on_first_ok=True,
+        )
+    except Exception as exc:
+        print(f"  [{case_id}] post-heal ERROR (keep original): {exc}", flush=True)
+        rep = {"used_heal": False, "error": str(exc), "source_step": array_step}
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(rep, f, indent=2, ensure_ascii=False)
+        return {
+            "used_heal": False,
+            "kept_original": True,
+            "error": str(exc),
+            "report_path": report_path,
+        }
+
+    used = bool(rep.get("used_heal")) and bool(healed) and os.path.isfile(healed)
+    if used and os.path.abspath(healed) != os.path.abspath(array_step):
+        shutil.copy2(healed, array_step)
+        print(
+            f"  [{case_id}] post-heal ACCEPTED preset={rep.get('preset')} "
+            f"mass_ratio={float(rep.get('mass_ratio') or 0):.4f} → replaced _444.step",
+            flush=True,
+        )
+    else:
+        print(
+            f"  [{case_id}] post-heal KEEP original "
+            f"(no preset passed mass/solid gate)",
+            flush=True,
+        )
+        used = False
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(rep, f, indent=2, ensure_ascii=False)
+    return {
+        "used_heal": used,
+        "kept_original": not used,
+        "preset": rep.get("preset"),
+        "mass_ratio": rep.get("mass_ratio"),
+        "report_path": report_path,
+    }
+
+
 def _process_case(
     *,
     case_id: str,
@@ -911,6 +1103,7 @@ def _process_case(
     tol_rel: float,
     unitcell_timeout_s: float,
     array_timeout_s: float,
+    post_heal: bool = True,
 ) -> dict[str, Any]:
     """Run one case end-to-end (safe to call from a worker thread)."""
     Af = float(meta["Af"])
@@ -1033,6 +1226,19 @@ def _process_case(
                 if isinstance(a_rep.get("array_merge"), dict)
                 else a_rep.get("fused_volume_count"),
             }
+            if post_heal and os.path.isfile(array_step):
+                entry["array_heal"] = _post_heal_444_structure_preserving(
+                    array_step=array_step,
+                    case_dir=case_dir,
+                    case_id=case_id,
+                )
+            else:
+                entry["array_heal"] = {
+                    "used_heal": False,
+                    "kept_original": True,
+                    "skipped": True,
+                    "reason": "post_heal disabled",
+                }
             qc = _qc_pair(unit_step, array_step, tol_rel=float(tol_rel))
             entry["qc"] = qc
             if qc["ok"]:
@@ -1108,6 +1314,12 @@ def main() -> int:
         type=float,
         default=DEFAULT_ARRAY_ATTEMPT_TIMEOUT_S,
         help="Wall-clock seconds per 444 strategy before kill+next (default 5400)",
+    )
+    p.add_argument(
+        "--no-post-heal",
+        action="store_true",
+        help="Skip structure-preserving Gmsh heal after 444 write "
+        "(default: heal and replace only if mass_ratio∈[0.95,1.05])",
     )
     p.add_argument(
         "--check-only",
@@ -1221,6 +1433,14 @@ def main() -> int:
                 )
 
     def _submit_kwargs(case_id: str, index_i: int) -> dict[str, Any]:
+        # Env BATCH_STEP_POST_HEAL=0 also disables (shell wrapper).
+        env_off = os.environ.get("BATCH_STEP_POST_HEAL", "1").strip() in (
+            "0",
+            "false",
+            "False",
+            "no",
+            "NO",
+        )
         return {
             "case_id": case_id,
             "index_i": index_i,
@@ -1233,6 +1453,7 @@ def main() -> int:
             "tol_rel": float(args.tol_rel),
             "unitcell_timeout_s": float(args.unitcell_attempt_timeout),
             "array_timeout_s": float(args.array_attempt_timeout),
+            "post_heal": (not bool(args.no_post_heal)) and (not env_off),
         }
 
     if n_jobs <= 1:

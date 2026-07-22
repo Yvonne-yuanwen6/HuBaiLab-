@@ -181,8 +181,9 @@ py -3 scripts/run_hu_bai_bcc_solid_cad_cae_tet_export.py `
 | 点阵自接触 | `ALL EXTERIOR`（可用 `--no-lattice-self-contact` 关闭以省内存） |
 | 摩擦 | μ = **0.1** |
 | 材料（论文档） | TPU：E = 25 MPa，ν = 0.47，ρ = 1135 kg/m³；本构默认 Neo-Hooke |
+| 材料（Fig.3.3 保真） | **Marlow + Fig.2.5**；点阵偏刚时用 `--tpu-stress-scale`（BCC 当前约 **0.77**）。流程见 [`BCC_Fig33准静态材料标定流程.md`](BCC_Fig33准静态材料标定流程.md) |
 | 板尺寸 | XY 比点阵大 `plate_margin`（默认 0.1L）；`plate_embed` 控制贴合 |
-| 质量缩放 | 基线 pipeline 常用 automatic；变体可 `--no-mass-scaling` |
+| 质量缩放 | Fig.3.3 主路径：**BELOW MIN dt=1e-4**（msb1e4）；变体可 `--no-mass-scaling`。详见标定流程文档 §2 |
 
 **算例 slug**（`output/export/`、`output/jobs/`、`output/post/` 同名）：
 

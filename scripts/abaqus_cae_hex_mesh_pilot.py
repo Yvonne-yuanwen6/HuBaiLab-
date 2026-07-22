@@ -797,7 +797,15 @@ model.rootAssembly.Instance(name=part_name + "_INST", part=p, dependent=ON)
 job_name = "cae_hex_export"
 if job_name in mdb.jobs.keys():
     del mdb.jobs[job_name]
-mdb.Job(name=job_name, model=model_name, type=ANALYSIS, memory=90, memoryUnits=PERCENTAGE)
+_job_mem = int(float(os.environ.get("HU_BAI_JOB_MEMORY_PCT", "90")))
+_job_mem = max(20, min(90, _job_mem))
+mdb.Job(
+    name=job_name,
+    model=model_name,
+    type=ANALYSIS,
+    memory=_job_mem,
+    memoryUnits=PERCENTAGE,
+)
 mdb.jobs[job_name].writeInput(consistencyChecking=OFF)
 
 src_inp = os.path.join(os.getcwd(), job_name + ".inp")

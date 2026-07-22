@@ -276,6 +276,30 @@ def array_scale_batch_job(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def array_column_weld_job(payload: dict[str, Any]) -> dict[str, Any]:
+    """Hard-case: Z-columns from seed + face-weld cylinders → one solid."""
+    from src.export.ocp_deep_pad_array_fuse import export_ocp_column_weld_array_fuse
+
+    work_array = str(payload["work_array"])
+    if os.path.isfile(work_array):
+        os.remove(work_array)
+    deq = float(payload.get("deq_mm") or payload.get("rod_d") or 2.0)
+    weld_r = float(payload.get("weld_radius_mm") or max(0.6, 0.45 * deq))
+    return export_ocp_column_weld_array_fuse(
+        str(payload["seed_step"]),
+        work_array,
+        nx=int(payload["nx"]),
+        ny=int(payload["ny"]),
+        nz=int(payload["nz"]),
+        cell_size=float(payload["cell_size"]),
+        weld_radius_mm=weld_r,
+        weld_half_len_mm=float(payload.get("weld_half_len_mm") or 0.6),
+        glue=str(payload.get("glue") or "off"),  # type: ignore[arg-type]
+        fuzzy_mm=float(payload.get("fuzzy_mm") or 0.2),
+        force=True,
+    )
+
+
 def array_deep_pad_job(payload: dict[str, Any]) -> dict[str, Any]:
     """Hard-case ladder: rebuild cells with deep periodic pad, then gated fuse."""
     from src.export.ocp_deep_pad_array_fuse import (

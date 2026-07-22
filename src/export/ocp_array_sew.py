@@ -566,24 +566,149 @@ def _export_ocp_solids_gmsh_fuse(
             print(f"  {progress_label}: imported {n_vol} volume(s)", flush=True)
             if n_vol == 0:
                 raise RuntimeError(f"{progress_label}: no volumes after BREP import")
-            fuse_step = 0
-            while n_vol > 1:
-                fuse_step += 1
-                acc = volumes[0]
-                for tool in volumes[1:]:
-                    gmsh.model.occ.fuse([acc], [tool])
+
+            def _safe_fuse_pair(a, b):
+                """Fuse two volumes; reject tiny/empty results; never delete on fail."""
+                try:
+                    ma = float(gmsh.model.occ.getMass(a[0], a[1]))
+                    mb = float(gmsh.model.occ.getMass(b[0], b[1]))
+                except Exception:
+                    ma = mb = 0.0
+                expect = ma + mb
+                try:
+                    fused, _ = gmsh.model.occ.fuse(
+                        [a], [b], removeObject=False, removeTool=False
+                    )
                     gmsh.model.occ.synchronize()
-                    volumes = list(gmsh.model.getEntities(3))
-                    if len(volumes) == 1:
-                        break
-                    acc = volumes[0]
-                n_vol = len(volumes)
+                except Exception as exc:
+                    print(f"  {progress_label}: pair fuse exc ({exc})", flush=True)
+                    return None
+                live = set(gmsh.model.getEntities(3))
+                outs = [dt for dt in fused if dt[0] == 3 and dt in live]
+                if not outs:
+                    return None
+                # Pick largest fused solid; require ~sum mass (reject sliver junk).
+                best = None
+                best_m = -1.0
+                for dt in outs:
+                    try:
+                        m = float(gmsh.model.occ.getMass(dt[0], dt[1]))
+                    except Exception:
+                        m = 0.0
+                    if m > best_m:
+                        best, best_m = dt, m
+                if expect > 0.0 and best_m < 0.80 * expect:
+                    print(
+                        f"  {progress_label}: reject fuse sliver "
+                        f"m={best_m:.1f} expect~{expect:.1f}",
+                        flush=True,
+                    )
+                    # Remove junk fragments only; keep originals a,b.
+                    junk = [dt for dt in outs if dt not in (a, b)]
+                    if junk:
+                        try:
+                            gmsh.model.occ.remove(junk, recursive=True)
+                            gmsh.model.occ.synchronize()
+                        except Exception:
+                            pass
+                    return None
+                # Drop originals only when the fused solid is a *new* tag.
+                # If OCC reused tag a or b as the result, removing it destroys
+                # the fuse (classic half-mass / empty-after-write failure mode).
+                to_remove = [dt for dt in (a, b) if dt != best]
+                if to_remove:
+                    try:
+                        gmsh.model.occ.remove(to_remove, recursive=True)
+                        gmsh.model.occ.synchronize()
+                    except Exception:
+                        pass
+                live = set(gmsh.model.getEntities(3))
+                if best in live:
+                    # Re-check mass after cleanup — reject if we lost a body.
+                    try:
+                        final_m = float(gmsh.model.occ.getMass(best[0], best[1]))
+                    except Exception:
+                        final_m = best_m
+                    if expect > 0.0 and final_m < 0.80 * expect:
+                        print(
+                            f"  {progress_label}: reject post-remove mass loss "
+                            f"m={final_m:.1f} expect~{expect:.1f}",
+                            flush=True,
+                        )
+                        return None
+                    return best
+                # Fallback: largest live solid by mass
+                live_vols = list(gmsh.model.getEntities(3))
+                if not live_vols:
+                    return None
+                return max(
+                    live_vols,
+                    key=lambda dt: float(gmsh.model.occ.getMass(dt[0], dt[1])),
+                )
+
+            # Pairwise tree with empty-safe pairs (touching lattice columns).
+            current = list(volumes)
+            level = 0
+            while len(current) > 1 and level < 64:
+                level += 1
+                nxt: list = []
+                stalled = 0
+                for i in range(0, len(current), 2):
+                    if i + 1 >= len(current):
+                        nxt.append(current[i])
+                        continue
+                    out = _safe_fuse_pair(current[i], current[i + 1])
+                    if out is None:
+                        stalled += 1
+                        nxt.extend([current[i], current[i + 1]])
+                    else:
+                        nxt.append(out)
+                live = set(gmsh.model.getEntities(3))
+                nxt = [dt for dt in nxt if dt in live]
                 print(
-                    f"  {progress_label}: fuse round {fuse_step} -> {n_vol} volume(s)",
+                    f"  {progress_label}: level {level}, {len(current)} → {len(nxt)} "
+                    f"(stall_pairs={stalled})",
                     flush=True,
                 )
-                if fuse_step > 32:
+                if len(nxt) >= len(current):
+                    print(
+                        f"  {progress_label}: tree stalled; sequential empty-safe...",
+                        flush=True,
+                    )
+                    remaining = list(nxt)
+                    acc = remaining.pop(0)
+                    leftover: list = []
+                    for tool in remaining:
+                        out = _safe_fuse_pair(acc, tool)
+                        if out is None:
+                            print(
+                                f"  {progress_label}: sequential skip non-fusing pair",
+                                flush=True,
+                            )
+                            leftover.append(tool)
+                        else:
+                            acc = out
+                    current = [acc] + leftover
                     break
+                current = nxt
+
+            # Drop true orphans, but keep every still-tracked solid.
+            keep = set(current)
+            orphans = [dt for dt in gmsh.model.getEntities(3) if dt not in keep]
+            if orphans and keep:
+                try:
+                    gmsh.model.occ.remove(orphans, recursive=True)
+                    gmsh.model.occ.synchronize()
+                except Exception as orphan_err:
+                    print(
+                        f"  {progress_label}: orphan cleanup ({orphan_err})",
+                        flush=True,
+                    )
+            volumes = [dt for dt in current if dt in set(gmsh.model.getEntities(3))]
+            if not volumes:
+                volumes = list(gmsh.model.getEntities(3))
+
+            n_vol = len(volumes)
             if n_vol != 1:
                 raise RuntimeError(f"{progress_label}: fuse left {n_vol} volume(s)")
             gmsh.model.occ.removeAllDuplicates()

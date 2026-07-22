@@ -173,7 +173,7 @@ _parser.add_argument(
     type=float,
     default=None,
     metavar="MM",
-    help="Explicit general contact: SCALE FACTOR s0 (e.g. 0.08 = 8% default stiffness)",
+    help="Explicit general contact: SCALE FACTOR s0 (e.g. 0.08 = 8%% default stiffness)",
 )
 _parser.add_argument(
     "--contact-store-offsets",
