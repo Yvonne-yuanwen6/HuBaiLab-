@@ -24,12 +24,25 @@ if TYPE_CHECKING:
     import mph
 
 
+def _comsol_root_and_bindir(bin_path: str) -> tuple[Path, Path]:
+    """Resolve Multiphysics root and platform bin dir from the launcher path.
+
+    Linux: ``.../multiphysics/bin/comsol`` → root=multiphysics, bindir=bin  
+    Windows: ``.../Multiphysics/bin/win64/comsol.exe`` → root=Multiphysics, bindir=win64
+    """
+    p = Path(bin_path).resolve()
+    parent = p.parent
+    if parent.name.lower() in ("win64", "glnxa64", "maci64"):
+        return parent.parent.parent, parent
+    return parent.parent, parent
+
+
 def _ensure_comsol_env(comsol_bin: str | None = None) -> str:
     bin_path = resolve_comsol_bin(comsol_bin)
-    comsol_root = Path(bin_path).resolve().parent.parent
-    bin_dir = str(comsol_root / "bin")
+    _comsol_root, platform_bin = _comsol_root_and_bindir(bin_path)
     os.environ["COMSOL_BIN"] = bin_path
-    os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+    # Prefer platform bin (win64/…) so ``comsol``/``comsolbatch`` resolve on Windows.
+    os.environ["PATH"] = str(platform_bin) + os.pathsep + os.environ.get("PATH", "")
     if COMSOL_BATCH_PREFS_DIR.is_dir():
         os.environ["COMSOLPREFS"] = str(COMSOL_BATCH_PREFS_DIR.resolve())
     return bin_path
@@ -210,11 +223,10 @@ def _resolve_plate_z_bottom_mm(
 ) -> float:
     """Snap plate bottom to lattice top for imprint bonding.
 
-    Use the nominal §2.4.3 plane (``z_max_mm``) when the lattice meets or exceeds
-    design height.  Curved SFBLS struts can protrude slightly above nominal in
-    bbox probes; raising the plate to that peak leaves a gap and ``fin`` omits
-    identity pair ``ap2``.  Only lower the plate when the lattice is shorter
-    than nominal.
+    Prefer the measured lattice-top plane when tips protrude above ``z_max_mm``.
+    Sitting the plate on the design plane while struts poke through omits
+    identity pair ``ap2``.  Upstream ``HU_BAI_COMSOL_CLIP_TOP`` may trim first;
+    if tips remain, raising the plate is required for fin imprint.
     """
     nominal = settings.z_max_mm
     z_geom: float | None = None
@@ -237,25 +249,27 @@ def _resolve_plate_z_bottom_mm(
     else:
         return nominal
 
+    if abs(z_measured - nominal) <= 0.05:
+        return nominal
+
     if z_measured < nominal - 0.05:
         print(
-            f"  Plate z snap ({source}): nominal {nominal:g} → lattice top {z_measured:g} mm",
+            f"  Plate z snap ({source}): nominal {nominal:g} -> lattice top {z_measured:g} mm",
             flush=True,
         )
         return z_measured
 
-    if z_measured > nominal + 0.05:
-        print(
-            f"  Plate z clamp ({source}): measured top {z_measured:g} mm "
-            f"> nominal {nominal:g} mm — keep plate on design plane for imprint bond",
-            flush=True,
-        )
-    elif z_geom is not None and z_step is not None and abs(z_geom - z_step) > 0.1:
+    print(
+        f"  Plate z raise ({source}): measured top {z_measured:g} mm "
+        f"> nominal {nominal:g} mm — raise plate onto strut tips for ap2 imprint",
+        flush=True,
+    )
+    if z_geom is not None and z_step is not None and abs(z_geom - z_step) > 0.1:
         print(
             f"  WARN: lattice z_top geom={z_geom:g} mm vs STEP={z_step:g} mm",
             flush=True,
         )
-    return nominal
+    return z_measured
 
 
 def _geom_lattice_z_top_mm(comp: Any, geom_tag: str) -> float | None:
@@ -315,6 +329,56 @@ def _center_paper_box_import(
     )
 
 
+def _try_repair_lattice_geometry(comp: Any, geom: str = "geom1") -> None:
+    """Best-effort CAD heal after Import/Move (self-intersections break FreeTet)."""
+    g = comp.geom(geom)
+    tag = "rep_lat"
+    try:
+        if tag in [str(t) for t in g.feature().tags()]:
+            g.feature().remove(tag)
+    except Exception:
+        pass
+    try:
+        # Prefer newer Repair; fall back to CapFaces / ConvertToSolid styles.
+        created = False
+        for ftype in ("Repair", "CADRepair", "CapFaces"):
+            try:
+                feat = g.feature().create(tag, ftype)
+                created = True
+                for key, val in (
+                    ("repairtol", "1e-5"),
+                    ("tolerance", "1e-5[mm]"),
+                    ("repair", "on"),
+                ):
+                    try:
+                        feat.set(key, val)
+                    except Exception:
+                        continue
+                # Select all current objects when the feature needs an input.
+                try:
+                    names = [str(o) for o in g.objectNames()]
+                    if names:
+                        feat.selection("input").set(names)
+                except Exception:
+                    try:
+                        feat.selection("input").all()
+                    except Exception:
+                        pass
+                print(f"  Lattice geometry heal: {ftype} ({tag})", flush=True)
+                break
+            except Exception:
+                try:
+                    if tag in [str(t) for t in g.feature().tags()]:
+                        g.feature().remove(tag)
+                except Exception:
+                    pass
+                continue
+        if created:
+            g.run()
+    except Exception as exc:
+        print(f"  WARN: lattice geometry heal skipped ({exc})", flush=True)
+
+
 def _clip_lattice_top_to_nominal(
     comp: Any,
     settings: HuBaiComsolSettings,
@@ -325,14 +389,12 @@ def _clip_lattice_top_to_nominal(
     """Trim lattice protrusion above §2.4.3 z_max (Difference, keep=off).
 
     Curved SFBLS tips can poke ~1–2 mm above nominal.  Plate clamp keeps the
-    plate on the design plane; without a trim, Form Assembly imprint may merge
-    domains (ndom=2 → SelectionOutOfBounds).
+    plate on the design plane; without a trim, Form Assembly imprint may omit
+    identity pair ``ap2``.
 
-    Implementation notes:
-    - Use ``Difference`` (not Compose + deactivate).  Deactivating inputs and
-      re-running made Compose look up dead objects (``blk_lat_top`` unknown).
-    - On any failure, log and return False so build can fall back to the
-      pre-clip path (some protrusions still mesh with 3 domains).
+    COMSOL 6.x Difference defaults to keeping inputs; if keep stays on, the
+    pre-clip lattice remains and ``getBoundingBox`` still reports the old
+    z_top.  Explicitly force keep-off and verify object list + bbox.
     """
     z_max = settings.z_max_mm
     z_top = _geom_lattice_z_top_mm(comp, geom)
@@ -349,7 +411,30 @@ def _clip_lattice_top_to_nominal(
     lattice_feat = "mov1" if "mov1" in feat_tags else import_tag
     top_tag = "blk_lat_top"
     dif_tag = "dif_lat_clip"
-    print(f"  Lattice clip difference: {lattice_feat} − {top_tag}", flush=True)
+    print(f"  Lattice clip difference: {lattice_feat} - {top_tag}", flush=True)
+
+    def _force_difference_discard_inputs(dif: Any) -> list[str]:
+        """Return which keep-related props were accepted."""
+        accepted: list[str] = []
+        candidates: list[tuple[str, object]] = [
+            ("keep", False),
+            ("keep", "off"),
+            ("keepinput", False),
+            ("keepinput", "off"),
+            ("keepinput", "del"),
+            ("keepinput", "delete"),
+        ]
+        try:
+            candidates.insert(0, ("keep", jpype.JBoolean(False)))
+        except Exception:
+            pass
+        for key, val in candidates:
+            try:
+                dif.set(key, val)
+                accepted.append(f"{key}={val!r}")
+            except Exception:
+                continue
+        return accepted
 
     try:
         for tag in (dif_tag, top_tag):
@@ -370,35 +455,64 @@ def _clip_lattice_top_to_nominal(
         )
         g.run()
         obj_names = [str(o) for o in g.objectNames()]
-        if lattice_feat not in obj_names or top_tag not in obj_names:
+        # Prefer live geometry objects; feature tag may differ from object name.
+        lattice_obj = lattice_feat if lattice_feat in obj_names else None
+        if lattice_obj is None:
+            for name in obj_names:
+                if name != top_tag:
+                    lattice_obj = name
+                    break
+        if lattice_obj is None or top_tag not in obj_names:
             raise RuntimeError(
                 f"Lattice clip objects missing (have {obj_names}, "
-                f"need {lattice_feat} and {top_tag})"
+                f"need lattice and {top_tag})"
+            )
+        if lattice_obj != lattice_feat:
+            print(
+                f"  Lattice clip: using object {lattice_obj!r} "
+                f"(feature tag was {lattice_feat!r})",
+                flush=True,
             )
 
         dif = g.feature().create(dif_tag, "Difference")
-        dif.selection("input").set(lattice_feat)
+        dif.selection("input").set(lattice_obj)
         dif.selection("input2").set(top_tag)
-        # Consume inputs so only the trimmed solid remains (no second run needed).
-        for keep_key, keep_val in (
-            ("keep", False),
-            ("keep", "off"),
-            ("keepinput", False),
-            ("keepinput", "off"),
-        ):
-            try:
-                dif.set(keep_key, keep_val)
-                break
-            except Exception:
-                continue
+        keep_set = _force_difference_discard_inputs(dif)
+        print(f"  Lattice clip keep props: {keep_set or ['(none accepted)']}", flush=True)
         g.run()
+
+        obj_after = [str(o) for o in g.objectNames()]
+        # If inputs were kept, remove cutter (+ optionally pre-clip lattice) and re-run.
+        if top_tag in obj_after or (
+            lattice_obj in obj_after and dif_tag not in "".join(obj_after)
+        ):
+            print(
+                f"  Lattice clip: objects after Difference={obj_after}; "
+                "forcing remove of cutter/pre-clip inputs",
+                flush=True,
+            )
+            for tag in (top_tag, lattice_obj):
+                try:
+                    if tag in [str(t) for t in g.feature().tags()]:
+                        g.feature().remove(tag)
+                except Exception:
+                    pass
+            try:
+                g.run()
+            except Exception as rerun_exc:
+                print(f"  WARN: post-clip feature remove run ({rerun_exc})", flush=True)
+            obj_after = [str(o) for o in g.objectNames()]
 
         z_after = _geom_lattice_z_top_mm(comp, geom)
         if z_after is None or z_after > z_max + 0.15:
             raise RuntimeError(
-                f"Lattice clip failed: z_top still {z_after} mm (nominal {z_max:g})"
+                f"Lattice clip failed: z_top still {z_after} mm "
+                f"(nominal {z_max:g}; objects={obj_after})"
             )
-        print(f"  Lattice top after clip: {z_after:g} mm", flush=True)
+        print(
+            f"  Lattice top after clip: {z_after:g} mm (objects={obj_after})",
+            flush=True,
+        )
         return True
     except Exception as exc:
         print(
@@ -414,6 +528,120 @@ def _clip_lattice_top_to_nominal(
         except Exception as cleanup_exc:
             print(f"  WARN: clip cleanup failed ({cleanup_exc})", flush=True)
         return False
+
+
+def _create_identity_pair_from_selections(
+    comp: Any,
+    pair_tag: str,
+    *,
+    src_sel: str,
+    dst_sel: str,
+    geom_tag: str,
+    label: str,
+) -> bool:
+    """Create a manual Identity pair when Form Assembly omitted ap1/ap2."""
+    try:
+        tags = [str(t) for t in comp.pair().tags()]
+        if pair_tag in tags:
+            try:
+                comp.pair().remove(pair_tag)
+            except Exception:
+                pass
+        comp.pair().create(pair_tag, "Identity", geom_tag)
+        pair = comp.pair(pair_tag)
+        # COMSOL versions differ on source/destination API.
+        bound = False
+        for src_fn, dst_fn in (
+            ("source", "destination"),
+            ("src", "dst"),
+        ):
+            try:
+                getattr(pair, src_fn)().named(src_sel)
+                getattr(pair, dst_fn)().named(dst_sel)
+                bound = True
+                break
+            except Exception:
+                continue
+        if not bound:
+            for key in ("source", "src", "input", "entities1"):
+                try:
+                    pair.selection(key).named(src_sel)
+                    break
+                except Exception:
+                    continue
+            for key in ("destination", "dst", "input2", "entities2"):
+                try:
+                    pair.selection(key).named(dst_sel)
+                    break
+                except Exception:
+                    continue
+        _set_label(pair, label)
+        print(
+            f"  Manual identity pair {pair_tag}: {src_sel} -> {dst_sel}",
+            flush=True,
+        )
+        return True
+    except Exception as exc:
+        print(
+            f"  WARN: could not create manual identity {pair_tag} ({exc})",
+            flush=True,
+        )
+        return False
+
+
+def _repair_missing_fixture_identity_pairs(
+    comp: Any,
+    settings: HuBaiComsolSettings,
+    *,
+    geom_tag: str = LATTICE_GEOM,
+    d_lat: int | None = None,
+    d_tbl: int | None = None,
+) -> None:
+    """If fin omitted ap1/ap2, build selections + manual Identity pairs."""
+    pairs = [str(t) for t in comp.pair().tags()]
+    need_ap1 = "ap1" not in pairs
+    need_ap2 = "ap2" not in pairs
+    if not need_ap1 and not need_ap2:
+        return
+
+    print(
+        f"  Repair identity pairs: missing={[t for t in ('ap1', 'ap2') if t not in pairs]}",
+        flush=True,
+    )
+    if d_lat is None:
+        d_lat = int(settings.domain_lattice)
+    if d_tbl is None:
+        d_tbl = int(settings.domain_shaker_table)
+
+    if need_ap1:
+        try:
+            _table_top_excitation_selection(comp, settings, d_tbl=d_tbl, geom_tag=geom_tag)
+            _lattice_bottom_contact_selection(comp, settings, d_lat=d_lat, geom_tag=geom_tag)
+            _create_identity_pair_from_selections(
+                comp,
+                "ap1",
+                src_sel="sel_table_top",
+                dst_sel="sel_lattice_bottom",
+                geom_tag=geom_tag,
+                label="台-点阵连续(手动)",
+            )
+        except Exception as exc:
+            print(f"  WARN: ap1 repair failed ({exc})", flush=True)
+
+    if need_ap2:
+        try:
+            _plate_bottom_selection(comp, settings, geom_tag=geom_tag)
+            _lattice_top_contact_selection(comp, settings, d_lat=d_lat, geom_tag=geom_tag)
+            _create_identity_pair_from_selections(
+                comp,
+                "ap2",
+                src_sel="sel_plate_bottom",
+                dst_sel="sel_lattice_top",
+                geom_tag=geom_tag,
+                label="板-点阵连续(手动)",
+            )
+        except Exception as exc:
+            print(f"  WARN: ap2 repair failed ({exc})", flush=True)
 
 
 def _log_fixture_stack(settings: HuBaiComsolSettings) -> None:
@@ -1277,10 +1505,16 @@ def _setup_p1_identity_continuity(
     comp: Any,
     solid: Any,
     settings: HuBaiComsolSettings,
+    *,
+    geom_tag: str = LATTICE_GEOM,
+    d_lat: int | None = None,
+    d_tbl: int | None = None,
 ) -> None:
     """Phase 1: keep fin identity ap1/ap2; add Solid Mechanics Continuity on both."""
-    _ = settings
     _log_auto_pairs(comp)
+    _repair_missing_fixture_identity_pairs(
+        comp, settings, geom_tag=geom_tag, d_lat=d_lat, d_tbl=d_tbl
+    )
     _assert_fixture_identity_pairs(comp, settings)
     for pair_tag, cont_tag, label in (
         ("ap1", "cont_ap1", "台–点阵连续"),
@@ -1448,7 +1682,14 @@ def _add_fixture_contacts(
     mode = settings.interface_coupling.lower()
     print(f"  Interface coupling: {mode}", flush=True)
     if mode == "p1_continuity":
-        _setup_p1_identity_continuity(comp, solid, settings)
+        _setup_p1_identity_continuity(
+            comp,
+            solid,
+            settings,
+            geom_tag=geom_tag,
+            d_lat=d_lat,
+            d_tbl=d_tbl,
+        )
     elif mode == "p2_contact_all":
         if d_tbl is None:
             d_tbl = settings.domain_shaker_table
@@ -1459,7 +1700,14 @@ def _add_fixture_contacts(
         _setup_p3_auto_contact_pairs(comp, solid, settings)
     else:
         print(f"  WARN: unknown interface_coupling={mode!r}; using p1_continuity", flush=True)
-        _setup_p1_identity_continuity(comp, solid, settings)
+        _setup_p1_identity_continuity(
+            comp,
+            solid,
+            settings,
+            geom_tag=geom_tag,
+            d_lat=d_lat,
+            d_tbl=d_tbl,
+        )
 
 
 def _add_boundary_probes(
@@ -1916,7 +2164,11 @@ def _set_domain_hauto(
     label: str = "",
 ) -> Any:
     """COMSOL physics-controlled Size on one 3D domain (hauto level, no manual hmax)."""
-    size = mesh.create(tag, "Size")
+    existing = {str(t) for t in mesh.feature().tags()}
+    if tag in existing:
+        size = mesh.feature(tag)
+    else:
+        size = mesh.create(tag, "Size")
     size.set("hauto", str(int(hauto)))
     try:
         size.set("customsizeactive", False)
@@ -2116,9 +2368,196 @@ def _mesh_fixture_stack_step(
 
 
 def _keep_default_discretization(comp: Any, solid: Any) -> None:
-    """Keep COMSOL default quadratic solid-mechanics discretization (§2.4.3)."""
-    _ = (comp, solid)
+    """Apply solid-mechanics displacement shape order (default quadratic)."""
+    _ = comp
+    order = 2
     print("  Discretization: COMSOL default (quadratic)", flush=True)
+    _ = (solid, order)
+
+
+def _apply_solid_discretization(comp: Any, solid: Any, settings: HuBaiComsolSettings) -> None:
+    """Set Solid Mechanics displacement element order (1=linear, 2=quadratic)."""
+    _ = comp
+    order = int(getattr(settings, "solid_displacement_order", 2) or 2)
+    order = 1 if order <= 1 else 2
+    applied = False
+    # COMSOL 5.6 / 6.x ShapeProperty keys vary slightly by version.
+    for prop_name in ("ShapeProperty", "shapeProperty", "Shape"):
+        try:
+            prop = solid.prop(prop_name)
+        except Exception:
+            continue
+        for key, val in (
+            ("order_displacement", str(order)),
+            ("order_displacement", order),
+            ("order", str(order)),
+            ("order", order),
+        ):
+            try:
+                prop.set(key, val)
+                applied = True
+                break
+            except Exception:
+                continue
+        if applied:
+            break
+    label = "linear" if order == 1 else "quadratic"
+    if applied:
+        print(f"  Discretization: solid displacement order={order} ({label})", flush=True)
+    else:
+        print(
+            f"  WARN: could not set displacement order={order}; leaving COMSOL default",
+            flush=True,
+        )
+
+
+def _configure_freq_solver(
+    java: Any,
+    settings: HuBaiComsolSettings,
+) -> None:
+    """Attach default solver to frequency study; optionally switch to iterative."""
+    study = settings.study_freq_tag
+    sol_tag = "sol1"
+    solver_mode = str(getattr(settings, "freq_linear_solver", "direct") or "direct").lower()
+    try:
+        tags = [str(t) for t in java.sol().tags()]
+    except Exception:
+        tags = []
+
+    # Prefer an existing solver already attached to the freq study.
+    attached = None
+    for t in tags:
+        try:
+            # mph / Java: sol(t).isAttached() / getStudy() vary by version
+            st = ""
+            try:
+                st = str(java.sol(t).getStudy())
+            except Exception:
+                try:
+                    st = str(java.sol(t).study())
+                except Exception:
+                    st = ""
+            if study in st or st == study:
+                attached = t
+                break
+        except Exception:
+            continue
+    if attached:
+        sol_tag = attached
+    elif sol_tag not in tags:
+        created = False
+        # COMSOL 5.6/6.x: createAutoSequences may take bool or name.
+        for args in ((True,), (sol_tag,), ()):
+            try:
+                if args:
+                    java.study(study).createAutoSequences(*args)
+                else:
+                    java.study(study).createAutoSequences()
+                created = True
+                break
+            except Exception:
+                continue
+        if not created:
+            try:
+                java.sol().create(sol_tag)
+                java.sol(sol_tag).study(study)
+                try:
+                    java.sol(sol_tag).createAutoSequences(True)
+                except Exception:
+                    pass
+                created = True
+            except Exception as exc:
+                print(f"  WARN: freq solver sequence not created ({exc})", flush=True)
+                return
+        # Refresh tags after auto-create (name may not be sol1).
+        try:
+            tags = [str(t) for t in java.sol().tags()]
+        except Exception:
+            tags = []
+        if sol_tag not in tags and tags:
+            # Pick the last created / first available
+            sol_tag = tags[-1]
+        elif sol_tag not in tags:
+            print("  WARN: freq solver sequence not created (no sol tags)", flush=True)
+            return
+
+    try:
+        sol = java.sol(sol_tag)
+        try:
+            _set_label(sol, "频域求解器序列")
+        except Exception:
+            pass
+    except Exception as exc:
+        print(f"  WARN: freq solver sequence not created ({exc})", flush=True)
+        return
+
+    if solver_mode not in ("iterative", "gmres", "iter"):
+        print(f"  Freq linear solver: direct (default sequence {sol_tag})", flush=True)
+        return
+
+    # Best-effort: disable Direct, enable Iterative(+Multigrid) under Stationary.
+    try:
+        sol = java.sol(sol_tag)
+        s_tag = None
+        for t in sol.feature().tags():
+            tt = str(t)
+            try:
+                typ = str(sol.feature(tt).getType())
+            except Exception:
+                typ = tt
+            if "Stationary" in typ or tt in ("s1", "sDef"):
+                s_tag = tt
+                if "Stationary" in typ:
+                    break
+        if s_tag is None:
+            s_tag = "s1"
+            if s_tag not in [str(x) for x in sol.feature().tags()]:
+                sol.create(s_tag, "Stationary")
+        s1 = sol.feature(s_tag)
+        for t in list(s1.feature().tags()):
+            tt = str(t)
+            try:
+                typ = str(s1.feature(tt).getType())
+            except Exception:
+                typ = tt
+            if "Direct" in typ or tt.lower().startswith("d"):
+                try:
+                    s1.feature(tt).active(False)
+                except Exception:
+                    pass
+        i_tag = "i1"
+        if i_tag not in [str(x) for x in s1.feature().tags()]:
+            try:
+                s1.create(i_tag, "Iterative")
+            except Exception as exc:
+                print(f"  WARN: Iterative solver create failed ({exc})", flush=True)
+                return
+        i1 = s1.feature(i_tag)
+        try:
+            i1.active(True)
+        except Exception:
+            pass
+        for key, val in (
+            ("linsolver", "gmres"),
+            ("itrestart", 50),
+            ("maxlinit", 10000),
+            ("rhob", 400),
+        ):
+            try:
+                i1.set(key, val)
+            except Exception:
+                continue
+        if "mg1" not in [str(x) for x in i1.feature().tags()]:
+            try:
+                i1.create("mg1", "Multigrid")
+            except Exception:
+                pass
+        print(
+            f"  Freq linear solver: iterative/GMRES ({sol_tag}/{s_tag}/{i_tag})",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"  WARN: could not switch freq solver to iterative ({exc})", flush=True)
 
 
 def _log_mesh_stats(comp: Any, mesh_tag: str = "mesh1", *, enforce_limit: bool = True) -> None:
@@ -2269,7 +2708,43 @@ def _build_physics_controlled_mesh_split(
         f"plate hmax={plate_hmax} mm, lattice hauto={settings.lattice_hauto}",
         flush=True,
     )
-    mesh.run()
+    try:
+        mesh.run()
+    except Exception as mesh_exc:
+        # Curved SFBLS / imprint seams often fail at fine hauto; retry coarser.
+        coarse = min(8, int(settings.lattice_hauto) + 2)
+        print(
+            f"  WARN: split mesh failed ({type(mesh_exc).__name__}: {mesh_exc}); "
+            f"retry lattice hauto={coarse}",
+            flush=True,
+        )
+        try:
+            _set_domain_mesh_hauto(
+                mesh,
+                "size_lat",
+                d_lat,
+                coarse,
+                geom_tag=geom_tag,
+                label=LABEL_MESH_SIZE_LAT,
+            )
+            mesh.run()
+        except Exception as mesh_exc2:
+            print(
+                f"  WARN: coarse split mesh failed ({type(mesh_exc2).__name__}: {mesh_exc2}); "
+                "falling back to global physics-controlled mesh",
+                flush=True,
+            )
+            # Wipe domain FreeTet sequence and use one automatic size.
+            try:
+                for tag in list(mesh.feature().tags()):
+                    t = str(tag)
+                    if t.startswith(("size_", "ftet_")):
+                        mesh.feature().remove(t)
+            except Exception:
+                pass
+            mesh.automatic(True)
+            mesh.autoMeshSize(int(coarse))
+            mesh.run()
     _log_mesh_stats(comp, mesh_tag)
 
 
@@ -2643,8 +3118,23 @@ def build_mph_from_step(
     imp.set("type", "cad")
     imp.set("filename", str(step))
     imp.set("unit", "source")
+    # Heal self-intersecting SFBLS STEP seams (COMSOL 6 mesh otherwise refuses FreeTet).
+    for key, val in (
+        ("repair", "on"),
+        ("repair", True),
+        ("removeredundant", "on"),
+        ("removeredundant", True),
+        ("knitting", "solid"),
+        ("facehealing", "on"),
+        ("importtol", "1.0E-5"),
+    ):
+        try:
+            imp.set(key, val)
+        except Exception:
+            continue
     comp.geom(lat_geom).run()
     _center_paper_box_import(comp, lat_geom, settings)
+    _try_repair_lattice_geometry(comp, lat_geom)
     # Curved SFBLS tips can poke through the §2.4.3 plate plane.  Difference
     # clip is opt-in: many protrusions still assemble with 3 domains (e.g.
     # af2q1p5 ~41.5 mm).  Broken Compose clip previously killed the queue.
@@ -2682,7 +3172,7 @@ def build_mph_from_step(
     comp.physics().create("solid", "SolidMechanics", lat_geom)
     solid = comp.physics("solid")
     _set_label(solid, LABEL_PHYSICS_SOLID)
-    _keep_default_discretization(comp, solid)
+    _apply_solid_discretization(comp, solid, settings)
 
     if settings.lattice_material_model.lower() in (
         "marlow_uniaxial",
@@ -2800,6 +3290,7 @@ def build_mph_from_step(
         except Exception:
             pass
         _apply_freq_study_activate(freq, settings)
+        _configure_freq_solver(java, settings)
 
     model.save(out)
     print(f"  Saved model: {out}", flush=True)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
@@ -56,6 +57,44 @@ def resolve_comsol_bin(explicit: str | None = None) -> str:
     )
 
 
+def resolve_comsol_batch_launcher(explicit: str | None = None) -> tuple[str, bool]:
+    """Return ``(executable, needs_batch_subcommand)`` for CLI batch solves.
+
+    Linux/macOS: ``comsol batch …`` (subcommand required).  
+    Windows: ``comsolbatch.exe …`` (no ``batch`` token — ``comsol.exe batch``
+    is the Desktop launcher and may exit 0 without writing ``-batchlog`` /
+    ``-outputfile``).
+    """
+    launcher = Path(resolve_comsol_bin(explicit)).resolve()
+    name = launcher.name.lower()
+
+    if name.startswith("comsolbatch"):
+        return str(launcher), False
+
+    # Prefer sibling comsolbatch(.exe) next to Desktop launcher / shell script.
+    for cand in (
+        launcher.with_name("comsolbatch.exe"),
+        launcher.with_name("comsolbatch"),
+        launcher.parent / "comsolbatch.exe",
+        launcher.parent / "comsolbatch",
+    ):
+        if cand.is_file():
+            return str(cand.resolve()), False
+
+    # Linux-style multiphysics/bin/comsol
+    if name in {"comsol", "comsol.sh"} or not name.endswith(".exe"):
+        return str(launcher), True
+
+    # Last resort on Windows: still try Desktop launcher + subcommand (fragile).
+    if sys.platform.startswith("win"):
+        print(
+            "  WARN: comsolbatch.exe not found beside COMSOL_BIN; "
+            "falling back to `comsol.exe batch` (often a no-op on Windows)",
+            flush=True,
+        )
+    return str(launcher), True
+
+
 def job_dir_for_slug(slug: str) -> Path:
     job_dir = COMSOL_JOBS_ROOT / slug
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -75,8 +114,8 @@ def build_batch_command(
     comsol_bin: str | None = None,
     batchlog: Path | None = None,
 ) -> list[str]:
-    """Assemble ``comsol batch`` argv for subprocess."""
-    bin_path = resolve_comsol_bin(comsol_bin)
+    """Assemble COMSOL batch argv (Windows ``comsolbatch`` / Linux ``comsol batch``)."""
+    bin_path, needs_batch_subcmd = resolve_comsol_batch_launcher(comsol_bin)
     job_dir = job_dir_for_slug(request.slug)
     input_path = Path(request.input_file).resolve()
     if not input_path.is_file():
@@ -98,24 +137,27 @@ def build_batch_command(
     tmp_dir.mkdir(parents=True, exist_ok=True)
     recovery_dir.mkdir(parents=True, exist_ok=True)
 
-    cmd: list[str] = [
-        bin_path,
-        "batch",
-        "-prefsdir",
-        str(COMSOL_BATCH_PREFS_DIR),
-        "-tmpdir",
-        str(tmp_dir),
-        "-recoverydir",
-        str(recovery_dir),
-        "-inputfile",
-        str(job_input),
-        "-outputfile",
-        str(output_path),
-        "-batchlog",
-        str(log_path),
-        "-np",
-        str(request.np),
-    ]
+    cmd: list[str] = [bin_path]
+    if needs_batch_subcmd:
+        cmd.append("batch")
+    cmd.extend(
+        [
+            "-prefsdir",
+            str(COMSOL_BATCH_PREFS_DIR),
+            "-tmpdir",
+            str(tmp_dir),
+            "-recoverydir",
+            str(recovery_dir),
+            "-inputfile",
+            str(job_input),
+            "-outputfile",
+            str(output_path),
+            "-batchlog",
+            str(log_path),
+            "-np",
+            str(request.np),
+        ]
+    )
     if request.mpmode:
         cmd.extend(["-mpmode", request.mpmode])
     if request.study:
@@ -143,6 +185,12 @@ def run_batch(
         if input_path.resolve() != job_input.resolve():
             shutil.copy2(input_path, job_input)
 
+    if request.output_file is None:
+        suffix = input_path.suffix or ".mph"
+        output_path = job_dir / f"{request.slug}_solved{suffix}"
+    else:
+        output_path = Path(request.output_file).resolve()
+
     log_path = job_dir / f"{request.slug}_batch.log"
     cmd = build_batch_command(request, comsol_bin=comsol_bin, batchlog=log_path)
     run_cwd = cwd or job_dir
@@ -161,7 +209,33 @@ def run_batch(
         print(f"  Log: {log_path}", flush=True)
         return proc
 
-    return subprocess.run(cmd, cwd=run_cwd, check=True)
+    # Append launcher stdout/stderr under the COMSOL -batchlog file so Windows
+    # failures are visible even when COMSOL itself writes little.
+    with open(log_path, "a", encoding="utf-8") as log_fp:
+        log_fp.write(f"\n=== hubai launcher ===\n{' '.join(cmd)}\n")
+        log_fp.flush()
+        completed = subprocess.run(
+            cmd,
+            cwd=run_cwd,
+            stdout=log_fp,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    if completed.returncode != 0:
+        raise subprocess.CalledProcessError(completed.returncode, cmd)
+
+    # ``comsol.exe batch`` on Windows can return 0 without writing outputs.
+    if not output_path.is_file() or output_path.stat().st_size < 1_000_000:
+        raise RuntimeError(
+            f"COMSOL batch exited 0 but missing/small output: {output_path} "
+            f"(see {log_path}). On Windows use comsolbatch.exe, not comsol.exe batch."
+        )
+    if not log_path.is_file() or log_path.stat().st_size < 50:
+        raise RuntimeError(
+            f"COMSOL batch exited 0 but batch log empty: {log_path}"
+        )
+    print(f"  Saved solution: {output_path} ({output_path.stat().st_size / 1e6:.1f} MB)", flush=True)
+    return completed
 
 
 def tail_batch_log(slug: str, *, lines: int = 40) -> str:

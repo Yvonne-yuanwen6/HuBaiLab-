@@ -144,6 +144,7 @@ def _count_seed_volumes_job(path: str) -> int:
 def _seed_face_mate_ok(path: str, *, pitch_mm: float = L_MM) -> bool:
     """True if pitch=L neighbour fuse yields one solid with mass≈2×seed (X/Y/Z).
 
+    Array-stage diagnostic only (not a 1x1 ACCEPT gate since 2026-07-29).
     A 1-volume 1x1 can still fail array fuse when tip faces do not mate at pitch=L
     (seen 2026-07-19 on ``af2q1_deq2p5_k1`` --force rebuild).
     """
@@ -418,18 +419,27 @@ def _export_unitcell(
         )
 
     # Tip-sliver / strut1 parity:
-    # - OCP centre_stub_corner_ext FIRST (2026-07-17): corner path ext → flat tips;
-    #   centre stub → sequential GlueShift fuse. both_end_extension often fails to fuse
-    #   on hard Q=1 / ellipse cases while this hybrid succeeds (~25s).
-    # - gmsh *_both_end and OCP both_end_extension remain as fallbacks.
+    # - Prefer OCP both_end_extension (same recipe as strut1 QC) when it fuses.
+    # - af2q1_deq1p5_k1 (2026-07-29): both_end + ov=0.05 + fz=0.1 + auto ext
+    #   → 1-solid ~221 mm³ (ov=0.02 empty-BOP at step3). centre_stub kept as fallback.
+    # - OCP centre_stub_corner_ext: corner path ext + centre stub (fuse-stable when
+    #   both_end fails; outer tips flat, centre end ≠ strut1).
     # Forbidden ACCEPT: bare centre_stub / gmsh_paper_box / bare gmsh_octant.
     #
-    # Face-mate lock (2026-07-19): auto corner≈0.75*deq can yield a 1-solid 1x1 that
-    # still fails pitch=L neighbour fuse (empty BOP). Prefer proven ext first so
-    # ``_seed_ok`` does not ACCEPT a non-mating seed before noclip_batch64.
+    # 1x1 ACCEPT = single solid + tip-sliver only (2026-07-29). Pitch=L face-mate is
+    # an array-stage concern (tip-push / noclip), not a unitcell gate — ``_seed_face_mate_ok``
+    # remains available for 444 diagnostics.
     need_ocp = profile == "ellipse" or is_q1_period(Q) or abs(float(Q) - 1.5) < 1e-9
     if need_ocp:
         if profile != "ellipse" and is_q1_period(Q):
+            if abs(float(deq_mm) - 1.5) < 1e-6:
+                # af2q1_deq1p5_k1: strut1-parity both_end; ov=0.05 required to fuse
+                _add_ocp(
+                    "both_end_extension",
+                    "sequential_glue_shift",
+                    0.1,
+                    0.05,
+                )
             if abs(float(deq_mm) - 2.5) < 1e-6:
                 # af2q1_deq2p5_k1: ext=2.5 → X/Y/Z HIT → noclip_batch64
                 _add_ocp(
@@ -438,15 +448,6 @@ def _export_unitcell(
                     0.1,
                     0.02,
                     2.5,
-                )
-            if abs(float(deq_mm) - 1.5) < 1e-6:
-                # af2q1_deq1p5_k1: ext=1.5 → X/Y/Z HIT → noclip_batch64
-                _add_ocp(
-                    "centre_stub_corner_ext",
-                    "sequential_glue_shift",
-                    0.1,
-                    0.02,
-                    1.5,
                 )
         if profile == "ellipse" and float(k) >= 2.0 - 1e-9:
             # af2q0p5_deq2_k2: centre_stub fails; both_end+ext=3 → HIT → noclip
@@ -481,6 +482,9 @@ def _export_unitcell(
                 _add_ocp("both_end_extension", strat, fz)
         else:
             for strat, fz, ov, ext in (
+                # ov=0.05 first: default ov=0.02 often empty-BOP on thin Q=1 both_end
+                ("sequential_glue_shift", 0.1, 0.05, None),
+                ("sequential_glue_shift", 0.05, 0.05, None),
                 ("sequential_glue_shift", 0.05, None, None),
                 ("sequential", 0.05, None, None),
                 ("x_layer_glue_shift", 0.05, None, None),
@@ -545,24 +549,8 @@ def _export_unitcell(
                 )
                 # Export paths already recenter; keep idempotent for legacy/edge cases.
                 report = _apply_unitcell_bbox_recenter(out_step, report)
-                # Hard Q/ellipse arrays need pitch=L face mating (after recenter).
-                need_mate = (
-                    profile == "ellipse"
-                    or is_q1_period(Q)
-                    or abs(float(Q) - 1.5) < 1e-9
-                )
-                if need_mate and not _seed_face_mate_ok(out_step):
-                    errors.append(
-                        f"{label}: refused non-mating seed "
-                        f"(pitch=L X/Y/Z fuse miss; {time.time() - t0:.0f}s)"
-                    )
-                    print(
-                        f"    REJECT {label}: face-mate lock "
-                        f"(need X/Y/Z neighbour fuse n=1 r≈1 at pitch=L)",
-                        flush=True,
-                    )
-                    continue
-                report["face_mate_ok"] = True
+                # Face-mate is not a 1x1 ACCEPT gate (array stage / tip-push owns it).
+                report["face_mate_gate"] = "deferred_to_array"
                 return report
             errors.append(f"{label}: seed not 1-volume ({time.time() - t0:.0f}s)")
             print(f"    FAIL {label}: seed not 1-volume", flush=True)

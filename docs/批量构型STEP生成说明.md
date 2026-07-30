@@ -1,9 +1,11 @@
 # 批量构型 STEP 生成说明
 
-> **进度明细（含同步时间）**：见 [`批量构型STEP生成情况明细.md`](./批量构型STEP生成情况明细.md) — 服务器/本机各案 1x1·strut·444 盘点。
+> **进度明细（含同步时间 + 各案成功路径）**：见 [`批量构型STEP生成情况明细.md`](./批量构型STEP生成情况明细.md) — 1x1·strut·444 盘点、策略归类、耗时。
 
 本批任务：**参数化批量生成 paper_box 单胞 + 4×4×4 阵列 STEP**；CAD QC 通过后并行两条仿真线——**Abaqus/Explicit 实体压缩**（`export/jobs/post/批量构型/`）与 **COMSOL 隔振频响**（`comsol_jobs/批量构型/`）。
 目录与清单以服务器仓库为准，本机同步后结构一致。
+
+**本批 CAD 快照（2026-07-28）**：清单 16 案；**`af2q1_deq1p5_k1` 已 VOID**（单胞复检不合格，本机 STEP 已删，勿入主对比）。其余曾 QC=ok；目视合格现为 10 案（原 11 剔除细杆）+ 5 案早期基线。逐案表见明细 §1–§2。
 
 | 项目 | 路径 / 值 |
 |------|-----------|
@@ -153,14 +155,15 @@ py -3 scripts/run_param_batch_step_generate.py --force --jobs 2 --only af2q1_deq
 
 行内融合仍会自动 climb（`row_glue`: full→shift→off；fuzzy≤0.8）。接受 444 前要求 **gmsh** `volume_count==1`（不得只信 OCP 实体数）。
 
-**1×1 face-mate 锁（2026-07-19，后续批量必走）**：
+**1×1 face-mate（2026-07-19 引入；2026-07-29 起不再作 1×1 硬锁）**：
 
 | 项 | 行为 |
 |----|------|
-| 问题 | 默认 `corner≈0.75·deq` 可得到 **单实体 1×1**，但 pitch=L 邻胞 fuse 仍空（BOP empty）→ noclip 必然失败 |
-| 优先 tip 伸出 | Q=1 圆杆：`deq=2.5→ext=2.5`、`deq=1.5→ext=1.5`（`centre_stub_corner_ext`）；椭圆 `κ≥2`：`both_end_extension` + `ext=3.0` / `2.5`（先于默认 hybrid） |
-| ACCEPT 门控 | `_seed_face_mate_ok`：对 Q≈1 / 1.5 / 椭圆，须 X/Y/Z 邻胞 fuse 均为 `n=1` 且 `r∈[0.9,1.1]`；否则 **REJECT** 试下一档（不得只信 `volume_count==1`） |
-| 入口 | `scripts/run_param_batch_step_generate.py` → `_export_unitcell` / `_seed_face_mate_ok` |
+| 问题 | 默认 `corner≈0.75·deq` 可得到 **单实体 1×1**，但 pitch=L 邻胞 fuse 仍空（BOP empty）→ noclip 可能失败 |
+| 优先 tip 伸出 | Q=1 圆杆：`deq=1.5` 优先 **`both_end_extension` + ov=0.05**（strut1 同款）；`deq=2.5→ext=2.5`（`centre_stub_corner_ext`）；椭圆 `κ≥2`：`both_end_extension` + `ext=3.0` / `2.5` |
+| 1×1 ACCEPT | 只要求 **单实体** + **tip-sliver**（与 strut1 配方一致）。**不做** pitch=L face-mate 硬拒 |
+| 阵列侧 | 对接 / tip-push / noclip 在 444 梯子处理；`_seed_face_mate_ok` 仅作诊断 |
+| 入口 | `scripts/run_param_batch_step_generate.py` → `_export_unitcell`；诊断：`_seed_face_mate_ok` |
 
 仿真导入要求交付 **单实体** `volume_count==1`；多体 compound / 仅靠 CAE tie 不作为最终 `_444.step`。
 
@@ -175,7 +178,7 @@ py -3 scripts/run_param_batch_step_generate.py --force --jobs 2 --only af2q1_deq
 
 | 项 | 锁定行为 | 曾出现的问题 |
 |---|---|---|
-| 1×1 tip / face-mate | 硬参优先显式 `corner_ext`；ACCEPT 前 **pitch=L 三轴邻胞 fuse** | 单实体种子不可贴合 → noclip 空融（`af2q1_deq2p5_k1`） |
+| 1×1 tip | 硬参优先 strut1 同款 / 显式 tip 伸出；ACCEPT = 单实体 + tip-sliver（**无** face-mate 硬锁，2026-07-29） | 旧 face-mate 硬锁会拒掉合格 both_end 单胞；对接改由 444 处理 |
 | 444 优先策略 | Q≈1/1.5、椭圆、细杆均优先 **`ocp_noclip_batch64`**；再 scale_batch / deep_pad / zcopy | 分层/zcopy 破坏正交接触；四层各融极慢 |
 | 接受门控 | 写 STEP 后 **gmsh 测实体数==1**（`gmsh_verified`）；QC 同口径 | OCP 报 1、gmsh 见 2 仍被 ACCEPT |
 | 写盘后 heal | **默认** `step_heal_for_cae`；仅 mass_ratio∈[0.95,1.05] 才覆盖 `_444.step` | 无门控会“修没”结构；失败须 KEEP 原 STEP |
@@ -183,6 +186,19 @@ py -3 scripts/run_param_batch_step_generate.py --force --jobs 2 --only af2q1_deq
 | `--force` 启动扫描 | **light**（只看 qc.json + 文件大小） | 启动前 gmsh 测大 444，卡住数分钟无 `Cases:` |
 
 常量入口：`scripts/run_param_batch_step_generate.py` 中 face-mate 优先档、`SEED_SCALE_ZCOPY_SPECS_*`、`DEEP_PAD_SPECS_THIN_ROD`；实现：`src/export/ocp_deep_pad_array_fuse.py` → `export_ocp_noclip_batch_array_fuse` / `export_seed_scale_inflate_array_fuse`。
+
+### 3.3 本批实际成功路径摘要（2026-07-24）
+
+完整表见 [`批量构型STEP生成情况明细.md`](./批量构型STEP生成情况明细.md) §1–§2。摘要：
+
+| 类型 | 案数 | 代表成功方式 |
+|------|------|----------------|
+| 现行主路径 | **11** | 1×1：`centre_stub_corner_ext`（细杆 `ext=1.5`、粗杆 `ext=2.5`）或椭圆 `both_end+ext=3` → 444：`ocp_noclip_batch64`；3 案另有 heal |
+| 早期 gmsh | 2 | `af2q0p5_deq2_k1`（gmsh 1×1+444）；`af2q1p5_deq2_k1`（legacy_copy + gmsh 444） |
+| 早期 OCP 分层/行序 | 2 | `af2q0_deq2_k2` hierarchical；`af2q1p5_deq2_k2` sequential |
+| 整案复用 | 1 | `af2q0_deq2_k1` |
+
+**耗时（顺路）**：整案约 **5–10 min**（noclip 444 约 3–5 min）；细杆/heal 重约 **15–20 min**。
 
 ---
 
@@ -287,12 +303,12 @@ scp "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/cad/批量构型/${id}/${id}_q
 - **体积比**：`mass_mm3(444) / mass_mm3(1x1)`，目标 **64**，相对容差默认 **3%**；两边实体数均为 1（**gmsh OCC**）。
 - **444 交付**：必须 **单实体**；多体 compound 不 ACCEPT。
 - **阵列优先**：Q≈1/1.5、椭圆、细杆均优先 **`ocp_noclip_batch64`**，再 `scale*_batch64` / deep_pad / `seed_scale_zcopy` / 常规 OCP / gmsh。
-- **单胞**：优先 **OCP `centre_stub_corner_ext`**（角端 path 延长 → 平端面；胞心 chord stub → 可融）；硬参先试显式 `corner_ext`（见 §3 face-mate 表）；椭圆 `κ≥2` 优先 `both_end_extension+ext`。再 gmsh `*_both_end` / 其余 OCP。**禁止** ACCEPT：`gmsh_paper_box`（无 both_end）、裸 `gmsh_octant`、裸 OCP `centre_stub`（无 corner_ext → 杆端尖楔）、以及 **pitch=L 不可贴合** 的单实体种子。写出后 **bbox/COM 归零**（idempotent）。
+- **单胞**：`deq=1.5` 优先 **OCP `both_end_extension` + ov=0.05**（strut1 同款）；其余硬参可先 `centre_stub_corner_ext` / 椭圆 `both_end+ext`。再 gmsh `*_both_end` / 其余 OCP。**禁止** ACCEPT：`gmsh_paper_box`（无 both_end）、裸 `gmsh_octant`、裸 OCP `centre_stub`（无 corner_ext → 杆端尖楔）。**不做** pitch=L face-mate 硬拒（阵列阶段处理）。写出后 **bbox/COM 归零**（idempotent）。
 - **监控易误判**：`--only` 时仪表盘只显示本批案；`seed_scale` / noclip batch 单次可数分钟无新日志，worker CPU≈100% 表示在算而非空转。`.work` 新鲜度用于标 ▶进行中。
 - **并行**：`JOBS=2`（或 `--jobs 2`）可用；QC/ACCEPT 测体积不得在 worker 线程直接 `gmsh.initialize`。
 
 **单胞策略梯子**（批处理 `_export_unitcell`）：  
-face-mate 优先档（显式 ext）→ 默认 `centre_stub_corner_ext` → gmsh `*_both_end` → OCP `both_end_extension`；每档 ACCEPT 前过 tip-sliver + face-mate 门控。  
+硬参优先档（both_end / 显式 tip）→ 默认 `centre_stub_corner_ext` → gmsh `*_both_end` → OCP `both_end_extension`；每档 ACCEPT 前过 tip-sliver（**无** face-mate 硬锁）。  
 失败案重跑示例：
 
 ```bash

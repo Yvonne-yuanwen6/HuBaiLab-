@@ -209,7 +209,7 @@ flowchart TD
 | `af2q1_deq2_k2` | 2 | 1 | 2.0 | 2 | ○ 待重网格 | — | 无 | remain2；盘恢复后入队 |
 | `af2q1p5_deq2_k1p5` | 2 | 1.5 | 2.0 | 1.5 | ○ 待重网格 | — | 无 | remain2 |
 | `af2q0p5_deq2_k2` | 2 | 0.5 | 2.0 | 2 | ○ 待网格（NEW3） | — | 无 | `param_batch_new3` |
-| `af2q1_deq1p5_k1` | 2 | 1 | 1.5 | 1 | ○ 待网格（NEW3） | — | 无 | 细杆 deq=1.5 |
+| `af2q1_deq1p5_k1` | 2 | 1 | 1.5 | 1 | ✗ CAD VOID | ✗ 作废 | 无 | 2026-07-28 单胞不合格；STEP 已删；旧协议网格/半截求解勿续、勿入主对比 |
 | `af2q1_deq2p5_k1` | 2 | 1 | 2.5 | 1 | ○ 待网格（NEW3） | — | 无 | deq=2.5 |
 | `af1q1_deq2_k1` | 1 | 1 | 2.0 | 1 | ✗ 协议 FAIL（0 单元） | ✗ SKIP | 无 | ~16:16；需 CAD 重融合 |
 | `af2q0p5_deq2_k1p5` | 2 | 0.5 | 2.0 | 1.5 | ✗ 协议 FAIL（0 单元） | ✗ SKIP | 无 | 同因；需 CAD 重融合 |
@@ -220,8 +220,9 @@ flowchart TD
 |------|------|-----|
 | ✓ 完成（本机有完整 CSV） | **7** | `af2q0_deq2_k1` · `af2q0p5_deq2_k1` · `af2q1p5_deq2_k1` · `af2q0_deq2_k2` · `af2q1p5_deq2_k2` · `af2q0_deq2_k1p5` · `af3q1_deq2_k1` |
 | ▶ 求解中断、待续 | **2** | `af2q1_deq2_k1` · `af2q1_deq2_k1p5` |
-| ○ 待网格 / 待重网格 | **5** | `af2q1_deq2_k2` · `af2q1p5_deq2_k1p5` · NEW3×3 |
+| ○ 待网格 / 待重网格 | **4** | `af2q1_deq2_k2` · `af2q1p5_deq2_k1p5` · `af2q0p5_deq2_k2` · `af2q1_deq2p5_k1` |
 | ✗ 网格 SKIP | **2** | `af1q1_deq2_k1` · `af2q0p5_deq2_k1p5` |
+| ✗ CAD VOID | **1** | `af2q1_deq1p5_k1`（2026-07-28；单胞不合格，STEP 已删） |
 | **清单合计** | **16** | 与 `_batch_index.json` 一致 |
 
 ---
@@ -287,3 +288,4 @@ powershell -File scripts/run_param_batch_cae_sim_local.ps1 -ExportOnly   # 仅�
 | 2026-07-19 | FOCUS 完成 2；2 案求解中断待续；2 案 SKIP；remain2/NEW3 待网格 |
 | 2026-07-20 | 本文建立：网格协议、仿真设置、流程图与逐案状态 |
 | 2026-07-20 | 本机 `run_param_batch_cae_mesh_local.ps1` 锁定与服务器协议一致（heal→CAE→export） |
+| 2026-07-28 | `af2q1_deq1p5_k1` CAD 作废（单胞不合格）；删 STEP；写入 `_batch_sim_skipped.json`；旧 mesh/半截求解不入主对比 |

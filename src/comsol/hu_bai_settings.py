@@ -139,6 +139,10 @@ class HuBaiComsolSettings:
     freq_min_hz: float = 10.0
     freq_max_hz: float = 2000.0
     freq_step_hz: float = 10.0
+    # Solid Mechanics displacement shape order: 2=quadratic (default), 1=linear (low-RAM)
+    solid_displacement_order: int = 2
+    # Frequency study linear solver: direct (default) | iterative (GMRES, low-RAM)
+    freq_linear_solver: str = "direct"
 
     step_path: str = ""
     slug: str = ""

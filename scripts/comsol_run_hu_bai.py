@@ -104,6 +104,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Physics-controlled fixture autoMeshSize (default 5=Normal)",
     )
     parser.add_argument(
+        "--solid-order",
+        type=int,
+        choices=(1, 2),
+        default=None,
+        help="Solid Mechanics displacement order: 1=linear (low-RAM), 2=quadratic (default)",
+    )
+    parser.add_argument(
+        "--freq-linear-solver",
+        choices=("direct", "iterative"),
+        default=None,
+        help="Frequency study linear solver: direct (default) or iterative/GMRES (low-RAM)",
+    )
+    parser.add_argument(
         "--no-mesh",
         action="store_true",
         help="Build geometry + BCs + studies only; skip meshing (GUI inspection step)",
@@ -195,6 +208,16 @@ def main(argv: list[str] | None = None) -> int:
         save_fixture_template=args.save_fixture_template,
         include_top_payload=defaults.include_top_payload and not args.no_top_payload,
         interface_coupling=interface_coupling,
+        solid_displacement_order=(
+            args.solid_order
+            if args.solid_order is not None
+            else defaults.solid_displacement_order
+        ),
+        freq_linear_solver=(
+            args.freq_linear_solver
+            if args.freq_linear_solver is not None
+            else defaults.freq_linear_solver
+        ),
     )
     slug = settings.default_slug()
     manifest_path = settings.write_manifest()
@@ -234,6 +257,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         print(f"Mesh: lattice hmax={settings.mesh_mm} mm (no fixture)")
+    print(
+        f"Discretization: solid order={settings.solid_displacement_order}; "
+        f"freq linear solver={settings.freq_linear_solver}"
+    )
     if settings.include_shaker_fixture:
         print(f"Fixture template: {settings.fixture_template_mph}")
     if settings.include_shaker_fixture and not args.build_fixture_template:
@@ -249,8 +276,8 @@ def main(argv: list[str] | None = None) -> int:
     if settings.run_frequency:
         if settings.excitation_type == "acceleration":
             print(
-                f"Excitation: {settings.base_acceleration_m_s2} m/s² "
-                f"on {settings.excitation_axis.upper()}-axis (§2.4.3)"
+                f"Excitation: {settings.base_acceleration_m_s2} m/s^2 "
+                f"on {settings.excitation_axis.upper()}-axis (sec 2.4.3)"
             )
         else:
             print(f"Excitation: displacement {settings.base_displacement_mm} mm")

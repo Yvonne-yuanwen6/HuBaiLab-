@@ -46,9 +46,11 @@ PIPE_FIRST_INTRA_FUSE_MIN_MASS_RATIO = 0.90
 # Applied symmetrically: each octant extends ±overlap/2 about the bisector so
 # eight nominal virtual cubes stay centred on x/y/z=0 (outer faces ±L/2).
 OCTANT_CENTER_OVERLAP_MM = 0.02
-# Per-strut sequential fuse order (0-based strut indices). Strut 8 ``(+,+,+)`` must
-# not be fused last — see docs/单胞融合策略.md.
-OCTANT_SEQUENTIAL_FUSE_ORDER = (0, 1, 2, 3, 4, 5, 7, 6)
+# Per-strut sequential fuse order (0-based strut indices).
+# Historical ``(…, 7, 6)`` put idx6 ``(−,+,+)`` last and left a hub void on thin rods
+# (af2q1_deq1p5_k1, 2026-07-29 visual). Natural ``0..7`` (6 then 7) fixes that case;
+# deq=2 smoke still 1-solid ~382 mm³. See docs/单胞融合策略.md.
+OCTANT_SEQUENTIAL_FUSE_ORDER = (0, 1, 2, 3, 4, 5, 6, 7)
 # Extend centre-end path before pipe sweep so the cell centre is interior to the
 # solid (end cap sits in adjacent octants and is removed by the 1/8 box cut).
 OCTANT_CENTRE_PATH_EXTENSION_SCALE = 1.5
