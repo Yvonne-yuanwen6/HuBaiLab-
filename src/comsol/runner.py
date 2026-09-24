@@ -132,8 +132,11 @@ def build_batch_command(
         output_path = Path(request.output_file).resolve()
 
     log_path = batchlog or (job_dir / f"{request.slug}_batch.log")
-    tmp_dir = job_dir / "tmp"
-    recovery_dir = job_dir / "recovery"
+    # Keep tmp/recovery on a dedicated ASCII scratch path (outside job dirs).
+    # COMSOL Direct/OOC and some iterative scratch I/O prefer short ISO-8859-1 paths.
+    scratch = PROJECT_ROOT / "output" / "comsol_scratch" / request.slug
+    tmp_dir = scratch / "tmp"
+    recovery_dir = scratch / "recovery"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     recovery_dir.mkdir(parents=True, exist_ok=True)
 

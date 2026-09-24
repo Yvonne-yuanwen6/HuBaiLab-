@@ -698,22 +698,45 @@ def _occ_build_single_both_ext_octant_cut_step(
 
 
 def _occ_import_octant_cut_steps(step_paths: list[str]) -> list[tuple[int, int]]:
-    """Import per-strut cut STEPs into the current gmsh model."""
+    """Import per-strut cut STEPs into the current gmsh model.
+
+    Temporarily disable ``Geometry.OCCSewFaces``: with sew on, gmsh/OCC can
+    import a valid closed solid as faces only (0 volumes) — seen on Q=1
+    octant-cut strut STEPs (L=10 etc.).
+    """
     import gmsh
 
+    sew_opt = "Geometry.OCCSewFaces"
+    prev_sew: float | None = None
+    try:
+        prev_sew = float(gmsh.option.getNumber(sew_opt))
+    except Exception:
+        prev_sew = None
+    try:
+        gmsh.option.setNumber(sew_opt, 0)
+    except Exception:
+        pass
+
     cut_vols: list[tuple[int, int]] = []
-    for idx, step_path in enumerate(step_paths, start=1):
-        before = set(_occ_list_volume_dimtags())
-        gmsh.model.occ.importShapes(os.path.abspath(step_path))
-        gmsh.model.occ.synchronize()
-        after = _occ_list_volume_dimtags()
-        new_vols = [vol for vol in after if vol not in before]
-        if len(new_vols) != 1:
-            raise RuntimeError(
-                f"import cut strut {idx}/{len(step_paths)}: expected 1 volume, "
-                f"got {len(new_vols)} from {step_path}"
-            )
-        cut_vols.append(new_vols[0])
+    try:
+        for idx, step_path in enumerate(step_paths, start=1):
+            before = set(_occ_list_volume_dimtags())
+            gmsh.model.occ.importShapes(os.path.abspath(step_path))
+            gmsh.model.occ.synchronize()
+            after = _occ_list_volume_dimtags()
+            new_vols = [vol for vol in after if vol not in before]
+            if len(new_vols) != 1:
+                raise RuntimeError(
+                    f"import cut strut {idx}/{len(step_paths)}: expected 1 volume, "
+                    f"got {len(new_vols)} from {step_path}"
+                )
+            cut_vols.append(new_vols[0])
+    finally:
+        if prev_sew is not None:
+            try:
+                gmsh.option.setNumber(sew_opt, prev_sew)
+            except Exception:
+                pass
     return cut_vols
 
 

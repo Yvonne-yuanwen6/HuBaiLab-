@@ -42,7 +42,17 @@ def _run_local_cae_mesh(
             out_inp,
             "-PartName",
             part_name,
+            "-MeshQuality",
+            mesh_quality,
+            "-RodDiameterMm",
+            str(rod_diameter_mm),
+            "-RodsPerDiameter",
+            str(rods_per_diameter),
+            "-ElementType",
+            element_type,
         ]
+        if virtual_topology:
+            cmd.append("-VirtualTopology")
     else:
         mesh_sh = os.path.join(root, "scripts", "linux", "run_abaqus_cae_mesh.sh")
         cmd = [

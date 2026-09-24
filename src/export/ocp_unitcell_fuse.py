@@ -68,7 +68,7 @@ def require_smooth_ellipse_sweep(mode: str) -> str:
 
 def _require_ocp():
     try:
-        from OCP.BRepAlgoAPI import BRepAlgoAPI_Common, BRepAlgoAPI_Fuse
+        from OCP.BRepAlgoAPI import BRepAlgoAPI_Common, BRepAlgoAPI_Cut, BRepAlgoAPI_Fuse
         from OCP.BRepBuilderAPI import (
             BRepBuilderAPI_MakeEdge,
             BRepBuilderAPI_MakeFace,
@@ -78,7 +78,11 @@ def _require_ocp():
         )
         from OCP.BRepGProp import BRepGProp
         from OCP.BRepOffsetAPI import BRepOffsetAPI_MakePipeShell
-        from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeCylinder
+        from OCP.BRepPrimAPI import (
+            BRepPrimAPI_MakeBox,
+            BRepPrimAPI_MakeCylinder,
+            BRepPrimAPI_MakeSphere,
+        )
         from OCP.BOPAlgo import BOPAlgo_GlueEnum
         from OCP.GProp import GProp_GProps
         from OCP.GeomAPI import GeomAPI_PointsToBSpline
@@ -91,6 +95,7 @@ def _require_ocp():
         ) from exc
     return {
         "BRepAlgoAPI_Common": BRepAlgoAPI_Common,
+        "BRepAlgoAPI_Cut": BRepAlgoAPI_Cut,
         "BRepAlgoAPI_Fuse": BRepAlgoAPI_Fuse,
         "BRepBuilderAPI_MakeEdge": BRepBuilderAPI_MakeEdge,
         "BRepBuilderAPI_MakeFace": BRepBuilderAPI_MakeFace,
@@ -101,6 +106,7 @@ def _require_ocp():
         "BRepOffsetAPI_MakePipeShell": BRepOffsetAPI_MakePipeShell,
         "BRepPrimAPI_MakeBox": BRepPrimAPI_MakeBox,
         "BRepPrimAPI_MakeCylinder": BRepPrimAPI_MakeCylinder,
+        "BRepPrimAPI_MakeSphere": BRepPrimAPI_MakeSphere,
         "BOPAlgo_GlueEnum": BOPAlgo_GlueEnum,
         "GProp_GProps": GProp_GProps,
         "GeomAPI_PointsToBSpline": GeomAPI_PointsToBSpline,
@@ -370,6 +376,58 @@ def _as_np_points(path_pts: tuple) -> list[np.ndarray]:
     return [np.asarray(p, dtype=float) for p in path_pts]
 
 
+# Keep the centre-stub chord inside the strut octant. At Af≳2.5 the first path
+# sample can leave the octant within ~0.1 mm (coordinate sign flip), so a full
+# p0→p1 cylinder is mostly cut away and leaves a cell-centre void (af2p5).
+CENTRE_STUB_MAX_CHORD_MM = 0.5
+CENTRE_STUB_OCTANT_PAD_MM = 0.02
+
+
+def _path_with_octant_safe_centre_chord(
+    path_pts: tuple,
+    *,
+    max_chord_mm: float = CENTRE_STUB_MAX_CHORD_MM,
+    pad_mm: float = CENTRE_STUB_OCTANT_PAD_MM,
+) -> tuple[tuple, bool]:
+    """Insert a near-origin sample so the open-start chord stays in-octant.
+
+    Returns ``(path, octant_clamped)``. ``octant_clamped`` is True only when the
+    octant pad reduced the insert distance below the max-chord cap (Af≳2.5);
+    a pure max-chord densify does not count as clamped.
+    """
+    pts = _as_np_points(path_pts)
+    if len(pts) < 2:
+        return path_pts, False
+    p0 = pts[0]
+    p1 = pts[1]
+    chord = p1 - p0
+    length = float(np.linalg.norm(chord))
+    if length < 1e-9:
+        return path_pts, False
+    direction = chord / length
+    far = pts[-1]
+    signs = np.sign(far)
+    signs[signs == 0.0] = 1.0
+    t_cap = min(float(max_chord_mm), length)
+    t_max = t_cap
+    pad = float(pad_mm)
+    for i in range(3):
+        s = float(signs[i])
+        d_i = float(direction[i])
+        # Require s * (p0_i + t * d_i) >= -pad while moving against the octant.
+        if s * d_i < -1e-12:
+            t_lim = (-pad - s * float(p0[i])) / (s * d_i)
+            t_max = min(t_max, t_lim)
+    t_max = max(float(t_max), 1e-3)
+    octant_clamped = float(t_max) + 1e-9 < float(t_cap)
+    if t_max >= length - 1e-9:
+        return path_pts, False
+    p_ins = p0 + direction * t_max
+    out = [p0, p_ins] + pts[1:]
+    path = tuple((float(p[0]), float(p[1]), float(p[2])) for p in out)
+    return path, octant_clamped
+
+
 def _spline_wire(path_pts: tuple):
     ocp = _require_ocp()
     pts = _as_np_points(path_pts)
@@ -609,7 +667,13 @@ def ocp_pipe_along_points(
 
 
 def ocp_pipe_with_centre_stub(path_pts: tuple, radius: float) -> Any:
-    """Chord cylinder at cell centre + open-start spline pipe (Q=1 octant route)."""
+    """Chord cylinder at cell centre + open-start spline pipe (Q=1 octant route).
+
+    First polyline chord is octant-clamped so the open-start pipe stays inside
+    the path octant (Af≳2.5). Stub remains the first-chord cylinder; hub voids
+    left by a shortened chord are filled post-fuse via ``ocp_fill_hub_ball``.
+    """
+    path_pts, _octant_clamped = _path_with_octant_safe_centre_chord(path_pts)
     pts = _as_np_points(path_pts)
     if len(pts) < 2:
         raise ValueError("pipe path needs at least two points")
@@ -619,8 +683,8 @@ def ocp_pipe_with_centre_stub(path_pts: tuple, radius: float) -> Any:
     if length < 1e-9:
         return ocp_pipe_along_points(path_pts, radius)
 
-    ocp = _require_ocp()
     direction = chord / length
+    ocp = _require_ocp()
     ax = ocp["gp_Ax2"](
         ocp["gp_Pnt"](float(p0[0]), float(p0[1]), float(p0[2])),
         ocp["gp_Dir"](
@@ -632,6 +696,42 @@ def ocp_pipe_with_centre_stub(path_pts: tuple, radius: float) -> Any:
     cyl = ocp["BRepPrimAPI_MakeCylinder"](ax, float(radius), length).Shape()
     pipe = ocp_pipe_along_points(path_pts, radius, open_at_start=True)
     return ocp_fuse_pair(cyl, pipe, glue="off", fuzzy_mm=1e-3, label="centre-stub")
+
+
+def ocp_fill_hub_ball(shape: Any, radius_mm: float, *, fuzzy_mm: float = 0.1) -> Any:
+    """Fuse a sphere at the origin into a merged unit cell (closes hub voids)."""
+    r = float(radius_mm)
+    if r <= 0.0:
+        return shape
+    ocp = _require_ocp()
+    ball = ocp["BRepPrimAPI_MakeSphere"](ocp["gp_Pnt"](0.0, 0.0, 0.0), r).Shape()
+    # simplify=True can drop the ball or the cell on void hubs; keep raw BOP result.
+    fused = ocp_fuse_pair(
+        shape,
+        ball,
+        glue="off",
+        fuzzy_mm=float(fuzzy_mm),
+        simplify=False,
+        label="hub-ball",
+    )
+    if int(_ocp_count_solids(fused)) != 1:
+        raise RuntimeError(
+            f"hub-ball fuse left {_ocp_count_solids(fused)} solid(s); expected 1"
+        )
+    return fused
+
+
+def ocp_hub_fill_ratio(shape: Any, *, half_mm: float = 0.02) -> float:
+    """Fill fraction of a cube ±half_mm at the origin (in-memory hub probe)."""
+    h = float(half_mm)
+    if h <= 0.0:
+        return 0.0
+    box = _box_from_bounds((-h, h, -h, h, -h, h))
+    common = ocp_common(shape, box)
+    vol = 8.0 * h * h * h
+    if vol <= 0.0:
+        return 0.0
+    return float(ocp_mass(common)) / vol
 
 
 def ocp_elliptic_pipe_with_centre_stub(
@@ -648,6 +748,7 @@ def ocp_elliptic_pipe_with_centre_stub(
     from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism
     from OCP.gp import gp_Vec
 
+    path_pts, _octant_clamped = _path_with_octant_safe_centre_chord(path_pts)
     pts = _as_np_points(path_pts)
     if len(pts) < 2:
         raise ValueError("pipe path needs at least two points")
@@ -731,6 +832,96 @@ def ocp_common(a: Any, b: Any) -> Any:
     if not op.IsDone():
         raise RuntimeError("OCP common (intersect) failed")
     return op.Shape()
+
+
+def ocp_cut(a: Any, b: Any, *, label: str = "cut") -> Any:
+    """Boolean cut: ``a − b``."""
+    ocp = _require_ocp()
+    op = ocp["BRepAlgoAPI_Cut"](a, b)
+    op.Build()
+    if not op.IsDone():
+        raise RuntimeError(f"OCP {label} failed")
+    shape = op.Shape()
+    if ocp_mass(shape) <= 0.0:
+        raise RuntimeError(f"OCP {label} produced empty solid")
+    return shape
+
+
+def ocp_make_cylinder_z(
+    radius_mm: float,
+    *,
+    cell_size_mm: float,
+    overshoot_mm: float = 0.1,
+    center_xy: tuple[float, float] = (0.0, 0.0),
+) -> Any:
+    """
+    Solid cylinder along +Z through the L³ cell (axis parallel to compression).
+
+    Base sits at ``z = −L/2 − overshoot`` so the tool fully clears both Z faces.
+    """
+    r = float(radius_mm)
+    if r <= 0.0:
+        raise ValueError(f"radius_mm must be > 0, got {radius_mm}")
+    L = float(cell_size_mm)
+    if 2.0 * r >= L:
+        raise ValueError(
+            f"hole diameter 2*R={2.0 * r:g} mm must be < cell edge L={L:g} mm"
+        )
+    eps = max(0.0, float(overshoot_mm))
+    height = L + 2.0 * eps
+    z0 = -0.5 * L - eps
+    cx, cy = float(center_xy[0]), float(center_xy[1])
+    ocp = _require_ocp()
+    ax = ocp["gp_Ax2"](
+        ocp["gp_Pnt"](cx, cy, z0),
+        ocp["gp_Dir"](0.0, 0.0, 1.0),
+    )
+    return ocp["BRepPrimAPI_MakeCylinder"](ax, r, height).Shape()
+
+
+def ocp_cut_central_cylinder_z(
+    shape: Any,
+    *,
+    radius_mm: float,
+    cell_size_mm: float,
+    overshoot_mm: float = 0.1,
+    center_xy: tuple[float, float] = (0.0, 0.0),
+    heal: bool = True,
+) -> tuple[Any, dict[str, Any]]:
+    """
+    Post-fuse: square/cubic outer envelope kept; subtract a central Z cylinder.
+
+    Returns ``(cut_shape, report)`` with pre/post mass and topology counts.
+    """
+    mass_before = ocp_mass(shape)
+    topo_before = ocp_shape_topology(shape, count_faces=False, check_brep=False)
+    tool = ocp_make_cylinder_z(
+        radius_mm,
+        cell_size_mm=cell_size_mm,
+        overshoot_mm=overshoot_mm,
+        center_xy=center_xy,
+    )
+    cut_shape = ocp_cut(shape, tool, label="central_cylinder_z")
+    if heal:
+        cut_shape = ocp_heal_fused_solid(cut_shape)
+    topo_after = ocp_shape_topology(cut_shape, count_faces=True, check_brep=True)
+    mass_after = float(topo_after["mass_mm3"])
+    report: dict[str, Any] = {
+        "radius_mm": float(radius_mm),
+        "cell_size_mm": float(cell_size_mm),
+        "overshoot_mm": float(overshoot_mm),
+        "center_xy": (float(center_xy[0]), float(center_xy[1])),
+        "axis": "z",
+        "mass_before_mm3": mass_before,
+        "mass_after_mm3": mass_after,
+        "mass_removed_mm3": mass_before - mass_after,
+        "solids_before": int(topo_before["solids"]),
+        "solids_after": int(topo_after["solids"]),
+        "shells_after": int(topo_after["shells"]),
+        "faces_after": int(topo_after.get("faces", 0)),
+        "brep_valid": bool(topo_after.get("brep_valid", False)),
+    }
+    return cut_shape, report
 
 
 def _glue_enum(glue: GlueMode):
@@ -842,6 +1033,19 @@ def _order_octant_shapes(
     if len(shapes) != len(order):
         return list(shapes)
     return [shapes[i] for i in order]
+
+
+# Named fuse orders for fragmentation experiments (indices into octant corners 0..7).
+FUSE_ORDER_PRESETS: dict[str, tuple[int, ...]] = {
+    # Default: -Z quartet then +Z quartet
+    "default": OCTANT_SEQUENTIAL_FUSE_ORDER,
+    # +Z first, then -Z
+    "z_pos_first": (4, 5, 6, 7, 0, 1, 2, 3),
+    # Same-corner vertical pairs first (cross-Z), then fill
+    "vertical_first": (0, 4, 1, 5, 2, 6, 3, 7),
+    # XY face groups then merge across Y
+    "xy_slabs": (0, 1, 4, 5, 2, 3, 6, 7),
+}
 
 
 def _ocp_count_solids(shape: Any) -> int:
@@ -1009,10 +1213,13 @@ def fuse_octant_shapes(
     strategy: FuseStrategy,
     fuzzy_mm: float = 1e-3,
     cell_size_mm: float = 20.0,
+    order: tuple[int, ...] | None = None,
 ) -> tuple[Any, str]:
     """Merge eight octant-cut solids with the requested Glue strategy."""
-    ordered = _order_octant_shapes(shapes)
+    use_order = tuple(order) if order is not None else OCTANT_SEQUENTIAL_FUSE_ORDER
+    ordered = _order_octant_shapes(shapes, use_order)
     min_mass = MIN_CUT_MERGE_MASS_RATIO * float(cut_mass)
+    order_note = list(use_order)
 
     if strategy == "sequential":
         merged = _fuse_group_sequential(
@@ -1022,7 +1229,7 @@ def fuse_octant_shapes(
             fuzzy_mm=fuzzy_mm,
             label="ocp-sequential",
         )
-        desc = f"sequential (order {list(OCTANT_SEQUENTIAL_FUSE_ORDER)}, glue=off)"
+        desc = f"sequential (order {order_note}, glue=off)"
     elif strategy == "sequential_glue_shift":
         merged = _fuse_group_sequential(
             ordered,
@@ -1031,7 +1238,7 @@ def fuse_octant_shapes(
             fuzzy_mm=fuzzy_mm,
             label="ocp-seq-glue-shift",
         )
-        desc = f"sequential + GlueShift (order {list(OCTANT_SEQUENTIAL_FUSE_ORDER)})"
+        desc = f"sequential + GlueShift (order {order_note})"
     elif strategy == "sequential_glue_full":
         merged = _fuse_group_sequential(
             ordered,
@@ -1040,7 +1247,7 @@ def fuse_octant_shapes(
             fuzzy_mm=fuzzy_mm,
             label="ocp-seq-glue-full",
         )
-        desc = f"sequential + GlueFull (order {list(OCTANT_SEQUENTIAL_FUSE_ORDER)})"
+        desc = f"sequential + GlueFull (order {order_note})"
     elif strategy == "batch_glue_shift":
         merged = _fuse_batch(
             ordered,
@@ -1048,7 +1255,7 @@ def fuse_octant_shapes(
             fuzzy_mm=fuzzy_mm,
             label="ocp-batch-glue-shift",
         )
-        desc = "batch fuse all + GlueShift"
+        desc = f"batch fuse all + GlueShift (order {order_note})"
     elif strategy == "batch_glue_full":
         merged = _fuse_batch(
             ordered,
@@ -1056,7 +1263,7 @@ def fuse_octant_shapes(
             fuzzy_mm=fuzzy_mm,
             label="ocp-batch-glue-full",
         )
-        desc = "batch fuse all + GlueFull"
+        desc = f"batch fuse all + GlueFull (order {order_note})"
     elif strategy in ("x_layer_glue_shift", "x_layer_glue_full"):
         glue: GlueMode = "shift" if strategy.endswith("shift") else "full"
         corners = unitcell_octant_corners_mm(cell_size_mm)
@@ -1343,8 +1550,10 @@ def export_q1_ocp_glue_unitcell(
     centre_extension_mm: float | None = None,
     corner_extension_mm: float | None = None,
     ellipse_sweep_mode: EllipseSweepMode = "frenet",
+    fuse_order: tuple[int, ...] | None = None,
+    write_step: bool = True,
 ) -> dict[str, Any]:
-    """Full Q=1 pilot: octant cuts + Glue fuse + STEP export."""
+    """Full Q=1 pilot: octant cuts + Glue fuse + optional STEP export."""
     ellipse_sweep_mode = require_smooth_ellipse_sweep(ellipse_sweep_mode)  # type: ignore[assignment]
     cut_shapes, pipe_ref_mass, cut_mass = build_q1_octant_cut_shapes(
         pipe_parts,
@@ -1361,24 +1570,13 @@ def export_q1_ocp_glue_unitcell(
         strategy=strategy,
         fuzzy_mm=fuzzy_mm,
         cell_size_mm=cell_size_mm,
+        order=fuse_order,
     )
     merged_mass = ocp_mass(merged)
     mem_raw = ocp_shape_topology(merged)
     export_shape = ocp_heal_fused_solid(merged)
     mem_healed = ocp_shape_topology(export_shape)
-    step_readback = ocp_write_step_via_gmsh_brep_heal(export_shape, out_step)
-    from src.export.sw_parasolid import recenter_step_bbox_to_origin
-
-    recenter = recenter_step_bbox_to_origin(out_step)
-    if recenter.get("shifted"):
-        print(
-            f"  recenter 1x1 COM → origin: "
-            f"dx={float(recenter['dx']):+.4f} dy={float(recenter['dy']):+.4f} "
-            f"dz={float(recenter['dz']):+.4f} mm",
-            flush=True,
-        )
-    return {
-        "step_path": os.path.abspath(out_step),
+    out: dict[str, Any] = {
         "method": "ocp_octant_glue_fuse",
         "fuse_strategy": fuse_desc,
         "strategy_key": strategy,
@@ -1393,11 +1591,93 @@ def export_q1_ocp_glue_unitcell(
         "ellipse_sweep_mode": ellipse_sweep_mode,
         "centre_path_extension_mm": centre_extension_mm,
         "corner_path_extension_mm": corner_extension_mm,
+        "fuse_order": list(fuse_order) if fuse_order is not None else list(OCTANT_SEQUENTIAL_FUSE_ORDER),
         "pipe_count": len(pipe_parts),
         "mem_raw_topology": mem_raw,
         "mem_healed_topology": mem_healed,
-        "step_readback_topology": step_readback,
-        "step_solid_ok": bool(step_readback.get("brep_valid")),
-        "step_export_route": step_readback.get("export_route"),
-        "bbox_recenter": recenter,
+        "shape": export_shape,
     }
+    if not write_step:
+        out["step_path"] = None
+        out["step_solid_ok"] = None
+        return out
+
+    step_readback = ocp_write_step_via_gmsh_brep_heal(export_shape, out_step)
+    from src.export.sw_parasolid import (
+        HUB_MIN_FILL_RATIO,
+        HUB_PROBE_HALF_MM,
+        HUB_PROBE_HALF_MM_WIDE,
+        probe_hub_fill_gate,
+        recenter_step_bbox_to_origin,
+    )
+
+    recenter = recenter_step_bbox_to_origin(out_step)
+    if recenter.get("shifted"):
+        print(
+            f"  recenter 1x1 COM → origin: "
+            f"dx={float(recenter['dx']):+.4f} dy={float(recenter['dy']):+.4f} "
+            f"dz={float(recenter['dz']):+.4f} mm",
+            flush=True,
+        )
+
+    hub_ball_applied = False
+    if pipe_mode in ("centre_stub", "centre_stub_corner_ext"):
+        # In-memory BOP cannot seal Af≳2.5 hub voids; after STEP round-trip the
+        # same sphere fuse works and preserves tip face-mate.
+        # Fine ±0.02 alone misses Af=1 Q=1.5 cavities (~0.3 mm); use dual gate.
+        hub = probe_hub_fill_gate(out_step)
+        if not bool(hub.get("ok")):
+            from src.export.ocp_paper_box_array_fuse import ocp_read_step_shape
+
+            hub_r = max(float(part[2]) for part in pipe_parts)
+            fine_r = float(hub["fine"]["fill_ratio"])
+            wide_r = float(hub["wide"]["fill_ratio"])
+            print(
+                f"  ocp hub-ball fill (STEP): fine±{HUB_PROBE_HALF_MM:g}={fine_r:.3f} "
+                f"wide±{HUB_PROBE_HALF_MM_WIDE:g}={wide_r:.3f} "
+                f"(need ≥{HUB_MIN_FILL_RATIO:g}); fusing r={hub_r:g} mm sphere",
+                flush=True,
+            )
+            seeded = ocp_read_step_shape(out_step)
+            filled = ocp_fill_hub_ball(
+                seeded, hub_r, fuzzy_mm=max(float(fuzzy_mm), 0.1)
+            )
+            after_fine = ocp_hub_fill_ratio(filled, half_mm=HUB_PROBE_HALF_MM)
+            after_wide = ocp_hub_fill_ratio(filled, half_mm=HUB_PROBE_HALF_MM_WIDE)
+            if (
+                after_fine + 1e-9 < float(HUB_MIN_FILL_RATIO)
+                or after_wide + 1e-9 < float(HUB_MIN_FILL_RATIO)
+            ):
+                raise RuntimeError(
+                    f"hub-ball fill failed after STEP fuse "
+                    f"(fine={after_fine:.3f} wide={after_wide:.3f})"
+                )
+            step_readback = ocp_write_step_via_gmsh_brep_heal(filled, out_step)
+            recenter = recenter_step_bbox_to_origin(out_step)
+            hub_ball_applied = True
+            print(
+                f"  ocp hub-ball fill (STEP): after fine={after_fine:.3f} "
+                f"wide={after_wide:.3f} mass={ocp_mass(filled):.1f} mm3",
+                flush=True,
+            )
+            if recenter.get("shifted"):
+                print(
+                    f"  recenter 1x1 COM → origin: "
+                    f"dx={float(recenter['dx']):+.4f} dy={float(recenter['dy']):+.4f} "
+                    f"dz={float(recenter['dz']):+.4f} mm",
+                    flush=True,
+                )
+
+    out.update(
+        {
+            "step_path": os.path.abspath(out_step),
+            "step_readback_topology": step_readback,
+            "step_solid_ok": bool(step_readback.get("brep_valid")),
+            "step_export_route": step_readback.get("export_route"),
+            "bbox_recenter": recenter,
+            "hub_ball_fill_applied": hub_ball_applied,
+        }
+    )
+    # Don't keep OCC shape in JSON-serializable reports
+    del out["shape"]
+    return out

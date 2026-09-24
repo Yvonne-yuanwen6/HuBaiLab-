@@ -9,6 +9,12 @@ Example (Windows: CAE mesh runs on server by default):
     --case-suffix cae_tet0p6mm80_5mmin_paper --cae-seed 0.6 --strain 0.8 --load-rate-mm-min 5 \\
     --explicit-dt 0.0001 --explicit-dt-mode fixed --no-mass-scaling --material-model neo_hooke
 
+Non-cubic subarray (e.g. 4x4x2 from test crop; reuse existing CAE mesh):
+  py -3 scripts/run_hu_bai_bcc_solid_cad_cae_tet_export.py --nx 4 --ny 4 --nz 2 --L 20 \\
+    --Q 0 --Af 2 --rod-diameter 2 --profile fast --mesh-locally \\
+    --cae-mesh-inp path/to/*_cae_mesh.inp --cad path/to/cropped.step \\
+    --slug-mode short --short-slug cae_tet0p6mm80_5mmin_paperbox
+
 On Linux server (mesh locally):
   py -3 scripts/run_hu_bai_bcc_solid_cad_cae_tet_export.py ... --mesh-locally
 """
@@ -73,7 +79,30 @@ ensure_output_dirs()
 _parser = argparse.ArgumentParser(description="Hu & Bai CAD solid → CAE C3D4 compression INP")
 _parser.add_argument("--Q", type=float, default=0.0)
 _parser.add_argument("--Af", type=float, default=2.0)
-_parser.add_argument("--cells", type=int, default=4)
+_parser.add_argument(
+    "--cells",
+    type=int,
+    default=4,
+    help="Default NX=NY=NZ when --nx/--ny/--nz omitted (cubic block)",
+)
+_parser.add_argument(
+    "--nx",
+    type=int,
+    default=None,
+    help="Cells in X (default = --cells); use with --ny/--nz for non-cubic",
+)
+_parser.add_argument(
+    "--ny",
+    type=int,
+    default=None,
+    help="Cells in Y (default = --cells)",
+)
+_parser.add_argument(
+    "--nz",
+    type=int,
+    default=None,
+    help="Cells in Z / layer count (default = --cells); sets stroke = strain*nz*L",
+)
 _parser.add_argument("--L", type=float, default=20.0, help="Unit cell edge length [mm]")
 _parser.add_argument(
     "--rod-diameter",
@@ -300,7 +329,12 @@ L = float(_args.L)
 ROD_D = float(_args.rod_diameter)
 AF = float(_args.Af)
 Q = float(_args.Q)
-NX = NY = NZ = int(_args.cells)
+_cells = int(_args.cells)
+NX = int(_args.nx) if _args.nx is not None else _cells
+NY = int(_args.ny) if _args.ny is not None else _cells
+NZ = int(_args.nz) if _args.nz is not None else _cells
+if min(NX, NY, NZ) < 1:
+    raise SystemExit(f"--nx/--ny/--nz/--cells must be >= 1, got {NX}x{NY}x{NZ}")
 CAE_SEED = float(_args.cae_seed)
 CAE_MESH_QUALITY = str(_args.cae_mesh_quality)
 CAE_RODS_PER_DIAMETER = float(_args.cae_rods_per_diameter)

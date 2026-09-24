@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import time
+from typing import Any
 
 # Large mesh STL via COM has crashed SolidWorks 2025 in testing (~80k facets).
 SW_STL_COM_MAX_BYTES = 400_000
@@ -687,6 +688,91 @@ def _measure_step_occ_stats_impl(step_path: str) -> dict[str, float | int]:
         }
     finally:
         gmsh.finalize()
+
+
+# ±0.3 was too coarse: a ~0.08 mm hub cavity still fills the large cube via walls
+# (af2p5 2026-09-15 false ACCEPT). ±0.02 catches that void; known-good Af cases
+# still fill≈1 at ±0.01.
+HUB_PROBE_HALF_MM = 0.02
+# Wider cube catches centre_stub cavities that still fill the ±0.02 probe
+# (af1q1p5 @ Q=1.5: fine fill≈1, wide ±0.30 fill≈0.84).
+HUB_PROBE_HALF_MM_WIDE = 0.30
+HUB_MIN_FILL_RATIO = 0.85
+# SW-clean circle 1x1 seeds land near 32 faces (af1q1 / af1q1p5 both_end).
+# centre_stub_corner_ext Q=1.5 often keeps 44–50 faces with a visible hub seam /
+# fragmented rods that still pass volume_count==1 + hub-fill (2026-09-16).
+UNITCELL_MAX_FACE_COUNT = 40
+
+
+def probe_unitcell_visual_gate(step_path: str) -> dict[str, Any]:
+    """Reject fragmented / seam-heavy 1x1 seeds that SW shows as broken.
+
+    Uses gmsh face_count as a cheap proxy validated against SW:
+    - good ``both_end`` Af=1 Q=1.5: faces=32, SW check OK
+    - bad ``centre_stub`` Af=1/1.5 Q=1.5: faces=44–50, hub seam / missing rods
+    """
+    stats = measure_step_occ_stats(step_path)
+    faces = int(stats.get("face_count") or 0)
+    vols = int(stats.get("volume_count") or 0)
+    ok = vols == 1 and 0 < faces <= int(UNITCELL_MAX_FACE_COUNT)
+    return {
+        "ok": bool(ok),
+        "volume_count": vols,
+        "face_count": faces,
+        "max_face_count": int(UNITCELL_MAX_FACE_COUNT),
+        "mass_mm3": float(stats.get("mass_mm3") or 0.0),
+    }
+
+
+def probe_hub_fill(
+    step_path: str,
+    *,
+    half_mm: float = HUB_PROBE_HALF_MM,
+) -> dict[str, float | bool]:
+    """Fill fraction of a cube ±half_mm at the origin (hub void detector).
+
+    A solid hub nearly fills the cube. A cell-centre cavity smaller than the
+    probe leaves fill≈0. Do not use a large half_mm alone: outer walls of a tiny
+    void can still report fill≈1 — pair with ``probe_hub_fill_gate``.
+    """
+    from src.export.ocp_paper_box_array_fuse import ocp_read_step_shape
+    from src.export.ocp_unitcell_fuse import _box_from_bounds, ocp_common, ocp_mass
+
+    step_path = os.path.abspath(step_path)
+    if not os.path.isfile(step_path):
+        raise FileNotFoundError(step_path)
+    h = float(half_mm)
+    probe_mm3 = (2.0 * h) ** 3
+    seed = ocp_read_step_shape(step_path)
+    box = _box_from_bounds((-h, h, -h, h, -h, h))
+    try:
+        common_mm3 = float(ocp_mass(ocp_common(seed, box)))
+    except Exception:
+        common_mm3 = 0.0
+    fill = (common_mm3 / probe_mm3) if probe_mm3 > 0.0 else 0.0
+    return {
+        "half_mm": h,
+        "probe_mm3": probe_mm3,
+        "common_mm3": common_mm3,
+        "fill_ratio": fill,
+        "ok": bool(fill >= float(HUB_MIN_FILL_RATIO)),
+    }
+
+
+def probe_hub_fill_gate(step_path: str) -> dict[str, Any]:
+    """Hub ACCEPT / fill trigger: fine (±0.02) and wide (±0.30) probes must both pass."""
+    fine = probe_hub_fill(step_path, half_mm=HUB_PROBE_HALF_MM)
+    wide = probe_hub_fill(step_path, half_mm=HUB_PROBE_HALF_MM_WIDE)
+    ok = bool(fine.get("ok")) and bool(wide.get("ok"))
+    return {
+        "ok": ok,
+        "min_fill_ratio": float(HUB_MIN_FILL_RATIO),
+        "fine": fine,
+        "wide": wide,
+        "fill_ratio": float(min(float(fine["fill_ratio"]), float(wide["fill_ratio"]))),
+        "half_mm": float(HUB_PROBE_HALF_MM_WIDE),
+        "common_mm3": float(wide.get("common_mm3") or 0.0),
+    }
 
 
 def measure_step_occ_stats(step_path: str) -> dict[str, float | int]:

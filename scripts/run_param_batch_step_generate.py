@@ -1,5 +1,5 @@
 """
-Batch-generate paper_box unitcell + strut1 + 4x4x4 STEP into output/cad/批量构型/{id}/.
+Batch-generate paper_box unitcell + strut1 + 4x4x4 STEP into output/cad/param_batch/{id}/.
 
 Naming:
   {id}_1x1.step
@@ -17,9 +17,13 @@ and a single solid remains — design params Af/Q/deq/k are unchanged. Disable w
 ``--no-post-heal`` / ``BATCH_STEP_POST_HEAL=0``.
 
 Locked 444 scheme (do not regress):
-  - Preferred: ocp_seed_scale*_zcopy_* = scale-inflate → fuse iz=0 only → +Z copy
-    layers → 444z fuse → gmsh-verify single solid.
-  - Thin rod (deq<1.75, k=1): deep_pad first, then seed_scale_zcopy.
+  - Preferred array: ocp_noclip_batch64 (pitch=L, GlueShift) when seed has face-mate.
+  - Q=1 circle deq=2: 1x1 prefer centre_stub_corner_ext (octant-clamped chord +
+    STEP hub-ball when needed) then both_end. ACCEPT also requires a solid hub
+    (origin ±0.02 mm cube fill≥0.85); triangular hub voids REJECT.
+  - Thin rod (deq=1.5, k=1): 1x1 prefer centre_stub_corner_ext+ext=1.5 (array-friendly);
+    both_end+ov=0.05 is strut1-parity fallback only (2026-08-04: OCC neighbour fuse empty).
+  - Thin-rod 444 ladder: noclip_batch64 → scale_batch → deep_pad → seed_scale_zcopy → OCP/gmsh.
   - --jobs>1: gmsh.initialize is never called on worker threads (child process).
   - --force: light pre-scan (qc.json + sizes), no gmsh measure of existing 444.
 
@@ -32,6 +36,7 @@ timeout; hung OCC/gmsh work is killed and the ladder advances.
   py -3 scripts/run_param_batch_step_generate.py --repair
   py -3 scripts/run_param_batch_step_generate.py --repair --only af2q1_deq1p5_k1
   py -3 scripts/run_param_batch_step_generate.py --strut-only
+  py -3 scripts/run_param_batch_step_generate.py --unitcell-only --force --only af1q1p5_deq2_k1
   py -3 scripts/run_param_batch_step_generate.py --force --jobs 2 --only af2q1_deq2_k1 af2q0_deq2_k1p5
 """
 
@@ -53,13 +58,21 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from src.export.sw_parasolid import measure_step_occ_stats
+from src.export.sw_parasolid import (
+    HUB_MIN_FILL_RATIO,
+    HUB_PROBE_HALF_MM,
+    HUB_PROBE_HALF_MM_WIDE,
+    UNITCELL_MAX_FACE_COUNT,
+    measure_step_occ_stats,
+    probe_hub_fill_gate,
+    probe_unitcell_visual_gate,
+)
 from src.generator.hu_bai_bcc import HuBaiLatticeGenerator, is_q1_period
 from src.paths import CAD_ROOT, ensure_output_dirs
 
 ensure_output_dirs()
 
-BATCH_DIR_NAME = "批量构型"
+BATCH_DIR_NAME = "param_batch"
 DEFAULT_INDEX = os.path.join(str(CAD_ROOT), BATCH_DIR_NAME, "_batch_index.json")
 L_MM = 20.0
 N_SEG = 24
@@ -102,11 +115,17 @@ def _profile_from_deq_k(deq_mm: float, k: float) -> tuple[str, float, float]:
 
 
 def _choose_array_backend(q: float, k: float) -> tuple[str, str]:
-    """(backend, ocp_fuse_mode)."""
-    if is_q1_period(q) or float(k) > 1.0 + 1e-9:
+    """(backend, ocp_fuse_mode).
+
+    Q=1 and Q=1.5 paper_box hybrids use OCP noclip/scale/seed_scale ladders
+    (see ``_export_array`` hard_q). Plain gmsh layered fuse loses volumes on
+    these seeds (2026-09-16: af1q1p5 / af1p5q1p5).
+    """
+    qv = float(q)
+    if is_q1_period(qv) or abs(qv - 1.5) < 1e-9 or float(k) > 1.0 + 1e-9:
         mode = (
             "sequential"
-            if (is_q1_period(q) or float(q) >= 1.0 - 1e-9)
+            if (is_q1_period(qv) or qv >= 1.0 - 1e-9)
             else "hierarchical_batch"
         )
         return "ocp", mode
@@ -348,6 +367,7 @@ def _export_unitcell(
     k: float,
     force: bool,
     attempt_timeout_s: float = DEFAULT_UNITCELL_ATTEMPT_TIMEOUT_S,
+    cell_size_mm: float = L_MM,
 ) -> dict[str, Any]:
     if (not force) and _seed_ok(out_step):
         print(f"  skip 1x1 (exists vol=1): {out_step}", flush=True)
@@ -369,9 +389,13 @@ def _export_unitcell(
     from src.export.timed_attempt import AttemptTimeoutError, run_with_timeout
 
     profile, rod_d, minor_ratio = _profile_from_deq_k(deq_mm, k)
+    cell = float(cell_size_mm)
+    s = cell / float(L_MM)
+    # Match L=20 recipe rungs by parent-equivalent millimetres (geom. similar).
+    deq_ref = float(deq_mm) / s if s > 1e-12 else float(deq_mm)
     base: dict[str, Any] = {
         "out_step": out_step,
-        "cell_size_mm": L_MM,
+        "cell_size_mm": cell,
         "rod_diameter_mm": rod_d,
         "amplitude_mm": float(Af),
         "period_factor": float(Q),
@@ -398,49 +422,192 @@ def _export_unitcell(
         ov: float | None = None,
         ext: float | None = None,
     ) -> None:
-        bits = [f"ocp_{pipe_mode}_{strat}_f{str(fz).replace('.', 'p')}"]
-        if ov is not None:
-            bits.append(f"ov{str(ov).replace('.', 'p')}")
-        if ext is not None:
-            bits.append(f"ext{str(ext).replace('.', 'p')}")
+        # Scale path extension / octant overlap with L; keep fuzzy at proven
+        # absolute mm (scaled fz emptied BOP on L=10 Q=1.5, 2026-09-16).
+        fz_s = float(fz)
+        ov_s = None if ov is None else float(ov) * s
+        ext_s = None if ext is None else float(ext) * s
+        bits = [f"ocp_{pipe_mode}_{strat}_f{str(fz_s).replace('.', 'p')}"]
+        if ov_s is not None:
+            bits.append(f"ov{str(ov_s).replace('.', 'p')}")
+        if ext_s is not None:
+            bits.append(f"ext{str(ext_s).replace('.', 'p')}")
         payload = dict(base)
         payload.update(
             {
                 "pipe_mode": pipe_mode,
                 "strategy": strat,
-                "fuzzy_mm": fz,
-                "center_overlap_mm": ov,
-                "centre_extension_mm": ext,
-                "corner_extension_mm": ext,
+                "fuzzy_mm": fz_s,
+                "center_overlap_mm": ov_s,
+                "centre_extension_mm": ext_s,
+                "corner_extension_mm": ext_s,
             }
         )
         attempts.append(
             ("_".join(bits), unitcell_ocp_job, payload, float(attempt_timeout_s))
         )
 
-    # Tip-sliver / strut1 parity:
-    # - Prefer OCP both_end_extension (same recipe as strut1 QC) when it fuses.
-    # - af2q1_deq1p5_k1 (2026-07-29): both_end + ov=0.05 + fz=0.1 + auto ext
-    #   → 1-solid ~221 mm³ (ov=0.02 empty-BOP at step3). centre_stub kept as fallback.
-    # - OCP centre_stub_corner_ext: corner path ext + centre stub (fuse-stable when
-    #   both_end fails; outer tips flat, centre end ≠ strut1).
+    # Tip-sliver / array friendliness:
+    # - af2q1_deq1p5_k1 (2026-08-04): prefer centre_stub_corner_ext+ext=1.5
+    #   → face_mate HIT → noclip_batch64 (ratio≈64). both_end+ov=0.05 still makes a
+    #   clean 1x1 (~221 mm³) and matches strut1 tip recipe, but pitch=L OCC fuse is
+    #   empty (SW Combine can succeed; MakerVolume/sew also fail) — keep as fallback.
+    # - af2q1_deq2p5_k1: centre_stub_corner_ext+ext=2.5 → face_mate → noclip.
+    # - OCP centre_stub_corner_ext (default auto ext): corner path ext + centre stub.
     # Forbidden ACCEPT: bare centre_stub / gmsh_paper_box / bare gmsh_octant.
     #
-    # 1x1 ACCEPT = single solid + tip-sliver only (2026-07-29). Pitch=L face-mate is
-    # an array-stage concern (tip-push / noclip), not a unitcell gate — ``_seed_face_mate_ok``
-    # remains available for 444 diagnostics.
+    # 1x1 ACCEPT = single solid + tip-sliver + solid hub (2026-09-15). Pitch=L
+    # face-mate remains an array-stage concern — ``_seed_face_mate_ok`` is diagnostic
+    # only. For thin rods, prefer a face-mate seed so the first ACCEPT is array-usable.
     need_ocp = profile == "ellipse" or is_q1_period(Q) or abs(float(Q) - 1.5) < 1e-9
     if need_ocp:
+        if profile != "ellipse" and abs(float(Q) - 1.5) < 1e-9 and abs(deq_ref - 2.0) < 1e-6:
+            # Q=1.5 circle deq=2 (2026-09-16 SW): centre_stub_corner_ext ACCEPTs
+            # with hub-fill but SW shows missing rods / equatorial hub seam
+            # (faces 44–50). Prefer both_end:
+            # - Af=0.5: auto-ext faces=32 OK but no pitch=L tip mate → noclip/deep_pad
+            #   empty (2026-09-17); prefer longer tip first + face_mate gate below.
+            # - Af=1: ov=0.02 f=0.05 auto-ext → faces=32 SW OK + tip mate → noclip
+            # - Af=1.5: auto-ext empty-BOP; ext=2.0 ov=0.05 f=0.1 → faces=32
+            if float(Af) <= 0.5 + 1e-9:
+                _add_ocp(
+                    "both_end_extension",
+                    "sequential_glue_shift",
+                    0.1,
+                    0.05,
+                    2.0,
+                )
+                _add_ocp(
+                    "both_end_extension",
+                    "sequential_glue_shift",
+                    0.1,
+                    0.05,
+                    2.5,
+                )
+                _add_ocp(
+                    "both_end_extension",
+                    "sequential_glue_shift",
+                    0.05,
+                    0.05,
+                    3.0,
+                )
+            _add_ocp(
+                "both_end_extension",
+                "sequential_glue_shift",
+                0.05,
+                0.02,
+            )
+            _add_ocp(
+                "both_end_extension",
+                "sequential_glue_shift",
+                0.1,
+                0.05,
+                2.0,
+            )
+            _add_ocp(
+                "both_end_extension",
+                "sequential_glue_shift",
+                0.05,
+                0.03,
+            )
+            _add_ocp(
+                "both_end_extension",
+                "sequential_glue_shift",
+                0.1,
+                0.02,
+            )
+            _add_ocp(
+                "both_end_extension",
+                "sequential_glue_shift",
+                0.05,
+                0.05,
+                2.0,
+            )
+            # Last-resort stubs (usually fail visual face gate).
+            _add_ocp(
+                "centre_stub_corner_ext",
+                "sequential_glue_shift",
+                0.05,
+                0.02,
+                2.0,
+            )
+            _add_ocp(
+                "centre_stub_corner_ext",
+                "sequential_glue_shift",
+                0.05,
+                0.02,
+                2.5,
+            )
+            _add_ocp(
+                "centre_stub_corner_ext",
+                "sequential_glue_shift",
+                0.05,
+                0.02,
+                3.0,
+            )
         if profile != "ellipse" and is_q1_period(Q):
-            if abs(float(deq_mm) - 1.5) < 1e-6:
-                # af2q1_deq1p5_k1: strut1-parity both_end; ov=0.05 required to fuse
+            if abs(deq_ref - 1.5) < 1e-6:
+                # af2q1_deq1p5_k1: array-friendly face-mate first, then strut1 both_end
+                _add_ocp(
+                    "centre_stub_corner_ext",
+                    "sequential_glue_shift",
+                    0.1,
+                    0.02,
+                    1.5,
+                )
                 _add_ocp(
                     "both_end_extension",
                     "sequential_glue_shift",
                     0.1,
                     0.05,
                 )
-            if abs(float(deq_mm) - 2.5) < 1e-6:
+            if abs(deq_ref - 2.0) < 1e-6:
+                # Q=1 circle deq=2: prefer centre_stub_corner_ext (face-mate →
+                # noclip). Octant-clamped first chord + post-STEP hub-ball seal
+                # Af=2.5 hub voids without breaking tip mate (2026-09-15).
+                # both_end remains hub-solid fallback but often has no tip mate.
+                _add_ocp(
+                    "centre_stub_corner_ext",
+                    "sequential_glue_shift",
+                    0.1,
+                    0.02,
+                    2.5,
+                )
+                _add_ocp(
+                    "centre_stub_corner_ext",
+                    "sequential_glue_shift",
+                    0.1,
+                    0.02,
+                    3.0,
+                )
+                _add_ocp(
+                    "both_end_extension",
+                    "sequential_glue_shift",
+                    0.1,
+                    0.05,
+                    2.5,
+                )
+                _add_ocp(
+                    "both_end_extension",
+                    "sequential_glue_shift",
+                    0.1,
+                    0.05,
+                    3.0,
+                )
+                _add_ocp(
+                    "both_end_extension",
+                    "sequential_glue_shift",
+                    0.05,
+                    0.05,
+                )
+                _add_ocp(
+                    "both_end_extension",
+                    "sequential_glue_shift",
+                    0.2,
+                    0.05,
+                    2.5,
+                )
+            if abs(deq_ref - 2.5) < 1e-6:
                 # af2q1_deq2p5_k1: ext=2.5 → X/Y/Z HIT → noclip_batch64
                 _add_ocp(
                     "centre_stub_corner_ext",
@@ -453,6 +620,26 @@ def _export_unitcell(
             # af2q0p5_deq2_k2: centre_stub fails; both_end+ext=3 → HIT → noclip
             _add_ocp("both_end_extension", "sequential_glue_shift", 0.1, 0.05, 3.0)
             _add_ocp("both_end_extension", "sequential_glue_shift", 0.1, 0.02, 2.5)
+        if profile == "ellipse" and abs(deq_ref - 2.0) < 1e-6:
+            # af2q1_deq2_k1p5 (κ=1.5): auto centre_stub leaves top tip poles that
+            # seed ~0.09 mm tet slivers under paperbox contact — prefer longer
+            # corner_ext / both_end before auto rung (2026-09-07 tipclean).
+            _add_ocp(
+                "centre_stub_corner_ext",
+                "sequential_glue_shift",
+                0.1,
+                0.02,
+                2.5,
+            )
+            _add_ocp(
+                "centre_stub_corner_ext",
+                "sequential_glue_shift",
+                0.1,
+                0.02,
+                3.0,
+            )
+            _add_ocp("both_end_extension", "sequential_glue_shift", 0.1, 0.05, 3.0)
+            _add_ocp("both_end_extension", "sequential_glue_shift", 0.1, 0.05, 2.5)
         for strat, fz in (
             ("sequential_glue_shift", 0.05),
             ("sequential_glue_shift", 0.1),
@@ -539,6 +726,79 @@ def _export_unitcell(
                         flush=True,
                     )
                     continue
+                # Hub-void lock: refuse cell-centre cavity (strut1 parity).
+                # Dual probe: ±0.02 misses Af=1 Q=1.5 voids that ±0.30 catches.
+                try:
+                    hub = probe_hub_fill_gate(out_step)
+                except Exception as hub_exc:
+                    hub = {
+                        "ok": False,
+                        "fill_ratio": 0.0,
+                        "error": str(hub_exc),
+                    }
+                if not bool(hub.get("ok")):
+                    fill = float(hub.get("fill_ratio") or 0.0)
+                    fine = hub.get("fine") or {}
+                    wide = hub.get("wide") or {}
+                    errors.append(
+                        f"{label}: refused hub-void seed "
+                        f"(fill={fill:.3f}<{HUB_MIN_FILL_RATIO}; "
+                        f"{time.time() - t0:.0f}s)"
+                    )
+                    print(
+                        f"    REJECT {label}: hub-void "
+                        f"(fine±{HUB_PROBE_HALF_MM}mm="
+                        f"{float(fine.get('fill_ratio') or 0.0):.3f}, "
+                        f"wide±{HUB_PROBE_HALF_MM_WIDE}mm="
+                        f"{float(wide.get('fill_ratio') or 0.0):.3f}; "
+                        f"need ≥{HUB_MIN_FILL_RATIO})",
+                        flush=True,
+                    )
+                    continue
+                # Visual lock: refuse fragmented stub seams / missing-rod topology
+                # that still pass volume+hub (SW 2026-09-16 af1q1p5 / af1p5q1p5).
+                try:
+                    visual = probe_unitcell_visual_gate(out_step)
+                except Exception as vis_exc:
+                    visual = {
+                        "ok": False,
+                        "face_count": -1,
+                        "error": str(vis_exc),
+                    }
+                if not bool(visual.get("ok")):
+                    faces = int(visual.get("face_count") or -1)
+                    errors.append(
+                        f"{label}: refused visual seed "
+                        f"(faces={faces}>{UNITCELL_MAX_FACE_COUNT}; "
+                        f"{time.time() - t0:.0f}s)"
+                    )
+                    print(
+                        f"    REJECT {label}: visual "
+                        f"(faces={faces}, need 1..{UNITCELL_MAX_FACE_COUNT})",
+                        flush=True,
+                    )
+                    continue
+                # Af≤0.5 @ Q=1.5: require pitch=L tip mate so noclip can succeed
+                # (2026-09-17 af0p5q1p5: auto-ext visual OK but mate=False → hours wasted).
+                require_mate = (
+                    abs(float(Q) - 1.5) < 1e-9
+                    and float(Af) <= 0.5 + 1e-9
+                    and abs(float(deq_mm) - 2.0) < 1e-6
+                )
+                mate_ok = True
+                if require_mate:
+                    mate_ok = bool(_seed_face_mate_ok(out_step, pitch_mm=float(cell_size_mm)))
+                    if not mate_ok:
+                        errors.append(
+                            f"{label}: refused no-tip-mate seed "
+                            f"(Af≤0.5 Q=1.5; {time.time() - t0:.0f}s)"
+                        )
+                        print(
+                            f"    REJECT {label}: no pitch=L face-mate "
+                            f"(required for Af≤0.5 Q=1.5 array)",
+                            flush=True,
+                        )
+                        continue
                 report = dict(report or {})
                 report["seed_method"] = label
                 report["path"] = out_step
@@ -547,6 +807,24 @@ def _export_unitcell(
                     payload.get("both_end_extension")
                     or payload.get("pipe_mode") == "both_end_extension"
                 )
+                if require_mate:
+                    report["face_mate_gate"] = {"ok": True, "required": True}
+                report["hub_fill"] = {
+                    "half_mm": float(HUB_PROBE_HALF_MM),
+                    "half_mm_wide": float(HUB_PROBE_HALF_MM_WIDE),
+                    "fill_ratio": float(hub.get("fill_ratio") or 0.0),
+                    "fine_fill_ratio": float((hub.get("fine") or {}).get("fill_ratio") or 0.0),
+                    "wide_fill_ratio": float((hub.get("wide") or {}).get("fill_ratio") or 0.0),
+                    "common_mm3": float(hub.get("common_mm3") or 0.0),
+                    "min_fill_ratio": float(HUB_MIN_FILL_RATIO),
+                    "ok": True,
+                }
+                report["visual_gate"] = {
+                    "ok": True,
+                    "face_count": int(visual.get("face_count") or 0),
+                    "max_face_count": int(UNITCELL_MAX_FACE_COUNT),
+                    "mass_mm3": float(visual.get("mass_mm3") or 0.0),
+                }
                 # Export paths already recenter; keep idempotent for legacy/edge cases.
                 report = _apply_unitcell_bbox_recenter(out_step, report)
                 # Face-mate is not a 1x1 ACCEPT gate (array stage / tip-push owns it).
@@ -580,6 +858,7 @@ def _export_strut1(
     k: float,
     force: bool,
     attempt_timeout_s: float = DEFAULT_UNITCELL_ATTEMPT_TIMEOUT_S,
+    cell_size_mm: float = L_MM,
 ) -> dict[str, Any]:
     """Export one paper-box octant-cut strut (+ pre-cut raw). Failures non-fatal for QC."""
     raw_step = _strut1_raw_path(out_step)
@@ -602,7 +881,7 @@ def _export_strut1(
     payload: dict[str, Any] = {
         "out_step": out_step,
         "raw_out_step": raw_step,
-        "cell_size_mm": L_MM,
+        "cell_size_mm": float(cell_size_mm),
         "rod_diameter_mm": rod_d,
         "amplitude_mm": float(Af),
         "period_factor": float(Q),
@@ -685,6 +964,8 @@ def _export_array(
     deq_mm: float = 2.0,
     force: bool,
     attempt_timeout_s: float = DEFAULT_ARRAY_ATTEMPT_TIMEOUT_S,
+    skip_noclip: bool = False,
+    cell_size_mm: float = L_MM,
 ) -> dict[str, Any]:
     if (
         (not force)
@@ -721,7 +1002,7 @@ def _export_array(
         "nx": N_CELLS,
         "ny": N_CELLS,
         "nz": N_CELLS,
-        "cell_size": L_MM,
+        "cell_size": float(cell_size_mm),
         "deq_mm": float(deq_mm),
         "Af": float(Af),
         "rod_d": float(deq_mm),
@@ -749,6 +1030,12 @@ def _export_array(
     def _append_noclip_batch(
         specs: tuple[tuple[str, float], ...] = (("shift", 0.1), ("off", 0.1)),
     ) -> None:
+        if skip_noclip:
+            print(
+                "  skip noclip_batch64 (--skip-noclip / no pitch=L tip mate)",
+                flush=True,
+            )
+            return
         for glue, fz in specs:
             payload = dict(base)
             payload.update({"glue": glue, "fuzzy_mm": fz, "k": float(k)})
@@ -782,6 +1069,28 @@ def _export_array(
     # af2q1_deq2_k1). Layered row/slab/zcopy destroys orthogonal contacts.
     if backend == "ocp" and hard_q and not thin_rod:
         _append_noclip_batch((("shift", 0.1), ("off", 0.1)))
+        # Q=1.5 both_end seeds often lack tip-mate (2026-09-16 af1p5q1p5):
+        # scale/zcopy/layered burn hours then fail on Z; try deep_pad early.
+        for pad, glue, fz in DEEP_PAD_SPECS_THIN_ROD:
+            payload = dict(base)
+            payload.update(
+                {
+                    "pad_mm": pad,
+                    "glue": glue,
+                    "fuzzy_mm": fz,
+                    "cell_fuzzy_mm": 0.1,
+                    "k": float(k),
+                    "period_factor": float(Q),
+                    "amplitude": float(Af),
+                }
+            )
+            tag = (
+                f"ocp_deep_pad{str(pad).replace('.', 'p')}"
+                f"_g{glue}_f{str(fz).replace('.', 'p')}"
+            )
+            attempts.append(
+                (tag, array_deep_pad_job, payload, float(attempt_timeout_s))
+            )
         # When raw place has no volume overlap (e.g. af2q1p5): scale then batch64.
         _append_scale_batch(
             (
@@ -830,8 +1139,9 @@ def _export_array(
             (ocp_mode, "shift", 0.40, "shift", 0.20, True, 0.2),
         ]
         if thin_rod:
-            # Face-mate seed (corner_ext=1.5) → noclip first (2026-07-19).
-            # deep_pad remains fallback if seed still has no pitch=L contact.
+            # Face-mate seed (corner_ext=1.5) → noclip first
+            # (2026-07-19; reconfirmed 2026-08-04 af2q1_deq1p5_k1 after both_end VOID-array).
+            # If 1x1 was both_end (no pitch=L HIT), noclip empty-BOP — scale/deep_pad follow.
             _append_noclip_batch((("shift", 0.1), ("off", 0.1)))
             _append_scale_batch(
                 (
@@ -1088,16 +1398,19 @@ def _process_case(
     force: bool,
     array_only: bool,
     strut_only: bool,
+    unitcell_only: bool = False,
     tol_rel: float,
     unitcell_timeout_s: float,
     array_timeout_s: float,
     post_heal: bool = True,
+    skip_noclip: bool = False,
 ) -> dict[str, Any]:
     """Run one case end-to-end (safe to call from a worker thread)."""
     Af = float(meta["Af"])
     Q = float(meta["Q"])
     deq = float(meta["deq_mm"])
     k = float(meta["k"])
+    cell = float(meta.get("L_mm") or meta.get("cell_size_mm") or L_MM)
     case_dir = os.path.join(batch_root, case_id)
     work_dir = os.path.join(case_dir, ".work")
     unit_step = os.path.join(case_dir, f"{case_id}_1x1.step")
@@ -1107,6 +1420,7 @@ def _process_case(
     os.makedirs(case_dir, exist_ok=True)
 
     print(f"\n######## [{index_i}/{n_total}] {case_id} ########", flush=True)
+    print(f"  params Af={Af} Q={Q} deq={deq} k={k} L={cell}", flush=True)
     t0 = time.time()
     entry: dict[str, Any] = {
         "case_id": case_id,
@@ -1114,6 +1428,7 @@ def _process_case(
         "Q": Q,
         "deq_mm": deq,
         "k": k,
+        "L_mm": cell,
         "unit_step": unit_step,
         "strut_step": strut_step,
         "array_step": array_step,
@@ -1128,6 +1443,7 @@ def _process_case(
                 k=k,
                 force=bool(force),
                 attempt_timeout_s=float(unitcell_timeout_s),
+                cell_size_mm=cell,
             )
             entry["strut_report"] = {
                 "skipped": bool(s_rep.get("skipped")),
@@ -1158,6 +1474,52 @@ def _process_case(
                 prev["case_id"] = case_id
             with open(qc_path, "w", encoding="utf-8") as f:
                 json.dump(prev, f, indent=2, ensure_ascii=False)
+        elif unitcell_only:
+            u_rep = _export_unitcell(
+                out_step=unit_step,
+                Af=Af,
+                Q=Q,
+                deq_mm=deq,
+                k=k,
+                force=bool(force),
+                attempt_timeout_s=float(unitcell_timeout_s),
+                cell_size_mm=cell,
+            )
+            entry["unitcell_report"] = {
+                "skipped": bool(u_rep.get("skipped")),
+                "seed_method": u_rep.get("seed_method"),
+                "attempt_seconds": u_rep.get("attempt_seconds"),
+                "hub_fill": u_rep.get("hub_fill"),
+                "visual_gate": u_rep.get("visual_gate"),
+                "both_end_extension": u_rep.get("both_end_extension"),
+            }
+            entry["status"] = "unitcell_ok"
+            prev_u: dict[str, Any] = {}
+            if os.path.isfile(qc_path):
+                try:
+                    with open(qc_path, encoding="utf-8") as f:
+                        prev_u = json.load(f)
+                except Exception:
+                    prev_u = {}
+            prev_u.update(
+                {
+                    "case_id": case_id,
+                    "Af": Af,
+                    "Q": Q,
+                    "deq_mm": deq,
+                    "k": k,
+                    "L_mm": cell,
+                    "unit_step": unit_step,
+                    "unitcell_report": entry["unitcell_report"],
+                    "status": "unitcell_ok_pending_array",
+                }
+            )
+            with open(qc_path, "w", encoding="utf-8") as f:
+                json.dump(prev_u, f, indent=2, ensure_ascii=False)
+            print(
+                f"  [{case_id}] unitcell-only OK method={u_rep.get('seed_method')}",
+                flush=True,
+            )
         else:
             u_force = bool(force) and not bool(array_only)
             a_force = bool(force) or bool(array_only)
@@ -1169,6 +1531,7 @@ def _process_case(
                 k=k,
                 force=u_force,
                 attempt_timeout_s=float(unitcell_timeout_s),
+                cell_size_mm=cell,
             )
             entry["unitcell_report"] = {
                 "skipped": bool(u_rep.get("skipped")),
@@ -1183,6 +1546,7 @@ def _process_case(
                 k=k,
                 force=u_force,
                 attempt_timeout_s=float(unitcell_timeout_s),
+                cell_size_mm=cell,
             )
             entry["strut_report"] = {
                 "skipped": bool(s_rep.get("skipped")),
@@ -1204,6 +1568,8 @@ def _process_case(
                 deq_mm=deq,
                 force=a_force,
                 attempt_timeout_s=float(array_timeout_s),
+                skip_noclip=bool(skip_noclip),
+                cell_size_mm=cell,
             )
             entry["array_report"] = {
                 "skipped": bool(a_rep.get("skipped")),
@@ -1270,7 +1636,7 @@ def _load_index(path: str) -> dict[str, Any]:
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="Batch 1x1 + 444 STEP into 批量构型/ (with per-strategy timeouts)"
+        description="Batch 1x1 + 444 STEP into param_batch/ (with per-strategy timeouts)"
     )
     p.add_argument("--index", default=DEFAULT_INDEX)
     p.add_argument("--only", nargs="*", default=[], help="Only these case ids")
@@ -1286,9 +1652,20 @@ def main() -> int:
         help="Keep existing 1x1 seed; only (re)build 444 + QC",
     )
     p.add_argument(
+        "--skip-noclip",
+        action="store_true",
+        help="Skip ocp_noclip_batch64 rungs (use when seed has no pitch=L tip mate; "
+        "go straight to scale_batch / deep_pad / …)",
+    )
+    p.add_argument(
         "--strut-only",
         action="store_true",
         help="Only (re)build strut1 STEP; keep existing 1x1 / 444",
+    )
+    p.add_argument(
+        "--unitcell-only",
+        action="store_true",
+        help="Only (re)build 1x1 STEP; skip strut1 / 444",
     )
     p.add_argument("--tol-rel", type=float, default=VOL_TOL_REL)
     p.add_argument(
@@ -1390,6 +1767,8 @@ def main() -> int:
 
     if args.strut_only:
         print("Strut-only mode: keep existing 1x1 / 444; (re)build strut1", flush=True)
+    if args.unitcell_only:
+        print("Unitcell-only mode: (re)build 1x1; skip strut1 / 444", flush=True)
 
     summary_path = os.path.join(batch_root, "_batch_run_summary.json")
     results: list[dict[str, Any]] = []
@@ -1438,6 +1817,8 @@ def main() -> int:
             "force": bool(args.force),
             "array_only": bool(args.array_only),
             "strut_only": bool(args.strut_only),
+            "unitcell_only": bool(args.unitcell_only),
+            "skip_noclip": bool(args.skip_noclip),
             "tol_rel": float(args.tol_rel),
             "unitcell_timeout_s": float(args.unitcell_attempt_timeout),
             "array_timeout_s": float(args.array_attempt_timeout),
@@ -1483,7 +1864,11 @@ def main() -> int:
             if abort:
                 print("stop-on-fail: cancelling remaining case submissions", flush=True)
 
-    n_ok = sum(1 for r in results if r.get("status") == "ok")
+    n_ok = sum(
+        1
+        for r in results
+        if r.get("status") in ("ok", "unitcell_ok")
+    )
     n_fail = len(results) - n_ok
     print(
         f"\n=== Done: {n_ok} ok / {n_fail} fail-or-error / {len(order)} planned "

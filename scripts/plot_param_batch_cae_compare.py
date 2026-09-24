@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""2×3 stress-strain compare for 批量构型 Abaqus CAE batch.
+"""2×3 stress-strain compare for param_batch Abaqus CAE batch.
 
 Layout:
   (a) Q sweep · k=1 circle
@@ -18,8 +18,8 @@ Usage:
 
   # Custom roots
   py -3 scripts/plot_param_batch_cae_compare.py \\
-    --post-root output/post/批量构型 \\
-    --out output/reports/批量构型/batch_cae_stress_strain_compare.png
+    --post-root output/post/param_batch \\
+    --out output/reports/param_batch/batch_cae_stress_strain_compare.png
 """
 from __future__ import annotations
 
@@ -38,9 +38,20 @@ if _ROOT not in sys.path:
 from src.paths import PROJECT_ROOT, REPORTS_ROOT
 
 RUN_SLUG = "cae_tet0p6mm80_5mmin_paperbox"
-BATCH_NAME = "批量构型"
+BATCH_NAME = "param_batch"
 DEFAULT_POST = PROJECT_ROOT / "output" / "post" / BATCH_NAME
 DEFAULT_OUT = REPORTS_ROOT / BATCH_NAME / "batch_cae_stress_strain_compare.png"
+# Diagnostic seed1.2 overlay (non-protocol) for af2q0p5_deq2_k2 panels
+DEFAULT_SEED1P2_OVERLAY = (
+    PROJECT_ROOT
+    / "output"
+    / "post"
+    / "param_batch"
+    / "af2q0p5_deq2_k2"
+    / "cae_tet1p2mm80_5mmin_paperbox_diag"
+    / "cae_tet1p2mm80_5mmin_paperbox_diag_stress_strain_hot.csv"
+)
+SEED1P2_OVERLAY_CASE = "af2q0p5_deq2_k2"
 
 # Panel definitions: title, list of (case_id, legend_label)
 PANELS: list[tuple[str, list[tuple[str, str]]]] = [
@@ -90,8 +101,11 @@ PANELS: list[tuple[str, list[tuple[str, str]]]] = [
     (
         "(f) Af + deq @ Q=1, k=1",
         [
+            ("af0p5q1_deq2_k1", "Af=0.5"),
             ("af1q1_deq2_k1", "Af=1"),
+            ("af1p5q1_deq2_k1", "Af=1.5"),
             ("af2q1_deq2_k1", "Af=2"),
+            ("af2p5q1_deq2_k1", "Af=2.5"),
             ("af3q1_deq2_k1", "Af=3"),
             ("af2q1_deq1p5_k1", "deq=1.5"),
             ("af2q1_deq2p5_k1", "deq=2.5"),
@@ -171,6 +185,7 @@ def _demo_curves_for_case(case_id: str) -> tuple[list[float], list[float]] | Non
         "af2q1_deq2_k1p5": (0.030, 0.455),
         "af2q1p5_deq2_k1p5": (0.025, 0.475),
         "af1q1_deq2_k1": (0.020, 0.48),
+        "af2p5q1_deq2_k1": (0.031, 0.445),
         "af3q1_deq2_k1": (0.034, 0.44),
         "af2q1_deq1p5_k1": (0.016, 0.50),
         "af2q1_deq2p5_k1": (0.036, 0.43),
@@ -215,6 +230,7 @@ def plot_compare(
     *,
     demo: bool,
     global_ylim: bool,
+    overlay_seed1p2: tuple[list[float], list[float]] | None = None,
 ) -> Path:
     import matplotlib
 
@@ -231,17 +247,37 @@ def plot_compare(
         for c in curves.values():
             if c and c[1]:
                 all_sig.extend(c[1])
+        if overlay_seed1p2 and overlay_seed1p2[1]:
+            all_sig.extend(overlay_seed1p2[1])
     g_ymax = (max(all_sig) * 1.12) if all_sig else 0.04
 
     for ax, (title, series) in zip(axes_flat, PANELS):
         plotted: list[tuple[list[float], list[float]]] = []
         # Keep legend order; missing cases get a legend entry but no curve.
+        # If protocol missing but seed1.2 overlay exists for that case, draw it
+        # with the same color/ls and label like "Q=0.5 (1.2)" / "k=2 (1.2)".
         for i, (cid, label) in enumerate(series):
             data = curves.get(cid)
             color = _COLORS[i % len(_COLORS)]
             ls = _LINESTYLES[i % len(_LINESTYLES)]
             if not data:
-                ax.plot([], [], color=color, ls=ls, lw=1.7, label=f"{label} (n/a)")
+                if (
+                    overlay_seed1p2
+                    and cid == SEED1P2_OVERLAY_CASE
+                    and overlay_seed1p2[0]
+                ):
+                    oe, osig = overlay_seed1p2
+                    ax.plot(
+                        oe,
+                        osig,
+                        color=color,
+                        ls=ls,
+                        lw=1.7,
+                        label=f"{label} (1.2)",
+                    )
+                    plotted.append((oe, osig))
+                else:
+                    ax.plot([], [], color=color, ls=ls, lw=1.7, label=f"{label} (n/a)")
                 continue
             eps, sig = data
             ax.plot(eps, sig, color=color, ls=ls, lw=1.7, label=label)
@@ -267,7 +303,7 @@ def plot_compare(
         if demo
         else "Abaqus CAE C3D4 · 0.6 mm · 80% · 5 mm/min · Neo-Hooke"
     )
-    fig.suptitle(f"批量构型 CAE 压缩对比  ·  {tag}", fontsize=13, y=0.995)
+    fig.suptitle(f"param_batch CAE 压缩对比  ·  {tag}", fontsize=13, y=0.995)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150)
@@ -312,7 +348,7 @@ def write_summary_json(
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="批量构型 CAE 2×3 stress-strain compare")
+    ap = argparse.ArgumentParser(description="param_batch CAE 2×3 stress-strain compare")
     ap.add_argument("--demo", action="store_true", help="Synthetic curves for layout preview")
     ap.add_argument("--post-root", type=str, default=str(DEFAULT_POST))
     ap.add_argument("--run-slug", type=str, default=RUN_SLUG)
@@ -321,6 +357,13 @@ def main() -> int:
         "--global-ylim",
         action="store_true",
         help="Share y-axis max across all panels (default: per-panel)",
+    )
+    ap.add_argument(
+        "--overlay-seed1p2",
+        type=str,
+        default=str(DEFAULT_SEED1P2_OVERLAY),
+        help="Optional CSV for af2q0p5_deq2_k2 when protocol missing; "
+        "plotted with panel label + ' (1.2)'. Empty disables.",
     )
     args = ap.parse_args()
 
@@ -334,11 +377,20 @@ def main() -> int:
     n_miss = sum(1 for v in curves.values() if not v)
     print(f"curves available={n_ok} missing={n_miss} demo={args.demo}")
 
+    overlay = None
+    overlay_path = (args.overlay_seed1p2 or "").strip()
+    if overlay_path and not args.demo:
+        overlay = load_curve(Path(overlay_path))
+        print(
+            f"overlay seed1.2: {'OK ' + overlay_path if overlay else 'MISSING ' + overlay_path}"
+        )
+
     saved = plot_compare(
         curves,
         out_path,
         demo=args.demo,
         global_ylim=bool(args.global_ylim),
+        overlay_seed1p2=overlay,
     )
     summary = saved.with_suffix(".json")
     write_summary_json(curves, summary, demo=args.demo)

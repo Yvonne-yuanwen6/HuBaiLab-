@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from src.paths import CAD_VERIFIED_ROOT
+from src.paths import CAD_ROOT, CAD_VERIFIED_ROOT
 
 
 def hu_bai_lattice_slug(
@@ -39,25 +39,38 @@ def _legacy_bcc_slug(*, cell_size_mm: float, nx: int, ny: int, nz: int) -> str:
     return f"hu_bai_bcc_af2q0_L{int(round(cell_size_mm))}_{int(nx)}x{int(ny)}x{int(nz)}"
 
 
-def _is_under_verified(path: str) -> bool:
-    verified = os.path.abspath(str(CAD_VERIFIED_ROOT))
+def _is_under_dir(path: str, root) -> bool:
+    root_abs = os.path.abspath(str(root))
     target = os.path.abspath(path)
     try:
-        common = os.path.commonpath([verified, target])
+        common = os.path.commonpath([root_abs, target])
     except ValueError:
         return False
-    return common == verified
+    return common == root_abs
+
+
+def _is_under_verified(path: str) -> bool:
+    return _is_under_dir(path, CAD_VERIFIED_ROOT)
+
+
+def _is_allowed_simulation_cad(path: str) -> bool:
+    """Verified STEPs, or intentional test crops under ``output/cad/test/``."""
+    if _is_under_verified(path):
+        return True
+    return _is_under_dir(path, os.path.join(str(CAD_ROOT), "test"))
 
 
 def require_verified_cad_path(path: str) -> str:
-    """Return ``path`` if it exists and lives under ``output/cad/verified/``."""
+    """Return ``path`` if it exists under verified/ or cad/test/."""
     path = os.path.abspath(path)
     if not os.path.isfile(path):
         raise FileNotFoundError(path)
-    if not _is_under_verified(path):
+    if not _is_allowed_simulation_cad(path):
         raise ValueError(
-            f"Simulation CAD must be under {CAD_VERIFIED_ROOT}: {path}\n"
-            "Copy the human-verified STEP into output/cad/verified/ and re-run."
+            f"Simulation CAD must be under {CAD_VERIFIED_ROOT} "
+            f"or {os.path.join(str(CAD_ROOT), 'test')}: {path}\n"
+            "Copy the human-verified STEP into output/cad/verified/ "
+            "(or place a cropped test STEP under output/cad/test/) and re-run."
         )
     return path
 
@@ -74,9 +87,10 @@ def resolve_verified_solid_step(
     """
     Resolve the STEP file used for Abaqus solid export.
 
-    All simulation runs must read from ``output/cad/verified/``. When
-    ``cad_path`` is omitted, search verified names for this lattice slug.
-    When ``cad_path`` is given, it must still reside under verified/.
+    Simulation runs read from ``output/cad/verified/`` (or ``output/cad/test/``
+    for cropped subarray studies). When ``cad_path`` is omitted, search
+    verified names for this lattice slug. When ``cad_path`` is given, it must
+    still reside under an allowed CAD root.
     """
     if cad_path:
         return require_verified_cad_path(cad_path)

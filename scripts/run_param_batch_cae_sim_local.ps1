@@ -25,6 +25,10 @@ $PSNativeCommandUseErrorActionPreference = $false
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $Root
 $env:Path = "D:\Apps\SIMULIA\Commands;" + $env:Path
+# WindowsApps ``python`` is often a Store stub; this repo standardizes on ``py -3``.
+if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
+    throw "py launcher not found; install Python or fix PATH"
+}
 
 $Slug = "cae_tet0p6mm80_5mmin_paperbox"
 $KnownMeshFail = @(
@@ -35,12 +39,17 @@ $KnownMeshFail = @(
     "af2q0p5_deq2_k1p5"
 )
 
-$BatchCad = & python -c "from pathlib import Path; root=Path(r'$Root')/'output'/'cad';
-cands=[p for p in root.iterdir() if p.is_dir() and (p/'_batch_index.json').is_file()];
-print(cands[0] if cands else '')"
-$BatchCad = "$BatchCad".Trim()
+# Prefer ASCII param_batch CAD tree (legacy Chinese folder may still exist until cleanup).
+$CadRoot = Join-Path $Root "output\cad"
+$BatchCadPreferred = Join-Path $CadRoot "param_batch"
+if (Test-Path -LiteralPath (Join-Path $BatchCadPreferred "_batch_index.json")) {
+    $BatchCad = $BatchCadPreferred
+} else {
+    $BatchCad = Get-ChildItem -LiteralPath $CadRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "_batch_index.json") } |
+        Select-Object -First 1 -ExpandProperty FullName
+}
 if (-not $BatchCad) { throw "no cad batch folder with _batch_index.json" }
-# ASCII-only sim tree for Windows Abaqus (Chinese cwd → charmap crash).
 $SimBatchName = "param_batch"
 $BatchName = $SimBatchName
 $IndexPath = Join-Path $BatchCad "_batch_index.json"
@@ -110,7 +119,7 @@ foreach ($cid in @("af2q1_deq2_k1", "af2q1_deq2_k1p5")) {
     Clear-SkipCase $cid
 }
 
-$pick = & python -c @"
+$pick = & py -3 -c @"
 import json
 from pathlib import Path
 root = Path(r'$Root')
@@ -136,17 +145,10 @@ for cid in sorted(idx.get('cases') or {}):
     step = batch / cid / f'{cid}_444.step'
     if not step.is_file() or step.stat().st_size < 1_000_000:
         nos.append(cid); continue
-    # Complete CSV may still live under legacy Chinese post tree; treat either as DONE.
-    csv_paths = [
-        post / cid / slug / f'{slug}_stress_strain.csv',
-    ]
-    for p in (root/'output'/'post').iterdir():
-        if p.is_dir() and p.name != 'param_batch':
-            csv_paths.append(p / cid / slug / f'{slug}_stress_strain.csv')
+    csv = post / cid / slug / f'{slug}_stress_strain.csv'
     n = 0
-    for csv in csv_paths:
-        if csv.is_file():
-            n = max(n, sum(1 for _ in csv.open(encoding='utf-8', errors='ignore')))
+    if csv.is_file():
+        n = sum(1 for _ in csv.open(encoding='utf-8', errors='ignore'))
     inp = sim / cid / slug / f'{slug}.inp'
     mesh = sim / cid / slug / f'{slug}_cae_mesh.inp'
     has_inp = inp.is_file() and inp.stat().st_size > 1_000_000
@@ -192,7 +194,7 @@ foreach ($line in @($pick)) {
 
 Write-Host "=== LOCAL == SERVER CAE queue (MESH_PROTOCOL=1) ===" -ForegroundColor Cyan
 Write-Host ("  CAD={0}" -f $BatchCad) -ForegroundColor DarkGray
-Write-Host ("  sim_batch={0} (ASCII)  cpus={1} mem={2}MB  maxParallel={3}  exportOnly={4}" -f $SimBatchName, $Cpus, $MemoryMB, $MaxParallel, $ExportOnly.IsPresent)
+Write-Host ("  sim_batch={0}  cpus={1} mem={2}MB  maxParallel={3}  exportOnly={4}" -f $SimBatchName, $Cpus, $MemoryMB, $MaxParallel, $ExportOnly.IsPresent)
 Write-Host ("  MESH ({0}): {1}" -f $meshCases.Count, ($meshCases -join ", "))
 Write-Host ("  EXPORT reuse mesh ({0}): {1}" -f $exportCases.Count, ($exportCases -join ", "))
 Write-Host ("  SUBMIT_READY ({0}): {1}" -f $submitReady.Count, ($submitReady -join ", "))

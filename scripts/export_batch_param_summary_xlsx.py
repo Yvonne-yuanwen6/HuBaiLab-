@@ -13,8 +13,8 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.units import pixels_to_points
 
 ROOT = Path(__file__).resolve().parents[1]
-INDEX_PATH = ROOT / "output" / "cad" / "批量构型" / "_batch_index.json"
-OUT_XLSX = ROOT / "output" / "reports" / "批量构型结构参数汇总.xlsx"
+INDEX_PATH = ROOT / "output" / "cad" / "param_batch" / "_batch_index.json"
+OUT_XLSX = ROOT / "output" / "reports" / "param_batch结构参数汇总.xlsx"
 
 IMG_PX = 160
 L_MM = 20.0
@@ -64,7 +64,7 @@ def main() -> int:
     ws.title = "结构参数"
 
     title = (
-        f"批量构型 · 结构参数汇总（paper_box · L=20 mm · 4×4×4）"
+        f"param_batch · 结构参数汇总（paper_box · L=20 mm · 4×4×4）"
         f"　｜　构型图：右键单元格 → 粘贴选项 →「在单元格中粘贴图片」（勿用 Ctrl+V）"
     )
     headers = [

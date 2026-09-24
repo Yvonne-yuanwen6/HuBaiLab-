@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Param-batch COMSOL isolation: frequency-only (no eigen), hierarchical under 批量构型/.
+# Param-batch COMSOL isolation: frequency-only (no eigen), hierarchical under param_batch/.
 #
 #   bash scripts/linux/run_param_batch_comsol_queue.sh
 #
@@ -21,8 +21,8 @@ export PATH="${COMSOL_BIN%/comsol}:${PATH}"
 # MPh needs an X display (mphserver -graphics). Prefer existing desktop :1.
 export DISPLAY="${DISPLAY:-:1}"
 
-BATCH_CAD="$ROOT/output/cad/批量构型"
-BATCH_NAME="批量构型"
+BATCH_CAD="$ROOT/output/cad/param_batch"
+BATCH_NAME="param_batch"
 COMSOL_BATCH="$ROOT/output/comsol_jobs/${BATCH_NAME}"
 RUN_SLUG="${BATCH_COMSOL_RUN_SLUG:-fig28_p1_300g}"
 NP="${BATCH_COMSOL_NP:-8}"
@@ -72,8 +72,8 @@ import json, os
 from pathlib import Path
 
 root = Path(".").resolve()
-batch = root / "output" / "cad" / "批量构型"
-comsol = root / "output" / "comsol_jobs" / "批量构型"
+batch = root / "output" / "cad" / "param_batch"
+comsol = root / "output" / "comsol_jobs" / "param_batch"
 idx = json.loads((batch / "_batch_index.json").read_text(encoding="utf-8"))
 only = {x for x in os.environ.get("BATCH_COMSOL_ONLY", "").split() if x}
 run_slug = os.environ.get("BATCH_COMSOL_RUN_SLUG", "fig28_p1_300g")
@@ -115,14 +115,14 @@ for cid in order:
         "cad_step": str(arr.as_posix()),
         "volume_ratio": vr,
         "run_slug": run_slug,
-        "job_rel": f"output/comsol_jobs/批量构型/{cid}/{run_slug}",
+        "job_rel": f"output/comsol_jobs/param_batch/{cid}/{run_slug}",
     })
 
 out = {
-    "name": "批量构型_comsol_isolation",
+    "name": "param_batch_comsol_isolation",
     "thesis": "Hu & Bai 2024 §2.4.3 / Fig.2.8 — COMSOL frequency transmissibility (eigen OFF)",
-    "cad_root": "output/cad/批量构型",
-    "comsol_root": "output/comsol_jobs/批量构型",
+    "cad_root": "output/cad/param_batch",
+    "comsol_root": "output/comsol_jobs/param_batch",
     "run_slug": run_slug,
     "defaults": {
         "cells": [4, 4, 4],
@@ -336,7 +336,7 @@ current = os.environ.get("CURRENT_CASE", "")
 phase = os.environ.get("CURRENT_PHASE", "") or "running"
 rows = []
 for cid in idx["queue"]:
-    jd = Path("output/comsol_jobs/批量构型") / cid / run
+    jd = Path("output/comsol_jobs/param_batch") / cid / run
     mph = jd / f"{run}.mph"
     solved = jd / f"{run}_solved.mph"
     csvp = jd / f"{run}_transmissibility.csv"

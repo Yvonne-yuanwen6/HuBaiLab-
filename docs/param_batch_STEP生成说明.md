@@ -1,23 +1,25 @@
-# 批量构型 STEP 生成说明
+# param_batch STEP 生成说明
 
-> **进度明细（含同步时间 + 各案成功路径）**：见 [`批量构型STEP生成情况明细.md`](./批量构型STEP生成情况明细.md) — 1x1·strut·444 盘点、策略归类、耗时。
+> **进度明细（含同步时间 + 各案成功路径）**：见 [`param_batch_STEP生成情况明细.md`](./param_batch_STEP生成情况明细.md) — 1x1·strut·444 盘点、策略归类、耗时。
 
-本批任务：**参数化批量生成 paper_box 单胞 + 4×4×4 阵列 STEP**；CAD QC 通过后并行两条仿真线——**Abaqus/Explicit 实体压缩**（`export/jobs/post/批量构型/`）与 **COMSOL 隔振频响**（`comsol_jobs/批量构型/`）。
+本批任务：**参数化批量生成 paper_box 单胞 + 4×4×4 阵列 STEP**；CAD QC 通过后并行两条仿真线——**Abaqus/Explicit 实体压缩**（`export/jobs/post/param_batch/`）与 **COMSOL 隔振频响**（`comsol_jobs/param_batch/`）。
 目录与清单以服务器仓库为准，本机同步后结构一致。
 
-**本批 CAD 快照（2026-07-28）**：清单 16 案；**`af2q1_deq1p5_k1` 已 VOID**（单胞复检不合格，本机 STEP 已删，勿入主对比）。其余曾 QC=ok；目视合格现为 10 案（原 11 剔除细杆）+ 5 案早期基线。逐案表见明细 §1–§2。
+> **2026-09-15**：旧机械盘 `/media/art/file/.../HuBaiLab` 已坏停用；**临时远程根**为 `/home/art/HuBaiLab_ssd`。新路径公布前勿再访问旧盘。
+
+**本批 CAD 快照（2026-09-22）**：清单 **26** 案；L=20 的 22 案 QC=ok。Abaqus L=20 主对比：**21/22** 可分析（含 1 案 near_complete）；**HOLD 仅** `af2q1_deq2_k2`。L=10 相似缩放 **3/4**（seed 0.3）。逐案见 [`param_batch_CAE仿真情况明细.md`](param_batch_CAE仿真情况明细.md) / [`param_batch_STEP生成情况明细.md`](param_batch_STEP生成情况明细.md)。
 
 | 项目 | 路径 / 值 |
 |------|-----------|
 | 本机仓库 | `D:\HuBaiLab` |
 | 服务器 | `art@172.20.200.93` |
-| 服务器仓库 | `/media/art/file/XiangLang/Lattice/LWY/HuBaiLab` |
-| CAD 输出根目录 | `output/cad/批量构型/` |
-| 参数清单 | `output/cad/批量构型/_batch_index.json` |
-| Abaqus 仿真根 | `output/{export,jobs,post}/批量构型/{case_id}/` |
-| Abaqus 清单 / 状态 | `output/export/批量构型/_batch_sim_index.json`、`_batch_sim_status.json` |
-| COMSOL 仿真根 | `output/comsol_jobs/批量构型/{case_id}/` |
-| COMSOL 清单 / 状态 | `output/comsol_jobs/批量构型/_batch_comsol_index.json`、`_batch_comsol_status.json` |
+| 服务器仓库（临时） | `/home/art/HuBaiLab_ssd`（旧机械盘路径已废弃） |
+| CAD 输出根目录 | `output/cad/param_batch/` |
+| 参数清单 | `output/cad/param_batch/_batch_index.json` |
+| Abaqus 仿真根 | `output/{export,jobs,post}/param_batch/{case_id}/` |
+| Abaqus 清单 / 状态 | `output/export/param_batch/_batch_sim_index.json`、`_batch_sim_status.json` |
+| COMSOL 仿真根 | `output/comsol_jobs/param_batch/{case_id}/` |
+| COMSOL 清单 / 状态 | `output/comsol_jobs/param_batch/_batch_comsol_index.json`、`_batch_comsol_status.json` |
 
 相关文档：[`CAD融合路线与已知问题.md`](CAD融合路线与已知问题.md)、[`Abaqus_CAD实体压缩说明.md`](Abaqus_CAD实体压缩说明.md)、[`COMSOL隔振工作流.md`](COMSOL隔振工作流.md)、[`本机开发服务器求解工作流.md`](本机开发服务器求解工作流.md)。
 
@@ -30,19 +32,21 @@ Abaqus 批量**主对比统一标准**见下文 **§7.2**（`BATCH_SIM_MESH_PROT
 | 参数 | 含义 | 本批取值 |
 |------|------|----------|
 | **Q** | 周期因子 | `0, 0.5, 1.0, 1.5` |
-| **Af** | 杆中心线幅值 (mm) | 中心 `2`；扫参 `1, 3`（仅 Q=1 圆杆） |
-| **deq** | 等面积等效圆径 (mm) | 中心 `2`；扫参 `1.5, 2.5`（仅 Q=1 圆杆） |
+| **Af** | 杆中心线幅值 (mm) | 中心 `2`；扫参 `0.5, 1, 1.5, 2.5, 3`（圆杆；Q=1 与 Q=1.5 各一套） |
+| **deq** | 等面积等效圆径 (mm) | 中心 `2`；扫参 `1.5, 2.5`（仅 Q=1 圆杆）；L10 对应 `1` |
 | **κ (k)** | 截面长径/短径；`k1`=圆杆 | `1, 1.5, 2`；`k>1` 默认 **ellmin**（短径∥压缩） |
-| **L / 阵列** | 单胞边长 / 阵列 | `L=20 mm`，`4×4×4`（不写进文件名） |
+| **L / 阵列** | 单胞边长 / 阵列 | 主对比 `L=20 mm`，`4×4×4`；相似缩放 `L=10 mm`（文件名 `_L10`） |
 
 椭圆与圆在同一 `deq` 下保持截面积相等。
 
-**组合策略（共 16 案，非全因子）**
+**组合策略（共 26 案，非全因子）**
 
 - **组 A**：`Af=2, deq=2`，`Q∈{0,0.5,1,1.5}` × `k∈{1,1.5,2}`
 - **组 B**（围着 AF2Q1 圆杆）：`Af∈{1,3}`，`deq∈{1.5,2.5}`
+- **组 C**（Af 加密）：Q=1 与 Q=1.5、`deq=2, k=1` 上 `Af∈{0.5,1.5,2.5}`（Q=1.5 另含 `Af=1`）
+- **组 D**：L=10 相似缩放 4 案（父案 `af2q0` / `af2q1` / `af2q1p5` / `af2q1_k2`）
 
-生成顺序见 `_batch_index.json` → `generation_order`（先圆后椭圆 κ=2 / κ=1.5，再 Af/截面积扫参）。
+生成顺序见 `_batch_index.json` → `generation_order`。
 
 ---
 
@@ -64,7 +68,7 @@ af{Af}q{Q}_deq{D}_k{κ}_qc.json          # 体积比等 QC
 **目录**
 
 ```text
-output/cad/批量构型/
+output/cad/param_batch/
   _batch_index.json
   _batch_run_summary.json          # 批跑汇总（有则）
   af2q0_deq2_k1/
@@ -110,7 +114,7 @@ output/cad/批量构型/
 在服务器仓库根目录：
 
 ```bash
-# 只扫描状态，写 output/cad/批量构型/_batch_status.json
+# 只扫描状态，写 output/cad/param_batch/_batch_status.json
 CHECK_ONLY=1 bash scripts/linux/run_param_batch_auto_repair.sh
 
 # 扫描后仅 FORCE 重跑 needs_repair 的案（默认含超时保护）
@@ -137,7 +141,7 @@ py -3 scripts/run_param_batch_step_generate.py --force --jobs 2 --only af2q1_deq
 
 **细杆 444（`deq<1.75` 且 `k=1`）梯子优先序**：
 
-1. **`ocp_noclip_batch64`**（2026-07-19：face-mate 种子 `corner_ext=1.5` 验证 `af2q1_deq1p5_k1`）→ 再 **`ocp_scale*_batch64`**
+1. **`ocp_noclip_batch64`**（需 face-mate 种子：`centre_stub_corner_ext+ext=1.5`；2026-07-19 / **2026-08-04** 验证 `af2q1_deq1p5_k1`；both_end 种子会 empty-BOP）→ 再 **`ocp_scale*_batch64`**
 2. **`ocp_deep_pad`**：按层重建 octant 杆 + 大周期 pad（默认 2 mm）→ 行/层间融合，质量门控 + 单实体 remelt（禁止只靠 STEP 体积当成功）
 3. **`ocp_seed_scale_zcopy`**：单胞微膨胀（≈1.005–1.02）→ **只融 iz=0 的 4×4** → **+Z 复制平移** 得 iz=1..3 → 四层 `444z` 融合（glue=off, fuzzy≈0.1）
 4. seed-translate OCP：扩大 `periodic_overlap_mm` → `hierarchical_batch`
@@ -160,8 +164,8 @@ py -3 scripts/run_param_batch_step_generate.py --force --jobs 2 --only af2q1_deq
 | 项 | 行为 |
 |----|------|
 | 问题 | 默认 `corner≈0.75·deq` 可得到 **单实体 1×1**，但 pitch=L 邻胞 fuse 仍空（BOP empty）→ noclip 可能失败 |
-| 优先 tip 伸出 | Q=1 圆杆：`deq=1.5` 优先 **`both_end_extension` + ov=0.05**（strut1 同款）；`deq=2.5→ext=2.5`（`centre_stub_corner_ext`）；椭圆 `κ≥2`：`both_end_extension` + `ext=3.0` / `2.5` |
-| 1×1 ACCEPT | 只要求 **单实体** + **tip-sliver**（与 strut1 配方一致）。**不做** pitch=L face-mate 硬拒 |
+| 优先 tip 伸出 | Q=1 圆杆：`deq=1.5` 优先 **`centre_stub_corner_ext` + `ext=1.5`**（阵列 face-mate；2026-08-04 验证 → noclip）；回退 **`both_end_extension` + ov=0.05**（strut1 同款，1×1 可融但 pitch=L OCC 常空）；**`deq=2` 优先 `centre_stub_corner_ext` + ext=2.5/3.0**（八分体安全首弦 + 条件 STEP hub-ball；2026-09-15），`both_end` 后备；`deq=2.5→ext=2.5`（`centre_stub_corner_ext`）；椭圆 `κ≥2`：`both_end_extension` + `ext=3.0` / `2.5` |
+| 1×1 ACCEPT | **单实体** + **tip-sliver** + **枢纽实心**（原点 ±0.02 mm fill≥0.85；hub-void REJECT）。**不做** pitch=L face-mate 硬拒 |
 | 阵列侧 | 对接 / tip-push / noclip 在 444 梯子处理；`_seed_face_mate_ok` 仅作诊断 |
 | 入口 | `scripts/run_param_batch_step_generate.py` → `_export_unitcell`；诊断：`_seed_face_mate_ok` |
 
@@ -178,7 +182,7 @@ py -3 scripts/run_param_batch_step_generate.py --force --jobs 2 --only af2q1_deq
 
 | 项 | 锁定行为 | 曾出现的问题 |
 |---|---|---|
-| 1×1 tip | 硬参优先 strut1 同款 / 显式 tip 伸出；ACCEPT = 单实体 + tip-sliver（**无** face-mate 硬锁，2026-07-29） | 旧 face-mate 硬锁会拒掉合格 both_end 单胞；对接改由 444 处理 |
+| 1×1 tip / hub | 细杆：`centre_stub_corner_ext+ext=1.5`（face-mate）；**`deq=2` 圆杆优先 `centre_stub_corner_ext+ext=2.5/3`**（clamp + 条件 hub-ball）；粗杆 `centre_stub+ext=2.5`；椭圆 `both_end+ext`。ACCEPT = 单实体 + tip-sliver + **hub fill≥0.85 @ ±0.02 mm**（**无** face-mate 硬锁） | Af≳2.5 未 clamp 时 `centre_stub` 胞心空腔（2026-09-15 af2p5；±0.3 探针误过）；细杆 both_end 邻胞 OCC 空融（2026-08-04） |
 | 444 优先策略 | Q≈1/1.5、椭圆、细杆均优先 **`ocp_noclip_batch64`**；再 scale_batch / deep_pad / zcopy | 分层/zcopy 破坏正交接触；四层各融极慢 |
 | 接受门控 | 写 STEP 后 **gmsh 测实体数==1**（`gmsh_verified`）；QC 同口径 | OCP 报 1、gmsh 见 2 仍被 ACCEPT |
 | 写盘后 heal | **默认** `step_heal_for_cae`；仅 mass_ratio∈[0.95,1.05] 才覆盖 `_444.step` | 无门控会“修没”结构；失败须 KEEP 原 STEP |
@@ -189,7 +193,7 @@ py -3 scripts/run_param_batch_step_generate.py --force --jobs 2 --only af2q1_deq
 
 ### 3.3 本批实际成功路径摘要（2026-07-24）
 
-完整表见 [`批量构型STEP生成情况明细.md`](./批量构型STEP生成情况明细.md) §1–§2。摘要：
+完整表见 [`param_batch_STEP生成情况明细.md`](./param_batch_STEP生成情况明细.md) §1–§2。摘要：
 
 | 类型 | 案数 | 代表成功方式 |
 |------|------|----------------|
@@ -213,14 +217,14 @@ cd D:\HuBaiLab
 # . .\scripts\remote_config.ps1
 # scp .\scripts\run_param_batch_step_generate.py "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/scripts/"
 # scp -r .\scripts\linux\. "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/scripts/linux/"
-# scp -r .\output\cad\批量构型\. "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/cad/批量构型/"
+# scp -r .\output\cad\param_batch\. "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/cad/param_batch/"
 ```
 
 ### 4.2 启动 / 重启批处理（服务器 SSH）
 
 ```bash
 ssh art@172.20.200.93
-cd /media/art/file/XiangLang/Lattice/LWY/HuBaiLab
+cd /home/art/HuBaiLab_ssd
 
 # 前台看启动日志，或用 nohup：
 bash scripts/linux/run_param_batch_step_generate.sh
@@ -241,7 +245,7 @@ ONLY="af2q0_deq2_k2 af2q1p5_deq2_k2" FORCE=1 JOBS=2 \
 **方式 A — 服务器上全屏仪表盘（推荐）**
 
 ```bash
-cd /media/art/file/XiangLang/Lattice/LWY/HuBaiLab
+cd /home/art/HuBaiLab_ssd
 INTERVAL=8 bash scripts/linux/_tmp_monitor_param_batch.sh
 # Ctrl+C 退出
 ```
@@ -257,7 +261,7 @@ ssh -t $HuBaiRemoteHost "INTERVAL=8 bash $HuBaiRemoteRoot/scripts/linux/_tmp_mon
 **方式 C — 只打一帧（不循环）**
 
 ```bash
-cd /media/art/file/XiangLang/Lattice/LWY/HuBaiLab
+cd /home/art/HuBaiLab_ssd
 .venv/bin/python3 scripts/linux/_tmp_param_batch_dashboard.py
 ```
 
@@ -289,11 +293,11 @@ bash scripts/linux/_tmp_stuck_check.sh
 cd D:\HuBaiLab
 . .\scripts\remote_config.ps1
 $id = "af2q0_deq2_k1"   # 换成目标 case_id
-$Local = ".\output\cad\批量构型\$id"
+$Local = ".\output\cad\param_batch\$id"
 New-Item -ItemType Directory -Force -Path $Local | Out-Null
-scp "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/cad/批量构型/${id}/${id}_1x1.step" $Local\
-scp "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/cad/批量构型/${id}/${id}_444.step" $Local\
-scp "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/cad/批量构型/${id}/${id}_qc.json"  $Local\
+scp "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/cad/param_batch/${id}/${id}_1x1.step" $Local\
+scp "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/cad/param_batch/${id}/${id}_444.step" $Local\
+scp "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/cad/param_batch/${id}/${id}_qc.json"  $Local\
 ```
 
 ---
@@ -303,12 +307,12 @@ scp "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/cad/批量构型/${id}/${id}_q
 - **体积比**：`mass_mm3(444) / mass_mm3(1x1)`，目标 **64**，相对容差默认 **3%**；两边实体数均为 1（**gmsh OCC**）。
 - **444 交付**：必须 **单实体**；多体 compound 不 ACCEPT。
 - **阵列优先**：Q≈1/1.5、椭圆、细杆均优先 **`ocp_noclip_batch64`**，再 `scale*_batch64` / deep_pad / `seed_scale_zcopy` / 常规 OCP / gmsh。
-- **单胞**：`deq=1.5` 优先 **OCP `both_end_extension` + ov=0.05**（strut1 同款）；其余硬参可先 `centre_stub_corner_ext` / 椭圆 `both_end+ext`。再 gmsh `*_both_end` / 其余 OCP。**禁止** ACCEPT：`gmsh_paper_box`（无 both_end）、裸 `gmsh_octant`、裸 OCP `centre_stub`（无 corner_ext → 杆端尖楔）。**不做** pitch=L face-mate 硬拒（阵列阶段处理）。写出后 **bbox/COM 归零**（idempotent）。
+- **单胞**：`deq=1.5` 优先 **OCP `centre_stub_corner_ext` + `ext=1.5`**（face-mate → noclip；2026-08-04）；回退 **`both_end_extension` + ov=0.05**。**`deq=2` Q=1 圆杆优先 `centre_stub_corner_ext` + ext=2.5/3.0**（八分体安全首弦 + 条件 STEP hub-ball；2026-09-15），`both_end` 后备。其余硬参可先 `centre_stub_corner_ext` / 椭圆 `both_end+ext`。再 gmsh `*_both_end` / 其余 OCP。**禁止** ACCEPT：`gmsh_paper_box`（无 both_end）、裸 `gmsh_octant`、裸 OCP `centre_stub`（无 corner_ext → 杆端尖楔）、**枢纽 hub-void**（原点 ±0.02 mm 探针 fill&lt;0.85）。**不做** pitch=L face-mate 硬拒（阵列阶段处理）。写出后 **bbox/COM 归零**（idempotent）。
 - **监控易误判**：`--only` 时仪表盘只显示本批案；`seed_scale` / noclip batch 单次可数分钟无新日志，worker CPU≈100% 表示在算而非空转。`.work` 新鲜度用于标 ▶进行中。
 - **并行**：`JOBS=2`（或 `--jobs 2`）可用；QC/ACCEPT 测体积不得在 worker 线程直接 `gmsh.initialize`。
 
 **单胞策略梯子**（批处理 `_export_unitcell`）：  
-硬参优先档（both_end / 显式 tip）→ 默认 `centre_stub_corner_ext` → gmsh `*_both_end` → OCP `both_end_extension`；每档 ACCEPT 前过 tip-sliver（**无** face-mate 硬锁）。  
+硬参优先档（细杆 face-mate `ext=1.5` → both_end 回退；**`deq=2` centre_stub_corner_ext 优先**（clamp + hub-ball）→ both_end 回退；粗杆/椭圆显式 tip）→ 默认 `centre_stub_corner_ext` → gmsh `*_both_end` → OCP `both_end_extension`；每档 ACCEPT 前过 tip-sliver + **hub-fill**（**无** face-mate 硬锁）。  
 失败案重跑示例：
 
 ```bash
@@ -326,16 +330,16 @@ CAD 案 **`qc.ok` 且存在合格 `_444.step`** 后，由队列脚本拷入 `out
 ### 7.1 目录层级
 
 ```text
-output/export/批量构型/
+output/export/param_batch/
   _batch_sim_index.json          # 入队案 + 参数快照
   _batch_sim_status.json         # 运行状态（脚本刷新）
   _batch_sim_skipped.json        # 协议失败 / 梯子耗尽 / 求解崩溃后跳过的案
   af2q0_deq2_k1/
     cae_tet0p6mm80_5mmin_paperbox/
       *.inp  case_manifest.json  *_cae_mesh.inp  …
-output/jobs/批量构型/
+output/jobs/param_batch/
   af2q0_deq2_k1/cae_tet0p6mm80_5mmin_paperbox/   # .odb .sta .lck …
-output/post/批量构型/
+output/post/param_batch/
   af2q0_deq2_k1/cae_tet0p6mm80_5mmin_paperbox/   # 应力–应变等（postpull 后）
 ```
 
@@ -394,13 +398,13 @@ output/post/批量构型/
 仅当 **未** 设 `BATCH_SIM_MESH_PROTOCOL=1` 时启用。仍只用 CAE：**优先保持 seed 0.6**（换 quality / vtopo / `seed-part-only` / `ignore-invalid`），**仅当 0.6 全部失败**才放大到 0.8 / 1.0。梯子结果**不得**与协议案混画主对比图。  
 历史说明：`lattice_contact`+vtopo 在部分 Q≈1 上会久跑后 0 单元，故协议档改用 `fast`+vtopo。
 
-协议档 / 诊断梯子 / 队列求解的 **Mermaid 流程图**见 [`批量构型CAE仿真情况明细.md`](批量构型CAE仿真情况明细.md) §1–§2。  
+协议档 / 诊断梯子 / 队列求解的 **Mermaid 流程图**见 [`param_batch_CAE仿真情况明细.md`](param_batch_CAE仿真情况明细.md) §1–§2。  
 **本机与服务器对齐**（heal→CAE→压缩 INP）见同文档 **§6**；入口：`scripts/run_param_batch_cae_mesh_local.ps1`（默认锁定协议档，禁止静默改 seed/quality）。
 
 #### 7.2.6 启用示例
 
 ```bash
-cd /media/art/file/XiangLang/Lattice/LWY/HuBaiLab
+cd /home/art/HuBaiLab_ssd
 export PATH="$HOME/APP/abaqus2022/Commands:$PATH"
 BATCH_SIM_MESH_PROTOCOL=1 BATCH_SIM_SKIP_BASELINE=1 BATCH_SIM_MAX_PARALLEL=2 \
 BATCH_SIM_ONLY="af2q0_deq2_k1p5 af2q0p5_deq2_k1p5 …" \
@@ -431,7 +435,7 @@ BATCH_SIM_ONLY="af2q0_deq2_k1p5 af2q0p5_deq2_k1p5 …" \
 
 ```bash
 ssh art@172.20.200.93
-cd /media/art/file/XiangLang/Lattice/LWY/HuBaiLab
+cd /home/art/HuBaiLab_ssd
 export PATH="$HOME/APP/abaqus2022/Commands:$PATH"
 
 # 推荐：独立 tmux（已存在则提示，不重复开）
@@ -461,7 +465,7 @@ bash scripts/linux/run_param_batch_cae_sim_queue.sh
 - **求解中**：由 `eliT_DriverLM` 进程识别（最多 2 路 Explicit）+ STA 步时  
 - **网格中**：当前 heal / CAE 剖分案（`ABQcaeK` 已跑时长 / CPU；低 CPU 久跑需警惕卡住）
 
-实现注意：`jobs/` 下大 ODB 会使 NFS `ls`/`stat` 长时间无响应甚至 D 状态；仪表盘**不读** `jobs/*.sta`/ODB，求解态以 `eliT_DriverLM` 为准。监控脚本优先跑 `/tmp/_dash.py` + `/usr/bin/python3`（NFS 上 `scripts/` 可能写不进）。勿对 `output/jobs/批量构型` 做通配列举。
+实现注意：`jobs/` 下大 ODB 会使 NFS `ls`/`stat` 长时间无响应甚至 D 状态；仪表盘**不读** `jobs/*.sta`/ODB，求解态以 `eliT_DriverLM` 为准。监控脚本优先跑 `/tmp/_dash.py` + `/usr/bin/python3`（NFS 上 `scripts/` 可能写不进）。勿对 `output/jobs/param_batch` 做通配列举。
 
 **NEW3 入队**（已有合格 `*_444.step`，不打断正在跑的求解）：
 
@@ -475,7 +479,7 @@ bash scripts/linux/_tmp_start_3_new_444_sim.sh
 **方式 A — 服务器全屏仪表盘（推荐）**
 
 ```bash
-cd /media/art/file/XiangLang/Lattice/LWY/HuBaiLab
+cd /home/art/HuBaiLab_ssd
 INTERVAL=8 bash scripts/linux/_tmp_monitor_param_batch_cae_sim.sh
 # Ctrl+C 退出
 ```
@@ -508,17 +512,17 @@ ssh -t $HuBaiRemoteHost "INTERVAL=8 bash $HuBaiRemoteRoot/scripts/linux/_tmp_mon
 
 日志：`output/logs/param_batch_cae_sim_queue.log`
 
-**主对比案快照（2026-07-19 ≈17:12）**
+**主对比案快照（2026-09-22；权威明细见 [`param_batch_CAE仿真情况明细.md`](param_batch_CAE仿真情况明细.md)）**
 
 | 案 | 状态 |
 |----|------|
-| `af2q0_deq2_k1p5` / `af3q1_deq2_k1` | ✓ 完成 |
-| `af2q1_deq2_k1` / `af2q1_deq2_k1p5` | ▶ 求解中（Explicit 仍在） |
-| `af1q1_deq2_k1` / `af2q0p5_deq2_k1p5` | ✗ SKIP（0 单元；需 CAD 重融合） |
-| `af2q1_deq2_k2` / `af2q1p5_deq2_k1p5` | ○ 待重网格 |
-| NEW3×3 | ○ 待网格（已修 ABQcae 自匹配） |
+| L=20：20 案 | ✓ 完成（有完整 CSV） |
+| `af2q1_deq2_k1p5` | ≈ 近完整（能量表 ε≈0.75，可进讨论） |
+| `af2q1_deq2_k2` | ✗ HOLD（协议 0 单元；09-21 服务器无作业） |
+| L=10 三案（seed 0.3） | ✓ 完成（不与 0.6 混排名） |
+| `af2q1_deq2_k2_L10` | — 未入队 |
 
-旧基线 5 案仍 ✓，**勿重网格**。逐案进度与网格/求解设置核对见 [`批量构型CAE仿真情况明细.md`](批量构型CAE仿真情况明细.md)；CAD 侧见 [`批量构型STEP生成情况明细.md`](批量构型STEP生成情况明细.md) §0。
+旧基线 5 案仍 ✓，**勿重网格**。CAD 侧见 [`param_batch_STEP生成情况明细.md`](param_batch_STEP生成情况明细.md)。
 
 ### 7.6 本机拉回仿真结果（单案）
 
@@ -527,10 +531,10 @@ cd D:\HuBaiLab
 . .\scripts\remote_config.ps1
 $id = "af2q0_deq2_k1"
 $slug = "cae_tet0p6mm80_5mmin_paperbox"
-$Local = ".\output\jobs\批量构型\$id\$slug"
+$Local = ".\output\jobs\param_batch\$id\$slug"
 New-Item -ItemType Directory -Force -Path $Local | Out-Null
-scp "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/jobs/批量构型/${id}/${slug}/${slug}.sta" $Local\
-scp "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/jobs/批量构型/${id}/${slug}/${slug}.odb" $Local\
+scp "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/jobs/param_batch/${id}/${slug}/${slug}.sta" $Local\
+scp "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/jobs/param_batch/${id}/${slug}/${slug}.odb" $Local\
 ```
 
 更完整的提交 / 资源预检 / 续算见 [`本机开发服务器求解工作流.md`](本机开发服务器求解工作流.md)；单案 CAE 基线细节见 [`Abaqus_CAD实体压缩说明.md`](Abaqus_CAD实体压缩说明.md)。
@@ -546,7 +550,7 @@ CAD 案 **`qc.json` 通过（`status`/`qc.ok`）且存在合格 `_444.step`** �
 ### 8.1 目录层级
 
 ```text
-output/comsol_jobs/批量构型/
+output/comsol_jobs/param_batch/
   _batch_comsol_index.json       # 入队案 + 默认工况
   _batch_comsol_status.json      # 运行状态（脚本刷新）
   af2q0_deq2_k1/
@@ -560,7 +564,7 @@ output/comsol_jobs/批量构型/
   …
 ```
 
-每案通过 `HU_BAI_COMSOL_JOBS_ROOT=output/comsol_jobs/批量构型/{case_id}` 把 job 指到案内；`--slug` 仍用短名 **`fig28_p1_300g`**。全局 fixture 模板固定为 `output/comsol_jobs/comsol_fixture_444/comsol_fixture_444.mph`（**不要**跟 per-case `COMSOL_JOBS_ROOT` 走偏）。
+每案通过 `HU_BAI_COMSOL_JOBS_ROOT=output/comsol_jobs/param_batch/{case_id}` 把 job 指到案内；`--slug` 仍用短名 **`fig28_p1_300g`**。全局 fixture 模板固定为 `output/comsol_jobs/comsol_fixture_444/comsol_fixture_444.mph`（**不要**跟 per-case `COMSOL_JOBS_ROOT` 走偏）。
 
 ### 8.2 仿真参数（本批统一）
 
@@ -577,7 +581,7 @@ output/comsol_jobs/批量构型/
 
 > **勿用**默认分层网格 + inline fixture **Mesh Copy**：会报「无法复制到任何目标实体」。必须加 `--physics-controlled-mesh`。
 
-入队规则：读 `output/cad/批量构型/_batch_index.json` 的 `generation_order`，对每案检查 `{id}_qc.json` 与大体积 `{id}_444.step`（**不依赖**可能过期的 `_batch_status.json`）。
+入队规则：读 `output/cad/param_batch/_batch_index.json` 的 `generation_order`，对每案检查 `{id}_qc.json` 与大体积 `{id}_444.step`（**不依赖**可能过期的 `_batch_status.json`）。
 
 ### 8.3 脚本入口
 
@@ -599,7 +603,7 @@ Python 须带 **MPh + jpype**（服务器用 conda `/home/art/conda/bin/python3`
 
 ```bash
 ssh art@172.20.200.93
-cd /media/art/file/XiangLang/Lattice/LWY/HuBaiLab
+cd /home/art/HuBaiLab_ssd
 
 # 推荐：独立 tmux（已存在则提示，不重复开）
 BATCH_COMSOL_NP=8 bash scripts/linux/_launch_param_batch_comsol_tmux.sh
@@ -630,7 +634,7 @@ BATCH_COMSOL_ONLY="af2q0_deq2_k1 af2q0p5_deq2_k1" BATCH_COMSOL_FORCE=1 \
 **方式 A — 服务器全屏仪表盘（推荐）**
 
 ```bash
-cd /media/art/file/XiangLang/Lattice/LWY/HuBaiLab
+cd /home/art/HuBaiLab_ssd
 INTERVAL=8 bash scripts/linux/_tmp_monitor_param_batch_comsol.sh
 # Ctrl+C 退出
 ```
@@ -660,6 +664,8 @@ ssh -t $HuBaiRemoteHost "INTERVAL=8 bash $HuBaiRemoteRoot/scripts/linux/_tmp_mon
 | ✗ | 失败（见 `{job}/_error.txt`） |
 | ○ | 排队 |
 
+**隔振进度快照（2026-09-08，本机扫描）**：多案已有 `*transmissibility.csv`（`fig28_p1_300g` / `_local` / `_optlocal` 等 slug 并存）；亦有若干 `_error.txt`。`_batch_comsol_status.json` 时间戳偏旧（≈08-04），**不以该 JSON 为唯一权威**。主讨论若在压缩力学，优先 Abaqus；COMSOL 跨案对比前需先统一 run_slug。
+
 ### 8.6 本机拉回仿真结果（单案）
 
 ```powershell
@@ -667,14 +673,14 @@ cd D:\HuBaiLab
 . .\scripts\remote_config.ps1
 $id = "af2q0_deq2_k1"
 $slug = "fig28_p1_300g"
-$Local = ".\output\comsol_jobs\批量构型\$id\$slug"
+$Local = ".\output\comsol_jobs\param_batch\$id\$slug"
 New-Item -ItemType Directory -Force -Path $Local | Out-Null
-scp "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/comsol_jobs/批量构型/${id}/${slug}/${slug}_transmissibility.csv" $Local\
-scp "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/comsol_jobs/批量构型/${id}/${slug}/case_manifest.json" $Local\
+scp "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/comsol_jobs/param_batch/${id}/${slug}/${slug}_transmissibility.csv" $Local\
+scp "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/comsol_jobs/param_batch/${id}/${slug}/case_manifest.json" $Local\
 # 可选大文件：
-# scp "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/comsol_jobs/批量构型/${id}/${slug}/${slug}_solved.mph" $Local\
+# scp "${HuBaiRemoteHost}:${HuBaiRemoteRoot}/output/comsol_jobs/param_batch/${id}/${slug}/${slug}_solved.mph" $Local\
 ```
 
 ---
 
-*文档对应 CAD 批处理、Abaqus 压缩队列与 COMSOL 隔振队列；CAD 清单以 `output/cad/批量构型/_batch_index.json` 为准。*
+*文档对应 CAD 批处理、Abaqus 压缩队列与 COMSOL 隔振队列；CAD 清单以 `output/cad/param_batch/_batch_index.json` 为准。*

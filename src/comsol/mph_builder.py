@@ -45,6 +45,9 @@ def _ensure_comsol_env(comsol_bin: str | None = None) -> str:
     os.environ["PATH"] = str(platform_bin) + os.pathsep + os.environ.get("PATH", "")
     if COMSOL_BATCH_PREFS_DIR.is_dir():
         os.environ["COMSOLPREFS"] = str(COMSOL_BATCH_PREFS_DIR.resolve())
+    # Prefer larger heap when the install still ships -Xmx2g (Box selection OOM on
+    # hard SFBLS). JVM also reads the patched comsolmphserver.ini / comsolbatch.ini.
+    os.environ.setdefault("JAVA_TOOL_OPTIONS", os.environ.get("HU_BAI_COMSOL_XMX", "-Xmx6g"))
     return bin_path
 
 
@@ -259,9 +262,29 @@ def _resolve_plate_z_bottom_mm(
         )
         return z_measured
 
+    # Tips above design plane: clamp (default) keeps plate at z_max so Form
+    # Assembly can still form identity ap2 through strut imprint.  Raise sits
+    # the plate on tips but often drops auto-ap2 and leaves manual pairs with
+    # zero plate response on SFBLS.  Override with HU_BAI_COMSOL_PLATE_Z=raise.
+    import os
+
+    plate_z_mode = os.environ.get("HU_BAI_COMSOL_PLATE_Z", "clamp").strip().lower()
+    if plate_z_mode in ("raise", "snap", "tips"):
+        print(
+            f"  Plate z raise ({source}): measured top {z_measured:g} mm "
+            f"> nominal {nominal:g} mm — raise plate onto strut tips for ap2 imprint",
+            flush=True,
+        )
+        if z_geom is not None and z_step is not None and abs(z_geom - z_step) > 0.1:
+            print(
+                f"  WARN: lattice z_top geom={z_geom:g} mm vs STEP={z_step:g} mm",
+                flush=True,
+            )
+        return z_measured
+
     print(
-        f"  Plate z raise ({source}): measured top {z_measured:g} mm "
-        f"> nominal {nominal:g} mm — raise plate onto strut tips for ap2 imprint",
+        f"  Plate z clamp ({source}): measured top {z_measured:g} mm "
+        f"> nominal {nominal:g} mm — keep plate on design plane for imprint bond",
         flush=True,
     )
     if z_geom is not None and z_step is not None and abs(z_geom - z_step) > 0.1:
@@ -269,7 +292,7 @@ def _resolve_plate_z_bottom_mm(
             f"  WARN: lattice z_top geom={z_geom:g} mm vs STEP={z_step:g} mm",
             flush=True,
         )
-    return z_measured
+    return nominal
 
 
 def _geom_lattice_z_top_mm(comp: Any, geom_tag: str) -> float | None:
@@ -386,15 +409,14 @@ def _clip_lattice_top_to_nominal(
     geom: str = "geom1",
     import_tag: str = "imp1",
 ) -> bool:
-    """Trim lattice protrusion above §2.4.3 z_max (Difference, keep=off).
+    """Trim lattice protrusion above §2.4.3 z_max (Intersection keep-box).
 
     Curved SFBLS tips can poke ~1–2 mm above nominal.  Plate clamp keeps the
     plate on the design plane; without a trim, Form Assembly imprint may omit
     identity pair ``ap2``.
 
-    COMSOL 6.x Difference defaults to keeping inputs; if keep stays on, the
-    pre-clip lattice remains and ``getBoundingBox`` still reports the old
-    z_top.  Explicitly force keep-off and verify object list + bbox.
+    Prefer Intersection with a box ``z <= z_max``: Difference on repaired CAD
+    often leaves ``z_top`` unchanged.  Force keep-off and verify bbox.
     """
     z_max = settings.z_max_mm
     z_top = _geom_lattice_z_top_mm(comp, geom)
@@ -441,57 +463,108 @@ def _clip_lattice_top_to_nominal(
             if tag in [str(t) for t in g.feature().tags()]:
                 g.feature().remove(tag)
 
-        half = settings.half_xy_mm + 5.0
+        # Prefer Intersection with a keep-box [z_min-margin, z_max]: Difference on
+        # repaired CAD often leaves z_top unchanged (boolean no-op on shells).
+        half = settings.half_xy_mm + 10.0
+        z_bot = float(settings.z_min_mm) - 5.0
+        keep_h = max(1.0, z_max - z_bot)
         _add_block(
             comp,
             top_tag,
             x0=-half,
             y0=-half,
-            z0=z_max,
+            z0=z_bot,
             lx=2.0 * half,
             ly=2.0 * half,
-            lz=max(20.0, z_top - z_max + 5.0),
+            lz=keep_h,
             geom=geom,
         )
         g.run()
         obj_names = [str(o) for o in g.objectNames()]
-        # Prefer live geometry objects; feature tag may differ from object name.
-        lattice_obj = lattice_feat if lattice_feat in obj_names else None
-        if lattice_obj is None:
-            for name in obj_names:
-                if name != top_tag:
-                    lattice_obj = name
-                    break
-        if lattice_obj is None or top_tag not in obj_names:
+        if top_tag not in obj_names:
             raise RuntimeError(
-                f"Lattice clip objects missing (have {obj_names}, "
-                f"need lattice and {top_tag})"
+                f"Lattice clip keep-box missing (have {obj_names}, need {top_tag})"
             )
+        # All non-box solids (SFBLS import may explode into mov1(1)..mov1(N)).
+        lattice_objs = [n for n in obj_names if n != top_tag]
+        if not lattice_objs:
+            raise RuntimeError(
+                f"Lattice clip objects missing (have {obj_names}, need lattice + {top_tag})"
+            )
+
+        uni_tag = "uni_lat_clip"
+        if uni_tag in [str(t) for t in g.feature().tags()]:
+            g.feature().remove(uni_tag)
+
+        if len(lattice_objs) == 1:
+            lattice_obj = lattice_objs[0]
+        else:
+            print(
+                f"  Lattice clip: union {len(lattice_objs)} objects before Intersection",
+                flush=True,
+            )
+            uni = g.feature().create(uni_tag, "Union")
+            try:
+                uni.selection("input").set(jpype.JArray(jpype.JString)(lattice_objs))
+            except Exception:
+                uni.selection("input").set(*lattice_objs)
+            for key, val in (("keep", False), ("keep", "off"), ("keepinput", "off")):
+                try:
+                    uni.set(key, val)
+                except Exception:
+                    continue
+            g.run()
+            obj_names = [str(o) for o in g.objectNames()]
+            lattice_obj = uni_tag if uni_tag in obj_names else None
+            if lattice_obj is None:
+                for name in obj_names:
+                    if name != top_tag:
+                        lattice_obj = name
+                        break
+            if lattice_obj is None:
+                raise RuntimeError(
+                    f"Lattice clip union produced no solid (objects={obj_names})"
+                )
+
         if lattice_obj != lattice_feat:
             print(
                 f"  Lattice clip: using object {lattice_obj!r} "
-                f"(feature tag was {lattice_feat!r})",
+                f"(feature tag was {lattice_feat!r}; n_src={len(lattice_objs)})",
                 flush=True,
             )
 
-        dif = g.feature().create(dif_tag, "Difference")
-        dif.selection("input").set(lattice_obj)
-        dif.selection("input2").set(top_tag)
-        keep_set = _force_difference_discard_inputs(dif)
-        print(f"  Lattice clip keep props: {keep_set or ['(none accepted)']}", flush=True)
+        # Intersection(lattice, keep-box) → material with z <= z_max.
+        int_tag = dif_tag  # reuse historical tag name in sequence
+        if int_tag in [str(t) for t in g.feature().tags()]:
+            g.feature().remove(int_tag)
+        inter = g.feature().create(int_tag, "Intersection")
+        try:
+            inter.selection("input").set(
+                jpype.JArray(jpype.JString)([lattice_obj, top_tag])
+            )
+        except Exception:
+            inter.selection("input").set(lattice_obj, top_tag)
+        for key, val in (("keep", False), ("keep", "off"), ("keepinput", "off")):
+            try:
+                inter.set(key, val)
+            except Exception:
+                continue
+        print(
+            f"  Lattice clip Intersection: {lattice_obj} ∩ {top_tag} "
+            f"(keep z in [{z_bot:g}, {z_max:g}] mm)",
+            flush=True,
+        )
         g.run()
 
         obj_after = [str(o) for o in g.objectNames()]
-        # If inputs were kept, remove cutter (+ optionally pre-clip lattice) and re-run.
-        if top_tag in obj_after or (
-            lattice_obj in obj_after and dif_tag not in "".join(obj_after)
-        ):
+        # Drop leftovers if keepinput ignored the off switch.
+        if top_tag in obj_after or lattice_obj in obj_after:
             print(
-                f"  Lattice clip: objects after Difference={obj_after}; "
-                "forcing remove of cutter/pre-clip inputs",
+                f"  Lattice clip: objects after Intersection={obj_after}; "
+                "removing keep-box/pre-clip inputs",
                 flush=True,
             )
-            for tag in (top_tag, lattice_obj):
+            for tag in (top_tag, lattice_obj, uni_tag):
                 try:
                     if tag in [str(t) for t in g.feature().tags()]:
                         g.feature().remove(tag)
@@ -521,7 +594,7 @@ def _clip_lattice_top_to_nominal(
         )
         # Best-effort cleanup so fixture Form Assembly still sees mov1/imp1.
         try:
-            for tag in (dif_tag, top_tag):
+            for tag in (dif_tag, top_tag, "uni_lat_clip"):
                 if tag in [str(t) for t in g.feature().tags()]:
                     g.feature().remove(tag)
             g.run()
@@ -1020,6 +1093,24 @@ def _finalize_fixture_geometry(
         fin.set("pairtype", pt)
     except Exception:
         pass
+    # Looser pair search helps shallow tip imprints (e.g. BCC ~0.3 mm poke).
+    # Override with HU_BAI_COMSOL_PAIR_TOL (meters; default 1e-4 = 0.1 mm).
+    import os
+
+    pair_tol = os.environ.get("HU_BAI_COMSOL_PAIR_TOL", "1e-4").strip()
+    if pair_tol and pair_tol.lower() not in ("0", "off", "none"):
+        accepted_tol: list[str] = []
+        for key in ("pairtol", "repairtol", "geomtol"):
+            try:
+                fin.set(key, pair_tol)
+                accepted_tol.append(key)
+            except Exception:
+                continue
+        if accepted_tol:
+            print(
+                f"  Form assembly: pair tolerance {pair_tol} m via {accepted_tol}",
+                flush=True,
+            )
     print(f"  Form assembly: pairtype={pt}", flush=True)
     _set_label(fin, LABEL_GEOM_ASSEMBLY)
     g.run()
@@ -2415,149 +2506,149 @@ def _configure_freq_solver(
     java: Any,
     settings: HuBaiComsolSettings,
 ) -> None:
-    """Attach default solver to frequency study; optionally switch to iterative."""
-    study = settings.study_freq_tag
-    sol_tag = "sol1"
-    solver_mode = str(getattr(settings, "freq_linear_solver", "direct") or "direct").lower()
-    try:
-        tags = [str(t) for t in java.sol().tags()]
-    except Exception:
-        tags = []
+    """Optionally attach an iterative freq solver; leave Direct to batch default.
 
-    # Prefer an existing solver already attached to the freq study.
-    attached = None
-    for t in tags:
+    Creating a hand-built Direct/OOC sequence under Chinese job paths fails on
+    Windows COMSOL 6.3 (ISO-8859-1 temp path). Successful optlocal runs used
+    batch auto-sequences — keep that behavior for ``direct``.
+    """
+    solver_mode = str(getattr(settings, "freq_linear_solver", "direct") or "direct").lower()
+    want_iter = solver_mode in ("iterative", "gmres", "iter")
+    if not want_iter:
+        print("  Freq linear solver: direct (batch auto-sequence)", flush=True)
+        return
+
+    study = settings.study_freq_tag
+
+    def _sol_tags() -> list[str]:
         try:
-            # mph / Java: sol(t).isAttached() / getStudy() vary by version
-            st = ""
-            try:
-                st = str(java.sol(t).getStudy())
-            except Exception:
-                try:
-                    st = str(java.sol(t).study())
-                except Exception:
-                    st = ""
-            if study in st or st == study:
-                attached = t
-                break
+            return [str(t) for t in java.sol().tags()]
+        except Exception:
+            return []
+
+    for t in list(_sol_tags()):
+        try:
+            if not list(java.sol(t).feature().tags()):
+                java.sol().remove(t)
         except Exception:
             continue
-    if attached:
-        sol_tag = attached
-    elif sol_tag not in tags:
-        created = False
-        # COMSOL 5.6/6.x: createAutoSequences may take bool or name.
-        for args in ((True,), (sol_tag,), ()):
-            try:
-                if args:
-                    java.study(study).createAutoSequences(*args)
-                else:
-                    java.study(study).createAutoSequences()
-                created = True
-                break
-            except Exception:
-                continue
-        if not created:
-            try:
-                java.sol().create(sol_tag)
-                java.sol(sol_tag).study(study)
-                try:
-                    java.sol(sol_tag).createAutoSequences(True)
-                except Exception:
-                    pass
-                created = True
-            except Exception as exc:
-                print(f"  WARN: freq solver sequence not created ({exc})", flush=True)
-                return
-        # Refresh tags after auto-create (name may not be sol1).
+
+    sol_tag = "sol1"
+    if sol_tag not in _sol_tags():
         try:
-            tags = [str(t) for t in java.sol().tags()]
-        except Exception:
-            tags = []
-        if sol_tag not in tags and tags:
-            # Pick the last created / first available
-            sol_tag = tags[-1]
-        elif sol_tag not in tags:
-            print("  WARN: freq solver sequence not created (no sol tags)", flush=True)
+            java.sol().create(sol_tag)
+            sol = java.sol(sol_tag)
+            try:
+                sol.study(study)
+            except Exception:
+                pass
+            try:
+                sol.attach(study)
+            except Exception:
+                pass
+            if "st1" not in [str(x) for x in sol.feature().tags()]:
+                sol.create("st1", "StudyStep")
+                for key, val in (("study", study), ("studystep", "freq")):
+                    try:
+                        sol.feature("st1").set(key, val)
+                    except Exception:
+                        continue
+            if "v1" not in [str(x) for x in sol.feature().tags()]:
+                sol.create("v1", "Variables")
+            if "s1" not in [str(x) for x in sol.feature().tags()]:
+                sol.create("s1", "Stationary")
+            try:
+                sol.feature("s1").feature("aDef").set("complexfun", True)
+            except Exception:
+                pass
+        except Exception as exc:
+            print(f"  WARN: freq solver sequence not created ({exc})", flush=True)
             return
 
     try:
         sol = java.sol(sol_tag)
-        try:
-            _set_label(sol, "频域求解器序列")
-        except Exception:
-            pass
+        _set_label(sol, "频域求解器序列")
     except Exception as exc:
-        print(f"  WARN: freq solver sequence not created ({exc})", flush=True)
+        print(f"  WARN: cannot open solver {sol_tag} ({exc})", flush=True)
         return
 
-    if solver_mode not in ("iterative", "gmres", "iter"):
-        print(f"  Freq linear solver: direct (default sequence {sol_tag})", flush=True)
-        return
-
-    # Best-effort: disable Direct, enable Iterative(+Multigrid) under Stationary.
-    try:
-        sol = java.sol(sol_tag)
-        s_tag = None
-        for t in sol.feature().tags():
-            tt = str(t)
-            try:
-                typ = str(sol.feature(tt).getType())
-            except Exception:
-                typ = tt
-            if "Stationary" in typ or tt in ("s1", "sDef"):
-                s_tag = tt
-                if "Stationary" in typ:
-                    break
-        if s_tag is None:
-            s_tag = "s1"
-            if s_tag not in [str(x) for x in sol.feature().tags()]:
-                sol.create(s_tag, "Stationary")
-        s1 = sol.feature(s_tag)
-        for t in list(s1.feature().tags()):
-            tt = str(t)
-            try:
-                typ = str(s1.feature(tt).getType())
-            except Exception:
-                typ = tt
-            if "Direct" in typ or tt.lower().startswith("d"):
-                try:
-                    s1.feature(tt).active(False)
-                except Exception:
-                    pass
-        i_tag = "i1"
-        if i_tag not in [str(x) for x in s1.feature().tags()]:
-            try:
-                s1.create(i_tag, "Iterative")
-            except Exception as exc:
-                print(f"  WARN: Iterative solver create failed ({exc})", flush=True)
-                return
-        i1 = s1.feature(i_tag)
+    s_tag = None
+    for t in sol.feature().tags():
+        tt = str(t)
         try:
-            i1.active(True)
+            typ = str(sol.feature(tt).getType())
         except Exception:
-            pass
-        for key, val in (
-            ("linsolver", "gmres"),
-            ("itrestart", 50),
-            ("maxlinit", 10000),
-            ("rhob", 400),
-        ):
+            typ = tt
+        if "Stationary" in typ or tt == "s1":
+            s_tag = tt
+            if "Stationary" in typ:
+                break
+    if s_tag is None:
+        try:
+            sol.create("s1", "Stationary")
+            s_tag = "s1"
+        except Exception as exc:
+            print(f"  WARN: Stationary feature missing ({exc})", flush=True)
+            return
+    s1 = sol.feature(s_tag)
+
+    for t in list(s1.feature().tags()):
+        tt = str(t)
+        try:
+            typ = str(s1.feature(tt).getType())
+        except Exception:
+            typ = tt
+        if "Direct" in typ or (tt.lower().startswith("d") and "Def" not in tt):
             try:
-                i1.set(key, val)
-            except Exception:
-                continue
-        if "mg1" not in [str(x) for x in i1.feature().tags()]:
-            try:
-                i1.create("mg1", "Multigrid")
+                s1.feature(tt).active(False)
             except Exception:
                 pass
-        print(
-            f"  Freq linear solver: iterative/GMRES ({sol_tag}/{s_tag}/{i_tag})",
-            flush=True,
-        )
-    except Exception as exc:
-        print(f"  WARN: could not switch freq solver to iterative ({exc})", flush=True)
+
+    i_tag = "i1"
+    if i_tag not in [str(x) for x in s1.feature().tags()]:
+        try:
+            s1.create(i_tag, "Iterative")
+        except Exception as exc:
+            print(f"  WARN: Iterative solver create failed ({exc})", flush=True)
+            return
+    i1 = s1.feature(i_tag)
+    try:
+        i1.active(True)
+    except Exception:
+        pass
+    for key, val in (
+        ("linsolver", "gmres"),
+        ("itrestart", 50),
+        ("maxlinit", 20000),
+        ("rhob", 400),
+        ("prefun", "mg"),
+    ):
+        try:
+            i1.set(key, val)
+        except Exception:
+            continue
+    if "mg1" not in [str(x) for x in i1.feature().tags()]:
+        try:
+            i1.create("mg1", "Multigrid")
+        except Exception:
+            pass
+    for t in list(s1.feature().tags()):
+        tt = str(t)
+        try:
+            typ = str(s1.feature(tt).getType())
+        except Exception:
+            typ = tt
+        if "FullyCoupled" in typ or "Segregated" in typ or tt.startswith("fc"):
+            for key, val in (("linsolver", i_tag), ("linearsolver", i_tag)):
+                try:
+                    s1.feature(tt).set(key, val)
+                    break
+                except Exception:
+                    continue
+    print(
+        f"  Freq linear solver: iterative/GMRES ({sol_tag}/{s_tag}/{i_tag})",
+        flush=True,
+    )
 
 
 def _log_mesh_stats(comp: Any, mesh_tag: str = "mesh1", *, enforce_limit: bool = True) -> None:

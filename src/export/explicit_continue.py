@@ -210,7 +210,7 @@ S, LE
 *Node Output, nset=PLATE_REF
 RF, U
 *Energy Output
-ALLIE, ALLKE, ALLSE, ALLVD, ALLWK, ALLPD
+ALLIE, ALLKE, ALLAE, ALLSE, ALLVD, ALLWK, ALLPD
 *Node Output, nset=PLATE_FIXED_REF
 RF, U
 *Restart, write, overlay, number interval={segment.restart_read_interval}

@@ -1261,7 +1261,7 @@ S, LE
 *Node Output, nset=PLATE_REF
 RF, U
 *Energy Output
-ALLIE, ALLKE, ALLSE, ALLVD, ALLWK, ALLPD
+ALLIE, ALLKE, ALLAE, ALLSE, ALLVD, ALLWK, ALLPD
 """
         )
         if use_fixed_bottom and fixed_ref_node_id is not None:

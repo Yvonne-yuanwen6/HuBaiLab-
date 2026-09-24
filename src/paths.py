@@ -25,7 +25,7 @@ ACTIVE_CASE_JSON = OUTPUT_ROOT / "active_case.json"
 
 
 def _env_output_subdir(env_name: str, default: Path) -> Path:
-    """Allow per-run redirect of export/jobs/post (e.g. batch tree under 批量构型/)."""
+    """Allow per-run redirect of export/jobs/post (e.g. batch tree under param_batch/)."""
     raw = os.environ.get(env_name, "").strip()
     return Path(raw).resolve() if raw else default
 
@@ -40,9 +40,11 @@ CAD_VERIFIED_ROOT = CAD_ROOT / "verified"
 PREVIEWS_ROOT = OUTPUT_ROOT / "previews"
 REPORTS_ROOT = OUTPUT_ROOT / "reports"
 
-# Linux workstation (art@172.20.200.93) — mechanical disk mount
+# Linux workstation (art@172.20.200.93)
+# 2026-09-15: mechanical disk /media/art/file/... is retired (dead). Do not use it.
+# Interim remote root = SSD bootstrap copy until a new path is announced.
 HUBAI_REMOTE_HOST = "art@172.20.200.93"
-HUBAI_REMOTE_ROOT = "/media/art/file/XiangLang/Lattice/LWY/HuBaiLab"
+HUBAI_REMOTE_ROOT = "/home/art/HuBaiLab_ssd"
 
 # COMSOL launcher: prefer local Windows 6.3, else art Linux 5.6
 _WIN_COMSOL_BIN = Path(r"D:\Apps\COMSOL\COMSOL63\Multiphysics\bin\win64\comsol.exe")
@@ -50,7 +52,7 @@ _LINUX_COMSOL_BIN = "/home/art/APP/comsol56/multiphysics/bin/comsol"
 COMSOL_DEFAULT_BIN = (
     str(_WIN_COMSOL_BIN) if _WIN_COMSOL_BIN.is_file() else _LINUX_COMSOL_BIN
 )
-# Per-case redirect (e.g. batch tree under output/comsol_jobs/批量构型/{case_id}/)
+# Per-case redirect (e.g. batch tree under output/comsol_jobs/param_batch/{case_id}/)
 COMSOL_JOBS_ROOT = _env_output_subdir("HU_BAI_COMSOL_JOBS_ROOT", OUTPUT_ROOT / "comsol_jobs")
 COMSOL_BATCH_PREFS_DIR = PROJECT_ROOT / "config" / "comsol_batch"
 

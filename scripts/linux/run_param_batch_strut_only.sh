@@ -20,7 +20,7 @@ ONLY="${ONLY:-}"
 FORCE="${FORCE:-0}"
 UNITCELL_TIMEOUT="${UNITCELL_TIMEOUT:-600}"
 NICE_LEVEL="${NICE_LEVEL:-10}"
-INDEX="${INDEX:-$ROOT/output/cad/批量构型/_batch_index.json}"
+INDEX="${INDEX:-$ROOT/output/cad/param_batch/_batch_index.json}"
 
 mkdir -p "$(dirname "$LOG")"
 

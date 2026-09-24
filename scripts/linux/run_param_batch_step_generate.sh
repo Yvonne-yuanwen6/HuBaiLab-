@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ordered batch: 1x1 + 444 STEP -> output/cad/批量构型/{id}/
+# Ordered batch: 1x1 + 444 STEP -> output/cad/param_batch/{id}/
 #
 #   bash scripts/linux/run_param_batch_step_generate.sh
 #   nohup bash scripts/linux/run_param_batch_step_generate.sh >> output/logs/param_batch_step.log 2>&1 &
@@ -7,7 +7,7 @@
 # Env: FORCE=1 ONLY="af2q0_deq2_k1 …" TOL_REL=0.03 STOP_ON_FAIL=1 JOBS=2
 #      BATCH_STEP_POST_HEAL=0  # skip mass-gated Gmsh heal after 444 write
 #
-# Locked scheme (see docs/批量构型STEP生成说明.md):
+# Locked scheme (see docs/param_batch_STEP生成说明.md):
 #   444 prefers ocp_seed_scale*_zcopy_* (iz0 fuse + Z-copy);
 #   accept only gmsh volume_count==1; --jobs>1 OK (QC measure in child process).
 #   Default: structure-preserving post-heal on _444.step (mass_ratio∈[0.95,1.05]).
@@ -37,7 +37,7 @@ ARRAY_TIMEOUT="${ARRAY_TIMEOUT:-5400}"
 BATCH_STEP_POST_HEAL="${BATCH_STEP_POST_HEAL:-1}"
 export BATCH_STEP_POST_HEAL
 
-mkdir -p "$(dirname "$LOG")" "$ROOT/output/cad/批量构型"
+mkdir -p "$(dirname "$LOG")" "$ROOT/output/cad/param_batch"
 
 log() { echo "[$(date -Iseconds)] $*" | tee -a "$LOG"; }
 touch_progress() { date -Iseconds > "$PROGRESS"; echo "phase=$1" >> "$PROGRESS"; }
@@ -62,8 +62,8 @@ preflight() {
     log "ABORT: insufficient free memory"
     exit 2
   fi
-  if [[ ! -f "$ROOT/output/cad/批量构型/_batch_index.json" ]]; then
-    log "ABORT: missing output/cad/批量构型/_batch_index.json"
+  if [[ ! -f "$ROOT/output/cad/param_batch/_batch_index.json" ]]; then
+    log "ABORT: missing output/cad/param_batch/_batch_index.json"
     exit 3
   fi
 }
@@ -75,7 +75,7 @@ touch_progress "start"
 
 args=(
   scripts/run_param_batch_step_generate.py
-  --index "$ROOT/output/cad/批量构型/_batch_index.json"
+  --index "$ROOT/output/cad/param_batch/_batch_index.json"
   --tol-rel "$TOL_REL"
   --unitcell-attempt-timeout "$UNITCELL_TIMEOUT"
   --array-attempt-timeout "$ARRAY_TIMEOUT"

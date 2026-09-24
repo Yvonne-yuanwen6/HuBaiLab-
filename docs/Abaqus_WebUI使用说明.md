@@ -22,7 +22,7 @@
 | 变量 / 配置 | 默认值 |
 |-------------|--------|
 | 主机 | `art@172.20.200.93`（`HUBAI_REMOTE_HOST`） |
-| 仓库根 | `/media/art/file/XiangLang/Lattice/LWY/HuBaiLab`（`HUBAI_REMOTE_ROOT`） |
+| 仓库根（临时） | `/home/art/HuBaiLab_ssd`（`HUBAI_REMOTE_ROOT`；旧机械盘路径已废弃） |
 | SSH 私钥 | 环境变量 `HU_BAI_SSH_KEY`（可选） |
 
 ---

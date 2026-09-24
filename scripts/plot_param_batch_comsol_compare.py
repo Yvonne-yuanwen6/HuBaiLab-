@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Batch COMSOL isolation compare plots for 批量构型 (6 multi-panel PNGs).
+"""Batch COMSOL isolation compare plots for param_batch (6 multi-panel PNGs).
 
 Layouts (confirmed):
   A_Q_by_k.png          — 1×3: each κ, overlay Q curves
@@ -26,8 +26,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-BATCH_CAD = ROOT / "output" / "cad" / "批量构型"
-BATCH_COMSOL = ROOT / "output" / "comsol_jobs" / "批量构型"
+BATCH_CAD = ROOT / "output" / "cad" / "param_batch"
+BATCH_COMSOL = ROOT / "output" / "comsol_jobs" / "param_batch"
 DEFAULT_OUT = BATCH_COMSOL / "_compare"
 DEFAULT_RUN_SLUG = "fig28_p1_300g"
 
@@ -467,7 +467,7 @@ def write_summary_stub(out_dir: Path, case_ids: list[str], *, run_slug: str, emp
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="批量构型 COMSOL 对比图（6 PNG）")
+    parser = argparse.ArgumentParser(description="param_batch COMSOL 对比图（6 PNG）")
     parser.add_argument("--empty", action="store_true", help="强制空图预览（不读 CSV）")
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT))
     parser.add_argument("--run-slug", default=DEFAULT_RUN_SLUG)

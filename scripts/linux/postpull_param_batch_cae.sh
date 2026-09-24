@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Extract stress-strain for one 批量构型 CAE case (hierarchical paths).
+# Extract stress-strain for one param_batch CAE case (hierarchical paths).
 # Usage:
 #   bash scripts/linux/postpull_param_batch_cae.sh af2q0_deq2_k1
 #   bash scripts/linux/postpull_param_batch_cae.sh --all-completed
@@ -10,7 +10,7 @@ cd "$ROOT"
 export PATH="${HOME}/APP/abaqus2022/Commands:/usr/bin:/bin:${PATH:-}"
 export PYTHONPATH="$ROOT"
 
-BATCH="批量构型"
+BATCH="param_batch"
 RUN="${BATCH_SIM_RUN_SLUG:-cae_tet0p6mm80_5mmin_paperbox}"
 
 postpull_one() {

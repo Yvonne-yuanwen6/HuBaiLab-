@@ -562,7 +562,7 @@ def heal_step_for_cae(
 
 
 def cad_heal_report_path(case_id: str, batch_root: str | None = None) -> str:
-    root = batch_root or os.path.join("output", "cad", "批量构型")
+    root = batch_root or os.path.join("output", "cad", "param_batch")
     return os.path.join(root, case_id, f"{case_id}_444_heal.json")
 
 

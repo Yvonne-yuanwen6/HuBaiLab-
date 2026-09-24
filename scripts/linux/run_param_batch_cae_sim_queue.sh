@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Param-batch Abaqus queue: CAE auto-mesh only, hierarchical export/jobs/post under 批量构型/.
+# Param-batch Abaqus queue: CAE auto-mesh only, hierarchical export/jobs/post under param_batch/.
 #
 # Flow:
 #   1) Submit already-exported INPs (up to BATCH_SIM_MAX_PARALLEL, background)
@@ -32,7 +32,7 @@ cd "$ROOT"
 export PATH="${HOME}/APP/abaqus2022/Commands:/usr/bin:/bin:${PATH:-}"
 export PYTHONPATH="$ROOT"
 
-BATCH_NAME="批量构型"
+BATCH_NAME="param_batch"
 VERIFIED="$ROOT/output/cad/verified"
 RUN_SLUG="cae_tet0p6mm80_5mmin_paperbox"
 CPUS="${BATCH_SIM_CPUS:-48}"
@@ -96,7 +96,7 @@ import json, os
 from pathlib import Path
 
 root = Path(".").resolve()
-batch = root / "output" / "cad" / "批量构型"
+batch = root / "output" / "cad" / "param_batch"
 st = json.loads((batch / "_batch_status.json").read_text(encoding="utf-8"))
 idx = json.loads((batch / "_batch_index.json").read_text(encoding="utf-8"))
 only = [x for x in os.environ.get("BATCH_SIM_ONLY", "").split() if x]
@@ -144,18 +144,18 @@ for cid in ordered:
     })
 
 out = {
-    "name": "批量构型_abaqus_cae",
-    "cad_root": "output/cad/批量构型",
-    "export_root": "output/export/批量构型",
-    "jobs_root": "output/jobs/批量构型",
-    "post_root": "output/post/批量构型",
+    "name": "param_batch_abaqus_cae",
+    "cad_root": "output/cad/param_batch",
+    "export_root": "output/export/param_batch",
+    "jobs_root": "output/jobs/param_batch",
+    "post_root": "output/post/param_batch",
     "run_slug": os.environ.get("BATCH_SIM_RUN_SLUG", "cae_tet0p6mm80_5mmin_paperbox"),
     "mesh_policy": "CAE automatic tet only; failure uses CAE strategy ladder then skip",
     "cases": {r["case_id"]: r for r in ready},
     "queue": [r["case_id"] for r in ready],
 }
-Path("output/export/批量构型").mkdir(parents=True, exist_ok=True)
-Path("output/export/批量构型/_batch_sim_index.json").write_text(
+Path("output/export/param_batch").mkdir(parents=True, exist_ok=True)
+Path("output/export/param_batch/_batch_sim_index.json").write_text(
     json.dumps(out, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
 )
 for r in ready:
@@ -185,7 +185,7 @@ load_skipped() {
     "$PY" - <<'PY'
 import json
 from pathlib import Path
-p = Path("output/export/批量构型/_batch_sim_skipped.json")
+p = Path("output/export/param_batch/_batch_sim_skipped.json")
 if not p.is_file():
     raise SystemExit
 data = json.loads(p.read_text(encoding="utf-8"))
@@ -311,7 +311,7 @@ case_params() {
   local cid="$1"
   "$PY" - <<PY
 import json
-d=json.load(open("output/export/批量构型/_batch_sim_index.json",encoding="utf-8"))
+d=json.load(open("output/export/param_batch/_batch_sim_index.json",encoding="utf-8"))
 c=d["cases"]["$cid"]
 print(f'{c["Af"]} {c["Q"]} {c["deq_mm"]} {c["cad_step"]}')
 PY
@@ -331,7 +331,7 @@ mark_skip() {
   BATCH_SIM_SKIP_CID="$cid" BATCH_SIM_SKIP_REASON="$reason" "$PY" - <<'PY'
 import json, datetime, os
 from pathlib import Path
-p = Path("output/export/批量构型/_batch_sim_skipped.json")
+p = Path("output/export/param_batch/_batch_sim_skipped.json")
 data = {"updated_at": datetime.datetime.now().isoformat(timespec="seconds"), "skipped": {}}
 if p.is_file():
     try:
@@ -801,10 +801,10 @@ write_status() {
   "$PY" - <<'PY'
 import json, datetime
 from pathlib import Path
-idx = json.loads(Path("output/export/批量构型/_batch_sim_index.json").read_text(encoding="utf-8"))
+idx = json.loads(Path("output/export/param_batch/_batch_sim_index.json").read_text(encoding="utf-8"))
 run = idx["run_slug"]
 skipped = {}
-sp = Path("output/export/批量构型/_batch_sim_skipped.json")
+sp = Path("output/export/param_batch/_batch_sim_skipped.json")
 if sp.is_file():
     try:
         skipped = json.loads(sp.read_text(encoding="utf-8")).get("skipped") or {}
@@ -812,10 +812,10 @@ if sp.is_file():
         skipped = {}
 rows = []
 for cid in idx["queue"]:
-    jd = Path("output/jobs/批量构型") / cid / run
+    jd = Path("output/jobs/param_batch") / cid / run
     sta = jd / f"{run}.sta"
     lck = jd / f"{run}.lck"
-    inp = Path("output/export/批量构型") / cid / run / f"{run}.inp"
+    inp = Path("output/export/param_batch") / cid / run / f"{run}.inp"
     status = "pending"
     progress = None
     if cid in skipped:
@@ -836,7 +836,7 @@ out = {
     "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
     "cases": rows,
 }
-Path("output/export/批量构型/_batch_sim_status.json").write_text(
+Path("output/export/param_batch/_batch_sim_status.json").write_text(
     json.dumps(out, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
 )
 print(json.dumps(out, ensure_ascii=False, indent=2))

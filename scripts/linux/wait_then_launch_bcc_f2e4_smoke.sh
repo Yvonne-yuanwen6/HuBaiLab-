@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wait until 批量构型 paperbox jobs finish, then launch ONE f2e4 smoke.
+# Wait until param_batch paperbox jobs finish, then launch ONE f2e4 smoke.
 # Avoid touching /media/art/file until launch (FUSE can hang).
 set -uo pipefail
 ROOT=/media/art/file/XiangLang/Lattice/LWY/HuBaiLab

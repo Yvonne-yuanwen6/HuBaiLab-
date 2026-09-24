@@ -149,6 +149,7 @@ def configure_matplotlib_chinese() -> str | None:
         {
             "font.sans-serif": sans,
             "axes.unicode_minus": False,
+            "mathtext.fontset": "stix",
             "font.size": 11,
         }
     )

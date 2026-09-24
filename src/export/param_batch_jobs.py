@@ -92,9 +92,11 @@ def unitcell_ocp_job(payload: dict[str, Any]) -> dict[str, Any]:
         kwargs["center_overlap_mm"] = float(payload["center_overlap_mm"])
     if payload.get("centre_extension_mm") is not None:
         kwargs["centre_extension_mm"] = float(payload["centre_extension_mm"])
-        kwargs["corner_extension_mm"] = float(
-            payload.get("corner_extension_mm") or payload["centre_extension_mm"]
-        )
+    if payload.get("corner_extension_mm") is not None:
+        kwargs["corner_extension_mm"] = float(payload["corner_extension_mm"])
+    elif payload.get("centre_extension_mm") is not None:
+        # Keep prior behaviour: corner follows centre when only centre is set.
+        kwargs["corner_extension_mm"] = float(payload["centre_extension_mm"])
     if profile == "ellipse":
         kwargs["ellipse_sweep_mode"] = "frenet"
     return export_q1_ocp_glue_unitcell(pipe_parts, out_step, **kwargs)

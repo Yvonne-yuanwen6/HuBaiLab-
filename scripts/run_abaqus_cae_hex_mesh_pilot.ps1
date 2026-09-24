@@ -10,6 +10,9 @@ param(
     [string]$MeshQuality = "lattice_contact",
     [double]$RodDiameterMm = 2.0,
     [double]$RodsPerDiameter = 3.0,
+    [ValidateSet("C3D4", "C3D10", "C3D10M")]
+    [string]$ElementType = "C3D4",
+    [switch]$VirtualTopology,
     [switch]$MergeSolids
 )
 
@@ -45,12 +48,14 @@ $env:HU_BAI_MESH_MODE = $MeshMode
 $env:HU_BAI_MESH_QUALITY = $MeshQuality
 $env:HU_BAI_ROD_DIAMETER = "$RodDiameterMm"
 $env:HU_BAI_RODS_PER_DIAMETER = "$RodsPerDiameter"
+$env:HU_BAI_ELEM_TYPE = $ElementType
+if ($VirtualTopology) { $env:HU_BAI_VIRTUAL_TOPOLOGY = "1" } else { Remove-Item Env:HU_BAI_VIRTUAL_TOPOLOGY -ErrorAction SilentlyContinue }
 if ($MergeSolids) { $env:HU_BAI_MERGE_SOLIDS = "1" } else { Remove-Item Env:HU_BAI_MERGE_SOLIDS -ErrorAction SilentlyContinue }
 
 Write-Host "=== Abaqus CAE built-in mesh pilot ===" -ForegroundColor Cyan
 Write-Host "  STEP: $StepPath"
 Write-Host "  part: $PartName (mergeSolids=$($MergeSolids.IsPresent))"
-Write-Host "  mode: $MeshMode quality=$MeshQuality (seed ${SeedMm} mm)"
+Write-Host "  mode: $MeshMode quality=$MeshQuality elem=$ElementType rods/d=$RodsPerDiameter (seed ${SeedMm} mm) vtopo=$($VirtualTopology.IsPresent)"
 Write-Host "  OUT:  $OutInp"
 
 & abaqus cae noGUI=scripts\abaqus_cae_hex_mesh_pilot.py

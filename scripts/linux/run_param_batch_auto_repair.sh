@@ -35,7 +35,7 @@ UNITCELL_TIMEOUT="${UNITCELL_TIMEOUT:-600}"
 ARRAY_TIMEOUT="${ARRAY_TIMEOUT:-5400}"
 NICE_LEVEL="${NICE_LEVEL:-10}"
 
-mkdir -p "$(dirname "$LOG")" "$ROOT/output/cad/批量构型"
+mkdir -p "$(dirname "$LOG")" "$ROOT/output/cad/param_batch"
 
 log() { echo "[$(date -Iseconds)] $*" | tee -a "$LOG"; }
 touch_progress() { date -Iseconds > "$PROGRESS"; echo "phase=$1" >> "$PROGRESS"; }
@@ -68,7 +68,7 @@ touch_progress "start"
 
 args=(
   scripts/run_param_batch_step_generate.py
-  --index "$ROOT/output/cad/批量构型/_batch_index.json"
+  --index "$ROOT/output/cad/param_batch/_batch_index.json"
   --tol-rel "$TOL_REL"
   --unitcell-attempt-timeout "$UNITCELL_TIMEOUT"
   --array-attempt-timeout "$ARRAY_TIMEOUT"

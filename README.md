@@ -314,6 +314,8 @@ Fig. 3.3 目标批量（3×3×3 SFBLS Q=0.5/1/1.5 fast80）见 `scripts/submit_h
 | `validate_step_solidworks.py` | STEP 单实体校验（导入 SW 前） |
 | `sw_step_to_xt.py` | STEP → Parasolid X_T |
 | `extract_stress_strain_from_odb.py` | ODB → 应力–应变 CSV（需 `abaqus python`） |
+| `export_odb_field_contours_cae.py` | ODB → S.Mises/LE 场云图 PNG（需 `abaqus cae noGUI`） |
+| `run_param_batch_field_contours.py` / `.ps1` | `param_batch` 场云图批导出 + 拼图 |
 
 ## 几何参数
 

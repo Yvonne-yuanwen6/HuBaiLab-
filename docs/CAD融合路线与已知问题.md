@@ -2,7 +2,9 @@
 
 Hu & Bai 论文 Fig.2.6 点阵 CAD：**8 根扫掠管 + 虚拟 L³ 盒切割（`paper_box`）**，**无节点球**。  
 仿真 export 只认 `output/cad/verified/` 下已验收 STEP；压缩 INP 流程见 [`Abaqus_CAD实体压缩说明.md`](Abaqus_CAD实体压缩说明.md)。  
-单胞 OCC 策略细节见 [`单胞融合策略.md`](单胞融合策略.md)。
+单胞 OCC 策略细节见 [`单胞融合策略.md`](单胞融合策略.md)。  
+**批量参量案**（含细杆 `deq=1.5`）梯子与成功配方见 [`param_batch_STEP生成说明.md`](param_batch_STEP生成说明.md) §3；逐案路径见 [`param_batch_STEP生成情况明细.md`](param_batch_STEP生成情况明细.md)。  
+细杆锁定（2026-08-04）：1×1 `centre_stub_corner_ext+ext=1.5` → 444 `ocp_noclip_batch64`；勿默认 `both_end`（OCC 邻胞常空融）。
 
 ---
 

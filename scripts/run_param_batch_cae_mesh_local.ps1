@@ -28,8 +28,11 @@ $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $false
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $Root
+# WindowsApps ``python`` is often a Store stub; this repo standardizes on ``py -3``.
+if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
+    throw "py launcher not found; install Python or fix PATH"
+}
 
-$Slug = "cae_tet0p6mm80_5mmin_paperbox"
 $ProtocolSeed = 0.6
 $ProtocolQuality = "fast"
 
@@ -41,19 +44,28 @@ if (-not $AllowNonProtocol) {
     $MeshQuality = $ProtocolQuality
 }
 
-$BatchCad = & python -c "from pathlib import Path; root=Path(r'$Root')/'output'/'cad';
-cands=[p for p in root.iterdir() if p.is_dir() and (p/'_batch_index.json').is_file()];
-print(cands[0] if cands else '')"
-$BatchCad = "$BatchCad".Trim()
+# Slug encodes seed so L10 similar-scale remesh (e.g. 0.3) does not overwrite protocol 0.6.
+$seedTag = ("{0}" -f $SeedMm).Replace(".", "p")
+$Slug = "cae_tet${seedTag}mm80_5mmin_paperbox"
+
+# Prefer ASCII param_batch CAD tree (legacy Chinese folder may still exist until cleanup).
+$CadRoot = Join-Path $Root "output\cad"
+$BatchCadPreferred = Join-Path $CadRoot "param_batch"
+if (Test-Path -LiteralPath (Join-Path $BatchCadPreferred "_batch_index.json")) {
+    $BatchCad = $BatchCadPreferred
+} else {
+    $BatchCad = Get-ChildItem -LiteralPath $CadRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "_batch_index.json") } |
+        Select-Object -First 1 -ExpandProperty FullName
+}
 if (-not $BatchCad -or -not (Test-Path -LiteralPath $BatchCad)) {
     throw "Cannot find cad batch folder with _batch_index.json under output/cad"
 }
 $IndexPath = Join-Path $BatchCad "_batch_index.json"
-# Windows Abaqus Explicit cannot use Chinese cwd (charmap UnicodeEncodeError).
-# CAD index may stay under the Chinese folder; all export/jobs/post use ASCII.
+# All export/jobs/post use ASCII param_batch.
 $SimBatchName = "param_batch"
 Write-Host ("  CAD index: {0}" -f $BatchCad) -ForegroundColor DarkGray
-Write-Host ("  Sim tree:  output/{{export,jobs,post}}/{0}/  (ASCII)" -f $SimBatchName) -ForegroundColor DarkGray
+Write-Host ("  Sim tree:  output/{{export,jobs,post}}/{0}/" -f $SimBatchName) -ForegroundColor DarkGray
 
 $DefaultOrder = @(
     # Prefer cases that still need protocol mesh (orchestrator may override via -Only).
@@ -74,9 +86,9 @@ $freeGb = [math]::Round($os.FreePhysicalMemory / 1MB, 1)
 $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
 Write-Host "=== LOCAL == SERVER protocol (BATCH_SIM_MESH_PROTOCOL=1) ===" -ForegroundColor Cyan
 Write-Host ("  CPU: {0}c/{1}t | RAM {2}GB free={3}GB | JobMemWrite={4}% (mesh serial)" -f $cpu.NumberOfCores, $cpu.NumberOfLogicalProcessors, $totalGb, $freeGb, $JobMemoryPct)
-Write-Host "  Heal: structure-preserving v3 | CAE: seed=0.6 fast vtopo C3D4 | Export: 80%/5mm/min/paper/contact"
+Write-Host ("  Heal: structure-preserving v3 | CAE: seed={0} {1} vtopo C3D4 | Export: 80%/5mm/min/paper/contact" -f $SeedMm, $MeshQuality)
 Write-Host "  slug: $Slug"
-if ($AllowNonProtocol) { Write-Host "  WARN: AllowNonProtocol — results NOT comparable to server mainline" -ForegroundColor Yellow }
+if ($AllowNonProtocol) { Write-Host "  WARN: AllowNonProtocol — comparison/diagnostic slug (not server 0.6 mainline)" -ForegroundColor Yellow }
 
 $logDir = Join-Path $Root "output\logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
@@ -100,11 +112,14 @@ Remove-Item Env:HU_BAI_MERGE_SOLIDS -ErrorAction SilentlyContinue
 function Get-CaseParams([string]$cid) {
     $c = $idx.cases.$cid
     if (-not $c) { throw "case not in index: $cid" }
+    $L = 20.0
+    if ($null -ne $c.L_mm) { $L = [double]$c.L_mm }
     return @{
         Af  = [double]$c.Af
         Q   = [double]$c.Q
         deq = [double]$c.deq_mm
         k   = [double]$c.k
+        L   = $L
     }
 }
 
@@ -116,7 +131,7 @@ function Write-ProtocolManifest([string]$path, [hashtable]$obj) {
 $ok = @(); $fail = @(); $skip = @()
 
 foreach ($cid in $cases) {
-    $stepUse = & python -c "from pathlib import Path
+    $stepUse = & py -3 -c "from pathlib import Path
 root=Path(r'$Root'); cid='$cid'; batch=Path(r'$BatchCad')
 ver=root/'output'/'cad'/'verified'/f'batch_{cid}_paper_box_array.step'
 local=batch/cid/f'{cid}_444.step'
@@ -147,6 +162,7 @@ print(p if p else '')"
     $deq = $params.deq
     $Af = $params.Af
     $Q = $params.Q
+    $Lmm = $params.L
 
     if ($SkipExisting -and (Test-Path -LiteralPath $meshOut) -and ((Get-Item -LiteralPath $meshOut).Length -gt 1MB)) {
         Write-Host "REUSE mesh $cid" -ForegroundColor DarkGray
@@ -160,7 +176,7 @@ print(p if p else '')"
     } else {
         $freeNow = [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1MB, 1)
         Write-Host ""
-        Write-Host ("--- {0} Af={1} Q={2} deq={3} freeRAM={4}GB ---" -f $cid, $Af, $Q, $deq, $freeNow) -ForegroundColor Cyan
+        Write-Host ("--- {0} Af={1} Q={2} deq={3} L={4} freeRAM={5}GB ---" -f $cid, $Af, $Q, $deq, $Lmm, $freeNow) -ForegroundColor Cyan
         Write-Host ("  STEP: {0}" -f $stepUse)
         Add-Content $runLog ("MESH start {0} deq={1} step={2}" -f $cid, $deq, $stepUse)
 
@@ -182,7 +198,7 @@ print(p if p else '')"
             Write-Host "  [1/3] HEAL (server-identical v3) ..." -ForegroundColor Cyan
             $prevEap = $ErrorActionPreference
             $ErrorActionPreference = "Continue"
-            $healOut = & python -c @"
+            $healOut = & py -3 -c @"
 import json, os, sys
 from pathlib import Path
 sys.path.insert(0, r'$Root')
@@ -259,10 +275,10 @@ print('HEAL_META used_heal=%s' % report.get('used_heal'))
         $exportLog = Join-Path $outDir "cae_export_local.log"
         $exArgs = @(
             "scripts/run_hu_bai_bcc_solid_cad_cae_tet_export.py",
-            "--cells", "4", "--Q", "$Q", "--Af", "$Af", "--rod-diameter", "$deq",
+            "--cells", "4", "--L", "$Lmm", "--Q", "$Q", "--Af", "$Af", "--rod-diameter", "$deq",
             "--profile", "fast",
             "--cad", "$stepUse",
-            "--cae-seed", "0.6",
+            "--cae-seed", "$SeedMm",
             "--cae-element-type", "C3D4",
             "--cae-mesh-quality", "lattice_contact",
             "--strain", "0.80", "--load-rate-mm-min", "5",
@@ -279,7 +295,7 @@ print('HEAL_META used_heal=%s' % report.get('used_heal'))
         # (same as server export_from_mesh); actual mesh already built with protocol fast+vtopo.
         $prevEap = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
-        & python @exArgs 2>&1 | Tee-Object -FilePath $exportLog
+        & py -3 @exArgs 2>&1 | Tee-Object -FilePath $exportLog
         $ErrorActionPreference = $prevEap
         if (-not ((Test-Path -LiteralPath $compOut) -and ((Get-Item -LiteralPath $compOut).Length -gt 1MB))) {
             Write-Host "FAIL export $cid — no compression INP" -ForegroundColor Red
@@ -299,6 +315,7 @@ print('HEAL_META used_heal=%s' % report.get('used_heal'))
         Q                  = $Q
         deq_mm             = $deq
         k                  = $params.k
+        L_mm               = $Lmm
         step               = $stepUse
         mesh_seed_mm       = $SeedMm
         mesh_quality       = $MeshQuality

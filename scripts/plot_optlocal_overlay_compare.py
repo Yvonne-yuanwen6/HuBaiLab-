@@ -2,7 +2,7 @@
 """Overlay ref fig28_p1_300g vs local-opt fig28_p1_300g_optlocal for the 5 ref cases.
 
 Reads backup CSVs (preferred) or live ref slug; writes per-case + summary PNGs under
-output/comsol_jobs/批量构型/_compare_opt/.
+output/comsol_jobs/param_batch/_compare_opt/.
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-BATCH = ROOT / "output" / "comsol_jobs" / "批量构型"
+BATCH = ROOT / "output" / "comsol_jobs" / "param_batch"
 REF_CASES = [
     "af2q0_deq2_k1",
     "af2q0p5_deq2_k1",

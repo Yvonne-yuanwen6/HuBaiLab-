@@ -192,7 +192,7 @@ def _ocp_fuse_group_sequential(
                     if new_mass < prev_mass + min_step_delta:
                         raise RuntimeError(
                             f"{label}: fuse step {idx}/{len(shapes)} mass drop "
-                            f"({new_mass:.1f} < {prev_mass + min_step_delta:.1f} mm³) "
+                            f"({new_mass:.1f} < {prev_mass + min_step_delta:.1f} mm^3) "
                             f"(glue={g}, fuzzy={fz:g})"
                         )
                     if g != glue or abs(fz - float(fuzzy_mm)) > 1e-12:
@@ -206,7 +206,7 @@ def _ocp_fuse_group_sequential(
                     fused_ok = True
                     print(
                         f"  {label}: fused {idx}/{len(shapes)} "
-                        f"mass={new_mass:.1f} mm³",
+                        f"mass={new_mass:.1f} mm^3",
                         flush=True,
                     )
                     break
@@ -248,13 +248,13 @@ def _ocp_fuse_group_batch(
     fused_mass = ocp_mass(fused)
     if fused_mass < min_mass:
         raise RuntimeError(
-            f"{label}: batch fuse mass {fused_mass:.1f} mm³ "
-            f"< 95% of expected {expected:.1f} mm³ "
+            f"{label}: batch fuse mass {fused_mass:.1f} mm^3 "
+            f"< 95% of expected {expected:.1f} mm^3 "
             f"(glue={glue}, fuzzy={fuzzy_mm:g} mm)"
         )
     print(
         f"  {label}: batch fused {len(shapes)} piece(s) "
-        f"mass={fused_mass:.1f} mm³ (glue={glue}, fuzzy={fuzzy_mm:g} mm)",
+        f"mass={fused_mass:.1f} mm^3 (glue={glue}, fuzzy={fuzzy_mm:g} mm)",
         flush=True,
     )
     return fused
@@ -604,7 +604,7 @@ def export_ocp_paper_box_zslab_fuse(
 
     cell_mass = ocp_mass(cell_shapes[0])
     print(
-        f"  OCP unit-cell mass seed={seed_mass:.1f} clipped={cell_mass:.1f} mm³",
+        f"  OCP unit-cell mass seed={seed_mass:.1f} clipped={cell_mass:.1f} mm^3",
         flush=True,
     )
 
@@ -625,8 +625,8 @@ def export_ocp_paper_box_zslab_fuse(
     expected_mass = cell_mass * n_cells
     if fused_mass < 0.95 * expected_mass:
         raise RuntimeError(
-            f"OCP z-slab iz={iz_i} mass {fused_mass:.1f} mm³ "
-            f"< 95% of expected {expected_mass:.1f} mm³"
+            f"OCP z-slab iz={iz_i} mass {fused_mass:.1f} mm^3 "
+            f"< 95% of expected {expected_mass:.1f} mm^3"
         )
 
     step_report = _ocp_write_fused_step(fused, path)
@@ -697,7 +697,7 @@ def export_ocp_paper_box_array_from_zslabs(
     expected = sum(slab_masses)
     if fused_mass < 0.95 * expected:
         raise RuntimeError(
-            f"OCP array merge mass {fused_mass:.1f} < 85% of {expected:.1f} mm³"
+            f"OCP array merge mass {fused_mass:.1f} < 85% of {expected:.1f} mm^3"
         )
 
     step_report = _ocp_write_fused_step(fused, path, skip_gmsh_heal=skip_gmsh_heal)
@@ -762,7 +762,7 @@ def export_ocp_paper_box_array_ladder_from_zslabs(
     expected = sum(slab_masses)
     if fused_mass < 0.95 * expected:
         raise RuntimeError(
-            f"OCP ladder merge mass {fused_mass:.1f} < 85% of {expected:.1f} mm³"
+            f"OCP ladder merge mass {fused_mass:.1f} < 85% of {expected:.1f} mm^3"
         )
 
     step_report = _ocp_write_fused_step(fused, path, skip_gmsh_heal=skip_gmsh_heal)

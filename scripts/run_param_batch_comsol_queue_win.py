@@ -42,7 +42,7 @@ except Exception:
     pass
 
 DEFAULT_COMSOL = Path(r"D:\Apps\COMSOL\COMSOL63\Multiphysics\bin\win64\comsol.exe")
-BATCH_NAME = "批量构型"
+BATCH_NAME = "param_batch"
 CAD_BATCH = ROOT / "output" / "cad" / BATCH_NAME
 COMSOL_BATCH = ROOT / "output" / "comsol_jobs" / BATCH_NAME
 RUN_SLUG = os.environ.get("BATCH_COMSOL_RUN_SLUG", "fig28_p1_300g")
@@ -226,7 +226,14 @@ def case_done(cid: str) -> bool:
     if not solved.is_file() or not csvp.is_file():
         return False
     txt = csvp.read_text(encoding="utf-8", errors="ignore")
-    return "FORMAT SAMPLE" not in txt and csvp.stat().st_size > 200
+    if "FORMAT SAMPLE" in txt or csvp.stat().st_size < 200:
+        return False
+    # Reject truncated extracts (e.g. OOM after 1–2 frequency points).
+    expect = int(round((FREQ_MAX - FREQ_MIN) / FREQ_STEP)) + 1
+    n = sum(1 for line in txt.splitlines() if line.strip() and not line.startswith("frequency"))
+    # Header + data rows: n data rows ≈ line count - 1
+    n_data = max(0, n - 1) if "frequency" in txt.splitlines()[0].lower() else n
+    return n_data >= max(5, expect - 2)
 
 
 def clear_artifacts(jd: Path) -> None:
@@ -497,7 +504,7 @@ def main() -> int:
     os.environ["COMSOL_BIN"] = COMSOL_BIN
 
     cad = find_cad_batch()
-    # Ensure Unicode batch name path exists for scripts that hardcode 批量构型
+    # Ensure Unicode batch name path exists for scripts that hardcode param_batch
     if cad.resolve() != CAD_BATCH.resolve():
         CAD_BATCH.parent.mkdir(parents=True, exist_ok=True)
         if not CAD_BATCH.exists():
